@@ -1,26 +1,27 @@
-# 环境变量（包含 API Key，绝对不能提交）
+# 环境变量（含 API Key，绝对不能提交）
 .env
 
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-venv/
-.venv/
-
-# 向量库数据
+# ChromaDB 向量库数据
 chroma_data/
 
 # 上传文件
 uploads/
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
 # IDE
 .vscode/
 .idea/
 
-# 系统文件
+# OS
 .DS_Store
 Thumbs.db
 
-# Docker
-docker-compose.override.yml
+# 测试数据
+data/test_docs/
+data/sample.db

@@ -9,6 +9,9 @@ openai>=1.30.0
 # 向量数据库
 chromadb>=0.5.0
 
+# 本地 Embedding（免费，无需 API）
+sentence-transformers>=2.7.0
+
 # 文档处理
 pypdf>=4.0.0
 python-docx>=1.0.0
