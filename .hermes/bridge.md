@@ -36,7 +36,24 @@
 3. `create_sql_agent()` 需加 `return_intermediate_steps=True`，从 intermediate_steps 提取 SQL 比回调更可靠
 4. LLM 非确定性导致个别查询偶发失败（正常现象，重试即可）
 
-**下一步：** Text-to-SQL visualizer.py（结果可视化/图表生成）
+**下一步：** Function Calling 工具封装（Day 15） 或 RAG FastAPI 接口（补跳过项）
+
+### 2026-05-15 · 会话3b [Hermes] — visualizer 完成
+
+**完成内容：**
+- `sql/visualizer.py` — QueryVisualizer 类（281行），自动分析 DataFrame → 选择图表类型 → Base64 图片
+- 三种图表：柱状图(bar) / 折线图(line) / 饼图(pie)
+- `test_sql.py` 扩展至 18 项测试，全部通过 ✅
+- 创建 `notes/` 目录：技术笔记永久保存（命名规范：`YYYY-MM-DD_类别_主题.md`）
+
+**踩坑记录：**
+1. `analyze()` 的日期检测必须在 bar 返回之前，否则日期列被误判为分类列
+2. Windows 上 matplotlib 中文字体用 SimHei，必须配合 `plt.rcParams['axes.unicode_minus'] = False`
+3. `matplotlib.use('Agg')` 必须在 `import pyplot` 之前，否则无效
+
+---
+
+### 2026-05-14 · 会话2 [Hermes]
 
 **完成：**
 - 确立「边写边讲」教学模式：每写一个模块，先讲框架来龙去脉+选型理由+可迁移概念

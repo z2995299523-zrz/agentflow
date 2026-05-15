@@ -146,6 +146,120 @@ def main() -> None:
         passed += 1
 
     # ========================================
+    # 测试8: 图表可视化
+    # ========================================
+    print("\n📌 测试8: 图表可视化 — QueryVisualizer")
+
+    import pandas as pd
+    from sql.visualizer import QueryVisualizer
+
+    visualizer = QueryVisualizer()
+
+    # 8a: analyze() — 柱状图识别
+    total += 1
+    df_bar = pd.DataFrame({
+        "产品": ["iPhone", "MacBook", "iPad", "AirPods", "充电宝"],
+        "销售额": [69990, 149990, 49990, 18990, 1490],
+    })
+    chart = visualizer.analyze(df_bar)
+    ok = chart == "bar"
+    if assert_test("analyze 识别柱状图", ok, f"结果={chart}"):
+        passed += 1
+
+    # 8b: analyze() — 饼图识别（占比数据）
+    total += 1
+    df_pie = pd.DataFrame({
+        "类别": ["电子产品", "食品", "日用品"],
+        "占比": [0.45, 0.30, 0.25],
+    })
+    chart = visualizer.analyze(df_pie)
+    ok = chart == "pie"
+    if assert_test("analyze 识别饼图", ok, f"结果={chart}"):
+        passed += 1
+
+    # 8c: analyze() — 折线图识别（日期列）
+    total += 1
+    df_line = pd.DataFrame({
+        "日期": ["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01"],
+        "销售额": [15000, 23000, 18000, 29000],
+    })
+    chart = visualizer.analyze(df_line)
+    ok = chart == "line"
+    if assert_test("analyze 识别折线图", ok, f"结果={chart}"):
+        passed += 1
+
+    # 8d: visualize() — 柱状图生成
+    total += 1
+    result = visualizer.visualize(df_bar, chart_type="bar", title="产品销售额")
+    ok = (result["success"] and len(result["image_base64"]) > 0
+          and result["chart_type"] == "bar")
+    if assert_test("柱状图 Base64 生成", ok,
+                   f"base64_len={len(result['image_base64'])}"):
+        passed += 1
+
+    # 8e: visualize() — 折线图生成
+    total += 1
+    result = visualizer.visualize(df_line, chart_type="line", title="月度销售趋势")
+    ok = (result["success"] and len(result["image_base64"]) > 0
+          and result["chart_type"] == "line")
+    if assert_test("折线图 Base64 生成", ok,
+                   f"base64_len={len(result['image_base64'])}"):
+        passed += 1
+
+    # 8f: visualize() — 饼图生成
+    total += 1
+    result = visualizer.visualize(df_pie, chart_type="pie", title="品类占比")
+    ok = (result["success"] and len(result["image_base64"]) > 0
+          and result["chart_type"] == "pie")
+    if assert_test("饼图 Base64 生成", ok,
+                   f"base64_len={len(result['image_base64'])}"):
+        passed += 1
+
+    # 8g: visualize() — auto 模式
+    total += 1
+    result = visualizer.visualize(df_bar, chart_type="auto")
+    ok = (result["success"] and len(result["image_base64"]) > 0
+          and result["chart_type"] == "bar")
+    if assert_test("auto 模式自动选择图表类型", ok,
+                   f"type={result['chart_type']}"):
+        passed += 1
+
+    # 8h: visualize() — 带 ID 列的 DataFrame（ID 应被排除）
+    total += 1
+    df_with_id = pd.DataFrame({
+        "id": [1, 2, 3, 4, 5],
+        "名称": ["iPhone", "MacBook", "iPad", "AirPods", "充电宝"],
+        "产品编号": ["P001", "P002", "P003", "P004", "P005"],
+        "销售额": [69990, 149990, 49990, 18990, 1490],
+    })
+    result = visualizer.visualize(df_with_id, chart_type="auto",
+                                  title="排除ID列测试")
+    ok = result["success"] and len(result["image_base64"]) > 0
+    if assert_test("自动排除 ID/编号 列", ok,
+                   f"type={result['chart_type']}"):
+        passed += 1
+
+    # 8i: 与真实查询联动的可视化测试
+    total += 1
+    # 用 Agent 查询数据，拿 SQL 直接执行获取 DataFrame
+    agent_result = agent.query("每个类别的产品数量是多少？")
+    sql = agent_result["sql"]
+    print(f"  SQL: {sql}")
+    if sql:
+        import sqlite3
+        conn = sqlite3.connect("data/sample.db")
+        df_real = pd.read_sql_query(sql, conn)
+        conn.close()
+        result = visualizer.visualize(df_real, chart_type="auto",
+                                      title="每类别产品数量")
+        ok = result["success"] and len(result["image_base64"]) > 0
+        if assert_test("真实查询结果可视化", ok,
+                       f"rows={len(df_real)}, type={result['chart_type']}"):
+            passed += 1
+    else:
+        assert_test("真实查询结果可视化", False, "SQL 为空，无法测试")
+
+    # ========================================
     # 总结
     # ========================================
     print("\n" + "=" * 60)

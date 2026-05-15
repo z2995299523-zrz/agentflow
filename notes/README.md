@@ -9,3 +9,4 @@
 | 日期 | 类别 | 主题 |
 |------|------|------|
 | 2026-05-15 | tech | [[2026-05-15_tech_text-to-sql-agent详解|Text-to-SQL Agent 代码详解]] |
+| 2026-05-15 | tech | [[2026-05-15_tech_visualizer详解|QueryVisualizer 图表可视化详解]] |
