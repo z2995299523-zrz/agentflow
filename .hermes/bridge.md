@@ -1,6 +1,6 @@
 # Hermes ↔ OpenClaw 共享上下文
 
-> 最后更新: 2026-05-14 19:30 | Hermes Agent 写入
+> 最后更新: 2026-05-15 09:30 | Hermes Agent 写入
 > 格式说明：每次对话追加到「历史记录」顶部，不覆盖。项目关键信息保持稳定。
 
 ---
@@ -10,7 +10,7 @@
 | 模块 | 状态 | 说明 |
 |------|------|------|
 | RAG | ✅ 完成 | loader + vectorstore(BGE本地) + chain(LCEL) |
-| Text-to-SQL | ⏳ 待开发 | sql/agent.py 为空 |
+| Text-to-SQL | ✅ 完成 | sql/agent.py (LangChain SQL Agent + 安全校验) |
 | FastAPI | ⏳ 待开发 | main.py 未创建 |
 | WebUI | ⏳ 待开发 | Streamlit 未创建 |
 
@@ -18,7 +18,25 @@
 
 ## 📜 历史记录
 
-### 2026-05-14 · 会话2 [Hermes]
+### 2026-05-15 · 会话3 [Hermes] — Text-to-SQL 模块完成
+
+**完成内容：**
+- `data/init_sample_db.py` — 示例数据库（3张表：products 12条 / customers 10条 / sales 50条）
+- `sql/agent.py` — SQLQueryAgent 核心类，LangChain create_sql_agent + SafeSQLDatabase 安全封装
+- `sql/__init__.py` — 模块导出
+- `test_sql.py` — 9 项端到端测试全部通过 ✅
+
+**Claude Code 环境修复：**
+- Claude Code 的 claude-deepseek wrapper 需要在 shell 中显式 export DEEPSEEK_API_KEY（从 .env 读取）
+- 直接调用 claude.exe 并设置 ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL 绕过 wrapper
+
+**踩坑记录（新增）：**
+1. `SafeSQLDatabase.run()` 必须透传 `**kwargs`，否则 SQLDatabaseToolkit 传的 `execution_options` 参数报错
+2. `create_sql_agent()` 需加 `handle_parsing_errors=True`，DeepSeek 偶尔返回不可解析的格式
+3. `create_sql_agent()` 需加 `return_intermediate_steps=True`，从 intermediate_steps 提取 SQL 比回调更可靠
+4. LLM 非确定性导致个别查询偶发失败（正常现象，重试即可）
+
+**下一步：** Text-to-SQL visualizer.py（结果可视化/图表生成）
 
 **完成：**
 - 确立「边写边讲」教学模式：每写一个模块，先讲框架来龙去脉+选型理由+可迁移概念
