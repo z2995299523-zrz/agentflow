@@ -11,9 +11,12 @@
 |------|------|------|
 | RAG | ✅ 完成 | loader + vectorstore(BGE本地) + chain(LCEL) |
 | Text-to-SQL | ✅ 完成 | sql/agent.py + visualizer.py + tools.py (FC封装) |
-| FastAPI | ✅ 完成 | main.py (7个端点: RAG 4 + SQL 3) |
+| FastAPI | ✅ 完成 | main.py (7端点: RAG 4 + SQL 3, 代理按provider区分) |
 | WebUI | ⏳ 待开发 | Streamlit 未创建 |
-| Prompt体系 | ✅ 完成 | prompts/ (5文件，统一管理所有提示词) |
+| Prompt-体系 | ✅ 完成 | prompts/ (5文件) |
+| FunctionCalling | ✅ 完成 | sql/tools.py + test (9项) |
+| 笔记库 | ✅ 16篇 | notes/ (含面试话术+踩坑) |
+| 下一步 | ⏳ Week 5 | LangGraph 多Agent 工作流 |
 
 ---
 

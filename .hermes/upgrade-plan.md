@@ -43,7 +43,7 @@ Week 8:   面试准备（README截图、Demo录制、简历更新）
 
 ---
 
-## 三、Week 1-2：RAG 知识库问答（最核心，80%岗位要求）
+## 三、Week 1-2：RAG 知识库问答 ✅ 2026-05-14 完成
 
 ### Week 1：文档加载 + 向量存储
 
@@ -84,38 +84,18 @@ Week 8:   面试准备（README截图、Demo录制、简历更新）
 
 ---
 
-## 四、Week 3-4：Text-to-SQL + Function Calling
+## 四、Week 3-4：Text-to-SQL + Function Calling ✅ 2026-05-15~16 完成
 
-### Week 3：SQL Agent 实现
+### Week 3：SQL Agent 实现 ✅ 2026-05-15
 
-**Day 11-12：agent.py — Text-to-SQL Agent**
-- LangChain SQLDatabaseChain / SQL Agent
-- 自然语言 → SQL 查询 → 执行 → 结果解释
-- 支持 SQLite（开发用）和 PostgreSQL（展示企业级能力）
-- 安全：只允许 SELECT，禁止 DROP/DELETE/UPDATE
+**Day 11-12：agent.py — Text-to-SQL Agent** ✅
+**Day 13-14：visualizer.py — 结果可视化** ✅
 
-**Day 13-14：visualizer.py — 结果可视化**
-- pandas + matplotlib 自动图表生成
-- 根据查询结果类型自动选择图表（柱状图/折线图/饼图）
-- 图表以 Base64 嵌入 API 响应，前端直接展示
+### Week 4：Function Calling + Prompt + API ✅ 2026-05-16
 
-**Day 15：Function Calling 工具封装**
-- 将 SQL 查询封装为 Function Calling 工具
-- LLM 自主决定何时调用 SQL 工具
-- JSON Schema 定义工具参数
-
-### Week 4：结构化 Prompt + 集成
-
-**Day 16-17：Prompt Engineering 体系**
-- 创建 prompts/ 目录，系统化管理所有提示词
-- System Prompt 模板（角色设定、能力边界、输出格式）
-- Few-shot 示例（3-5个标准问答对）
-- Chain-of-Thought 思维链引导（复杂查询时强制分步推理）
-
-**Day 18-19：FastAPI 接口**
-- POST /sql/query — 自然语言查询数据库
-- GET /sql/schema — 获取数据库表结构（让用户知道有什么表）
-- POST /sql/visualize — 查询并生成图表
+**Day 15：Function Calling 工具封装** ✅
+**Day 16-17：Prompt Engineering 体系** ✅
+**Day 18-19：FastAPI 接口** ✅
 
 **Day 20：集成测试**
 - RAG + SQL 两个模块互相独立但通过统一 API 访问
