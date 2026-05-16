@@ -1,0 +1,72 @@
+请严格按照以下计划实现 Function Calling 工具封装。每个 Task 完成后验证测试通过再继续下一个。
+
+## 背景
+AgentFlow 是企业级 AI 智能助手平台。SQL 模块 (sql/agent.py) 已实现 SQLQueryAgent，可以将自然语言转 SQL 并执行。现在需要把它封装成 LangChain Function Calling 工具，让 LLM 自主判断何时需要查询数据库。
+
+## 项目约束
+- Python 3.12, LangChain 1.x (不要用 0.x 的 chains 模块)
+- LLM 用 config.get_llm_kwargs() 获取 (DeepSeek)
+- 数据库: SQLite, 路径 ./data/sample.db
+- 所有新代码写中文注释和 docstring
+- 项目路径: C:\Users\DELL\agentflow
+
+## Task 1: 创建 sql/tools.py
+新建文件 sql/tools.py，使用 LangChain 1.x 的 @tool 装饰器创建一个 create_sql_tool() 工厂函数。
+
+要求：
+- 内部延迟导入 SQLQueryAgent
+- 工具名: sql_query
+- 工具描述要包含适用/不适用场景（让LLM知道何时调用）
+- 输入参数: question (str)
+- 返回: 查询结果的字符串（成功时包含 SQL 语句）
+- 关键代码模式:
+```python
+from langchain_core.tools import tool
+from sql.agent import SQLQueryAgent
+
+def create_sql_tool(db_uri=None):
+    agent = SQLQueryAgent(db_uri=db_uri)
+    
+    @tool(description="详细的工具描述...")
+    def sql_query(question: str) -> str:
+        result = agent.query(question)
+        if result["success"]:
+            ...
+        else:
+            ...
+    
+    sql_query.name = "sql_query"
+    return sql_query
+```
+
+## Task 2: 更新 sql/__init__.py
+追加 tools 的导出: from sql.tools import create_sql_tool, SQL_TOOL_DESCRIPTION
+并在 __all__ 中加入它们。
+
+## Task 3: 创建 test_sql_tools.py
+写 8 个测试用例:
+1. 测试工具名称
+2. 测试工具描述长度
+3. 测试简单查询能返回结果
+4. 测试计数查询
+5. 测试排行查询
+6. 测试 LLM 能绑定工具
+7. 测试 LLM 对数据问题会调用工具 (response.tool_calls > 0)
+8. 测试 LLM 对闲聊不调用工具 (response.tool_calls == 0)
+
+使用 ChatOpenAI(**get_llm_kwargs()) 创建 LLM，temperature=0。
+
+## Task 4: 运行所有测试
+```bash
+python -m pytest test_sql_tools.py -v --tb=short
+```
+期望 8 passed。
+
+然后回归:
+```bash
+python -m pytest test_sql.py -v --tb=short
+```
+期望 18 passed。
+
+## 输出要求
+完成后告诉我每个测试的结果（passed/failed），如有 failed 说明原因并修复。

@@ -8,5 +8,6 @@ sql 模块 — Text-to-SQL 自然语言数据库查询
 """
 from .agent import SQLQueryAgent
 from .visualizer import QueryVisualizer
+from .tools import create_sql_tool, SQL_TOOL_DESCRIPTION
 
-__all__ = ["SQLQueryAgent", "QueryVisualizer"]
+__all__ = ["SQLQueryAgent", "QueryVisualizer", "create_sql_tool", "SQL_TOOL_DESCRIPTION"]

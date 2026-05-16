@@ -11,6 +11,7 @@ from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_core.callbacks import BaseCallbackHandler
 
 from config import get_llm_kwargs, get_db_uri
+from prompts.sql import SQL_AGENT_PREFIX, SQL_AGENT_SUFFIX
 
 # 危险 SQL 关键词，执行前必须拦截
 FORBIDDEN_KEYWORDS = {"DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE", "CREATE"}
@@ -86,17 +87,13 @@ class SQLQueryAgent:
         self.db = SafeSQLDatabase.from_uri(self.db_uri)
         toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
 
-        # Agent 系统提示词，用中文指令约束行为
-        prefix = """你是一个 SQL 查询助手。根据用户问题生成 SQLite 语法的 SELECT 查询。
-只生成 SELECT 语句，不要使用 DROP/DELETE/UPDATE/INSERT 等写操作。
-如果问题涉及时间，注意日期格式为 YYYY-MM-DD。
-查询结果如果为空，诚实告诉用户没有找到匹配的数据。"""
-
+        # Agent 系统提示词（从 prompts.sql 导入）
         self.agent = create_sql_agent(
             llm=self.llm,
             toolkit=toolkit,
             verbose=False,
-            prefix=prefix,
+            prefix=SQL_AGENT_PREFIX,
+            suffix=SQL_AGENT_SUFFIX,
             handle_parsing_errors=True,
             return_intermediate_steps=True,
         )

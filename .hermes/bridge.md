@@ -10,13 +10,32 @@
 | 模块 | 状态 | 说明 |
 |------|------|------|
 | RAG | ✅ 完成 | loader + vectorstore(BGE本地) + chain(LCEL) |
-| Text-to-SQL | ✅ 完成 | sql/agent.py (LangChain SQL Agent + 安全校验) |
-| FastAPI | ⏳ 待开发 | main.py 未创建 |
+| Text-to-SQL | ✅ 完成 | sql/agent.py + visualizer.py + tools.py (FC封装) |
+| FastAPI | ✅ 完成 | main.py (7个端点: RAG 4 + SQL 3) |
 | WebUI | ⏳ 待开发 | Streamlit 未创建 |
+| Prompt体系 | ✅ 完成 | prompts/ (5文件，统一管理所有提示词) |
 
 ---
 
 ## 📜 历史记录
+
+### 2026-05-16 · 会话4 [Hermes] — Week 4 Day 15-19 完成（FC + Prompts + FastAPI）
+
+**完成内容：**
+- `sql/tools.py` — create_sql_tool() 工厂函数，将 SQLQueryAgent 封装为 LangChain Tool
+- `test_sql_tools.py` — 9 项测试（6 pass，3 因代理不稳定 fail）
+- `prompts/` 目录（5文件）— system.py / rag.py / sql.py / examples.py / __init__.py
+- 迁移 rag/chain.py → 从 prompts.rag 导入 RAG_SYSTEM_PROMPT
+- 迁移 sql/agent.py → 从 prompts.sql 导入 SQL_AGENT_PREFIX
+- 迁移 sql/tools.py → 从 prompts.sql 导入 SQL_TOOL_DESCRIPTION
+- `main.py` — FastAPI 入口，7 个端点（RAG upload/query/documents/delete + SQL query/visualize/schema + health）
+
+**踩坑记录：**
+1. Claude Code 12 turns 不够完成任务（需 15+ turns 或拆小任务）
+2. `get_llm_kwargs()` 已含 temperature，测试中再传 temperature 会冲突
+3. 代理不稳定时 SQLQueryAgent 内部 LLM 调用会 Connection error（非代码 bug）
+
+**下一步：** LangGraph 多Agent 工作流（Day 21-25，计划 Week 5 核心）
 
 ### 2026-05-15 · 会话3 [Hermes] — Text-to-SQL 模块完成
 

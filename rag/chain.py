@@ -12,20 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 from config import get_llm_kwargs
 from rag.vectorstore import load_vectorstore, Chroma
-
-
-# 中文问答提示词模板
-RAG_SYSTEM_PROMPT = """你是一个专业的企业知识助手。请根据以下【参考资料】回答用户问题。
-
-要求：
-1. 优先使用参考资料中的信息回答
-2. 回答要准确、简洁、有条理
-3. 如果参考资料不足以回答问题，请明确说"根据现有资料无法回答"，不要编造
-4. 在回答末尾标注信息来源（文件名和页码，如果有的话）
-
-【参考资料】
-{context}
-"""
+from prompts.rag import RAG_SYSTEM_PROMPT
 
 
 def get_llm():
