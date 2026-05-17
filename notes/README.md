@@ -8,6 +8,7 @@
 
 | 日期 | 类别 | 主题 |
 |------|------|------|
+| 2026-05-17 | discuss | [[2026-05-17_discuss_bge冷启动与多agent顺序|BGE 模型冷启动（FastAPI lifespan）+ 多Agent 协作顺序判断（数据依赖）]] |
 | 2026-05-17 | tech | [[2026-05-17_tech_langgraph概念讲解|LangGraph 核心概念：StateGraph / Node / Edge / 条件边（ETL DAG 类比）]] |
 | 2026-05-17 | tech | [[2026-05-17_tech_langgraph-多agent工作流|LangGraph 多Agent 工作流代码详解（state/nodes/supervisor/workflow）]] |
 | 2026-05-16 | tech | [[2026-05-16_tech_langchain详解|LangChain 框架详解：解决什么问题 + 选型理由]] |
