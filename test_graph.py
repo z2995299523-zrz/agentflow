@@ -252,6 +252,38 @@ def test_route_after_rag_not_mixed():
 
 
 # ═══════════════════════════════════════════════════════
+# 测试 9b: SQL 后路由（不需要 LLM）
+# ═══════════════════════════════════════════════════════
+
+def test_route_after_sql_mixed_rag_not_done():
+    """mixed 且 RAG 未跑时 route_after_sql 返回 'rag'"""
+    from graph.workflow import route_after_sql
+    from graph.state import AgentState
+
+    state: AgentState = {
+        "messages": [], "question": "测试", "intent": "mixed",
+        "rag_result": "", "rag_sources": [],
+        "sql_result": "SQL 结果", "sql_query": "SELECT 1",
+        "sql_chart": "", "final_answer": "",
+    }
+    assert route_after_sql(state) == "rag"
+
+
+def test_route_after_sql_rag_already_done():
+    """RAG 已跑过时 route_after_sql 返回 'finalize'（防死循环）"""
+    from graph.workflow import route_after_sql
+    from graph.state import AgentState
+
+    state: AgentState = {
+        "messages": [], "question": "测试", "intent": "mixed",
+        "rag_result": "RAG 结果", "rag_sources": ["doc1"],
+        "sql_result": "SQL 结果", "sql_query": "SELECT 1",
+        "sql_chart": "", "final_answer": "",
+    }
+    assert route_after_sql(state) == "finalize"
+
+
+# ═══════════════════════════════════════════════════════
 # 测试 10: Mixed 端到端（需要 LLM）
 # ═══════════════════════════════════════════════════════
 

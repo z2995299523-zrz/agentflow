@@ -66,26 +66,46 @@ def fallback_node(state: AgentState) -> dict:
 
 
 def route_after_rag(state: AgentState) -> str:
-    """RAG 节点后的路由：mixed 意图继续走 SQL，否则直接汇总
+    """RAG 节点后的路由：mixed 且 SQL 未跑 → SQL，否则汇总
+
+    防死循环：如果 sql_result 已有值，说明 SQL 已跑过，直接 finalize。
+    这保证了无论 mixed 先走 RAG 还是先走 SQL，最终两个都会执行。
 
     Args:
-        state: 当前工作流状态（需含 intent 字段）
+        state: 当前工作流状态
 
     Returns:
-        下一个节点名称
+        下一个节点名称 ("sql" | "finalize")
     """
-    if state.get("intent") == "mixed":
+    if state.get("intent") == "mixed" and not state.get("sql_result"):
         return "sql"
+    return "finalize"
+
+
+def route_after_sql(state: AgentState) -> str:
+    """SQL 节点后的路由：mixed 且 RAG 未跑 → RAG，否则汇总
+
+    与 route_after_rag 对称设计。防死循环：rag_result 非空则直接 finalize。
+
+    Args:
+        state: 当前工作流状态
+
+    Returns:
+        下一个节点名称 ("rag" | "finalize")
+    """
+    if state.get("intent") == "mixed" and not state.get("rag_result"):
+        return "rag"
     return "finalize"
 
 
 def build_workflow(enable_memory: bool = True):
     """构建并编译多Agent 工作流
 
-    图结构：
+    图结构（对称设计，支持 RAG↔SQL 双向）：
         START → supervisor → [rag | sql | fallback]
-        rag → [mixed→sql | 其他→finalize]
-        sql → finalize → END
+        rag → [mixed且SQL未跑→sql | 其他→finalize]
+        sql → [mixed且RAG未跑→rag | 其他→finalize]
+        finalize → END
         fallback → END
 
     Args:
@@ -114,12 +134,16 @@ def build_workflow(enable_memory: bool = True):
             "fallback": "fallback",
         },
     )
-    # RAG 后条件路由：mixed → SQL → finalize；其他 → finalize
+    # RAG 后条件路由：mixed且SQL未跑 → sql，否则 finalize
     graph.add_conditional_edges("rag", route_after_rag, {
         "sql": "sql",
         "finalize": "finalize",
     })
-    graph.add_edge("sql", "finalize")
+    # SQL 后条件路由：mixed且RAG未跑 → rag，否则 finalize（对称设计）
+    graph.add_conditional_edges("sql", route_after_sql, {
+        "rag": "rag",
+        "finalize": "finalize",
+    })
     graph.add_edge("finalize", END)
     graph.add_edge("fallback", END)
 
