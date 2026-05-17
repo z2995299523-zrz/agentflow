@@ -8,6 +8,7 @@
 
 | 日期 | 类别 | 主题 |
 |------|------|------|
+| 2026-05-17 | tech | [[2026-05-17_tech_rag评估与集成测试|RAG 评估基线（10题+4指标）+ 集成测试（5端点）]] |
 | 2026-05-17 | design | [[2026-05-17_design_mixed双向路由|Mixed 双向路由：RAG↔SQL 对称设计 + Post-condition Guard 防死循环]] |
 | 2026-05-17 | tech | [[2026-05-17_tech_langgraph-day23-25完善|LangGraph Day 23-25：BGE预热 + Mixed双路 + MemorySaver + 评估基线]] |
 | 2026-05-17 | discuss | [[2026-05-17_discuss_bge冷启动与多agent顺序|BGE 模型冷启动（FastAPI lifespan）+ 多Agent 协作顺序判断（数据依赖）]] |

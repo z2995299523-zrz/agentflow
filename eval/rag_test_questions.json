@@ -1,0 +1,62 @@
+[
+  {
+    "question": "入职满1年的员工有多少天年假？",
+    "ground_truth": "5天",
+    "expected_sources": ["公司考勤制度"],
+    "type": "factual"
+  },
+  {
+    "question": "年假最多可以累积多少天？",
+    "ground_truth": "20天",
+    "expected_sources": ["公司考勤制度"],
+    "type": "factual"
+  },
+  {
+    "question": "智能办公系统V3.0用什么数据库？",
+    "ground_truth": "PostgreSQL 14",
+    "expected_sources": ["产品手册"],
+    "type": "factual"
+  },
+  {
+    "question": "AgentFlow 生产环境推荐用什么数据库？",
+    "ground_truth": "PostgreSQL",
+    "expected_sources": ["数据库配置指南"],
+    "type": "factual"
+  },
+  {
+    "question": "数据库连接池最大连接数默认是多少？",
+    "ground_truth": "20",
+    "expected_sources": ["数据库配置指南"],
+    "type": "factual"
+  },
+  {
+    "question": "病假3天以上由谁审批？",
+    "ground_truth": "HR",
+    "expected_sources": ["公司考勤制度"],
+    "type": "factual"
+  },
+  {
+    "question": "周末加班薪资如何计算？",
+    "ground_truth": "按2倍薪资计算",
+    "expected_sources": ["公司考勤制度"],
+    "type": "factual"
+  },
+  {
+    "question": "智能办公系统支持哪三级权限？",
+    "ground_truth": "管理员、部门主管、普通员工",
+    "expected_sources": ["产品手册"],
+    "type": "factual"
+  },
+  {
+    "question": "系统有多少种加密方式保护数据安全？",
+    "ground_truth": "HTTPS传输加密和AES-256存储加密",
+    "expected_sources": ["产品手册"],
+    "type": "reasoning"
+  },
+  {
+    "question": "今天北京的天气怎么样？",
+    "ground_truth": "无相关信息",
+    "expected_sources": [],
+    "type": "no_answer"
+  }
+]
