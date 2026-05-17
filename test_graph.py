@@ -124,6 +124,55 @@ def test_supervisor_routing_unknown():
     assert result["intent"] in ("unknown", "rag")  # 模型可能把闲聊也归到 rag
 
 
+@pytest.mark.skipif(not _has_llm(), reason="LLM 不可用，跳过")
+def test_supervisor_routing_parallel():
+    """无依赖综合分析 → parallel"""
+    from graph.supervisor import supervisor_node
+    from graph.state import AgentState
+
+    state: AgentState = {
+        "messages": [],
+        "question": "查投诉最多的5个客户，以及投诉处理流程",
+        "intent": "",
+        "rag_result": "",
+        "rag_sources": [],
+        "sql_result": "",
+        "sql_query": "",
+        "sql_chart": "",
+        "final_answer": "",
+    }
+    result = supervisor_node(state)
+    # parallel 或 mixed 都可接受（LLM 可能判断为 parallel 或 mixed）
+    assert result["intent"] in ("parallel", "mixed", "unknown")
+
+
+# ═══════════════════════════════════════════════════════
+# 测试 4b: route_by_intent 并行返回（不需要 LLM）
+# ═══════════════════════════════════════════════════════
+
+def test_route_by_intent_parallel():
+    """parallel 意图时 route_by_intent 返回列表 ['rag', 'sql']"""
+    from graph.supervisor import route_by_intent
+    from graph.state import AgentState
+
+    state: AgentState = {
+        "messages": [],
+        "question": "测试",
+        "intent": "parallel",
+        "rag_result": "",
+        "rag_sources": [],
+        "sql_result": "",
+        "sql_query": "",
+        "sql_chart": "",
+        "final_answer": "",
+    }
+    result = route_by_intent(state)
+    assert isinstance(result, list), f"应为 list，实际 {type(result)}"
+    assert "rag" in result
+    assert "sql" in result
+    assert len(result) == 2
+
+
 # ═══════════════════════════════════════════════════════
 # 测试 5: RAG 节点（需要 LLM + 向量库）
 # ═══════════════════════════════════════════════════════
