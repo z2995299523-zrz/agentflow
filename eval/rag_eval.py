@@ -38,9 +38,10 @@ def load_test_docs():
 
 
 def _get_source_basename(source_str):
-    """从 metadata.source 提取文件名（去掉路径前缀和页面后缀）"""
-    # source 可能是 "公司考勤制度.txt" 或包含路径
+    """从 metadata.source 提取文件名（去掉路径、扩展名、页面后缀）"""
     basename = os.path.basename(str(source_str))
+    # 去掉扩展名 (.txt, .pdf 等)
+    basename = os.path.splitext(basename)[0]
     # 去掉 " 第X页" 后缀
     if " 第" in basename:
         basename = basename.split(" 第")[0]
