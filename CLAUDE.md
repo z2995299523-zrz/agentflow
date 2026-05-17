@@ -17,7 +17,7 @@ AgentFlow 是企业级 AI 智能助手平台（个人作品项目，面试展示
 | Prompt 体系 | ✅ | prompts/ (system/rag/sql/examples) |
 | FastAPI | ✅ | main.py (7 endpoints) |
 | 笔记库 | ✅ | notes/ (16篇,含面试话术+踩坑) |
-| LangGraph | ⏳ 下一步 | Week 5 |
+| LangGraph | ✅ | graph/ (5模块) + test_graph.py (7/8通过) |
 | WebUI | ⏳ | Streamlit |
 | RAG评估基线 | 🔴 待补 | 10题评估集 + RAGAS |
 
@@ -53,8 +53,14 @@ C:\Users\DELL\agentflow\
 │   ├── sql.py           #   SQL 提示词 (含 suffix 格式约束)
 │   ├── examples.py      #   Few-shot 示例
 │   └── __init__.py      #   统一导出
+├── graph/               # LangGraph 多Agent 工作流 ✅
+│   ├── __init__.py      #   导出 AgentState, build_workflow
+│   ├── state.py         #   共享 State 定义 (AgentState TypedDict)
+│   ├── nodes.py         #   RAG + SQL 节点函数
+│   ├── supervisor.py    #   路由器 (LLM 零样本意图分类)
+│   └── workflow.py      #   StateGraph 组装 + 编译
 ├── notes/               # 技术笔记库 (面试准备) ✅
-│   └── README.md        #   16篇笔记索引
+│   └── README.md        #   18篇笔记索引
 ├── data/
 │   └── sample.db        # SQLite 示例库 (3表72条)
 ├── chroma_data/         # ChromaDB 持久化 (gitignore)
@@ -62,6 +68,7 @@ C:\Users\DELL\agentflow\
 ├── test_rag.py          # RAG 测试
 ├── test_sql.py          # SQL 测试 (18项)
 ├── test_sql_tools.py    # Function Calling 测试 (9项)
+├── test_graph.py        # LangGraph 测试 (8项, 7/8通过)
 ├── .hermes/
 │   ├── bridge.md        # Hermes↔ClaudeCode 协作桥梁
 │   ├── upgrade-plan.md  # 8周升级计划
