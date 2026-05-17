@@ -3,22 +3,12 @@ AgentFlow 配置管理
 从 .env 文件读取，兼容 Hermes 已有的 DeepSeek / DashScope Key
 """
 import os
-import httpx
 from dotenv import load_dotenv
 
 # 先加载项目自己的 .env，再加载 Hermes 的 .env（作为 fallback）
 load_dotenv()  # 项目 .env
 load_dotenv("D:/hermes-agent-home/.env", override=False)  # Hermes Key（不覆盖已有）
 
-
-# ============================================
-# 代理配置（国内访问 OpenAI / Anthropic 需要，DeepSeek / 通义 不需要）
-# ============================================
-# 需要代理的国外 Provider（基于 API 域名判断）
-_NEEDS_PROXY_PROVIDERS = frozenset({"openai"})
-
-# 代理地址：优先读环境变量，未设置则留空（不走代理）
-PROXY_URL = os.getenv("HTTPS_PROXY", os.getenv("HTTP_PROXY", ""))
 
 # ============================================
 # LLM 配置（日常开发用 DeepSeek，便宜）
@@ -97,10 +87,6 @@ def get_llm_kwargs():
     }
     if base_url:
         kwargs["base_url"] = base_url
-
-    # 代理：仅国外 Provider 且代理地址已配置时才启用
-    if provider in _NEEDS_PROXY_PROVIDERS and PROXY_URL:
-        kwargs["http_client"] = httpx.Client(proxy=PROXY_URL)
 
     return kwargs
 
