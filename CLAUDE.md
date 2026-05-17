@@ -54,13 +54,18 @@ C:\Users\DELL\agentflow\
 │   ├── examples.py      #   Few-shot 示例
 │   └── __init__.py      #   统一导出
 ├── graph/               # LangGraph 多Agent 工作流 ✅
-│   ├── __init__.py      #   导出 AgentState, build_workflow
+│   ├── __init__.py      #   导出 AgentState, build_workflow, make_config
 │   ├── state.py         #   共享 State 定义 (AgentState TypedDict)
-│   ├── nodes.py         #   RAG + SQL 节点函数
+│   ├── nodes.py         #   RAG + SQL 节点 (支持外部注入预热)
 │   ├── supervisor.py    #   路由器 (LLM 零样本意图分类)
-│   └── workflow.py      #   StateGraph 组装 + 编译
+│   ├── workflow.py      #   StateGraph 组装 + Mixed双路 + MemorySaver
+│   └── memory.py        #   多轮对话记忆 (make_config/clear_memory)
+├── eval/                # LangGraph 评估模块 ✅
+│   ├── __init__.py
+│   ├── langgraph_eval.py  # 3项评估指标 (路由/端到端/LLM-as-Judge)
+│   └── test_questions.json # 10题测试集
 ├── notes/               # 技术笔记库 (面试准备) ✅
-│   └── README.md        #   18篇笔记索引
+│   └── README.md        #   20篇笔记索引
 ├── data/
 │   └── sample.db        # SQLite 示例库 (3表72条)
 ├── chroma_data/         # ChromaDB 持久化 (gitignore)

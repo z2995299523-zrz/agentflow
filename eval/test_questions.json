@@ -1,0 +1,12 @@
+[
+  {"question": "产品表有多少条记录", "expected_intent": "sql", "min_length": 20},
+  {"question": "AgentFlow 是什么项目", "expected_intent": "rag", "min_length": 30},
+  {"question": "销售额最高的5个产品是哪些", "expected_intent": "sql", "min_length": 30},
+  {"question": "你好，今天过得怎么样", "expected_intent": "unknown", "min_length": 5},
+  {"question": "根据文档分析产品销售趋势", "expected_intent": "mixed", "min_length": 20},
+  {"question": "如何配置数据库连接参数", "expected_intent": "rag", "min_length": 30},
+  {"question": "客户表有多少条记录", "expected_intent": "sql", "min_length": 20},
+  {"question": "项目使用了哪些技术栈", "expected_intent": "rag", "min_length": 30},
+  {"question": "对比产品手册标准和实际销售数据，哪些产品不达标", "expected_intent": "mixed", "min_length": 30},
+  {"question": "今天天气怎么样", "expected_intent": "unknown", "min_length": 5}
+]

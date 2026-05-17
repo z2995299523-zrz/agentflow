@@ -4,6 +4,22 @@
 """
 from graph.state import AgentState
 
+# 全局单例（由 main.py lifespan 注入，fallback 懒加载）
+_vectorstore = None
+_sql_agent = None
+
+
+def init_vectorstore(vs):
+    """注入预热的 vectorstore（由 main.py lifespan 调用）"""
+    global _vectorstore
+    _vectorstore = vs
+
+
+def init_sql_agent(agent):
+    """注入预热的 SQL agent（由 main.py lifespan 调用）"""
+    global _sql_agent
+    _sql_agent = agent
+
 
 def rag_node(state: AgentState) -> dict:
     """RAG 知识问答节点
@@ -23,18 +39,20 @@ def rag_node(state: AgentState) -> dict:
 
     try:
         from rag.chain import ask
-        from rag.vectorstore import load_vectorstore
 
-        vectorstore = load_vectorstore()
+        if _vectorstore is None:
+            from rag.vectorstore import load_vectorstore
+            init_vectorstore(load_vectorstore())
+
         # 检查向量库是否为空（用 get() 而非 _collection 私有属性）
-        collection_data = vectorstore.get(limit=1)
+        collection_data = _vectorstore.get(limit=1)
         if not collection_data or len(collection_data.get("ids", [])) == 0:
             return {
                 "rag_result": "知识库为空，请先上传文档后再提问。",
                 "rag_sources": [],
             }
 
-        result = ask(question, vectorstore=vectorstore)
+        result = ask(question, vectorstore=_vectorstore)
         return {
             "rag_result": result.get("answer", ""),
             "rag_sources": result.get("sources", []),
@@ -46,14 +64,11 @@ def rag_node(state: AgentState) -> dict:
         }
 
 
-# SQL Agent 单例缓存
-_sql_agent = None
-
-
 def sql_node(state: AgentState) -> dict:
     """SQL 数据查询节点
 
     将自然语言问题转为 SQL 查询，执行并返回结果。
+    mixed 意图时注入 RAG 上下文辅助 SQL 生成。
     DB 不可用时友好提示，不崩溃。
 
     Args:
@@ -68,11 +83,15 @@ def sql_node(state: AgentState) -> dict:
     if not question.strip():
         return {"sql_result": "问题为空，无法查询。", "sql_query": ""}
 
-    try:
-        from sql.agent import SQLQueryAgent
+    # 如果有 RAG 结果且意图为 mixed，注入上下文
+    rag_context = state.get("rag_result", "")
+    if rag_context and state.get("intent") == "mixed":
+        question = f"参考信息：{rag_context[:500]}\n\n问题：{question}"
 
+    try:
         if _sql_agent is None:
-            _sql_agent = SQLQueryAgent()
+            from sql.agent import SQLQueryAgent
+            init_sql_agent(SQLQueryAgent())
 
         result = _sql_agent.query(question)
 

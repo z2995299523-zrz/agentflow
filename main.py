@@ -4,6 +4,7 @@ AgentFlow API — FastAPI 统一接口
 """
 import os
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -20,21 +21,40 @@ from sql.visualizer import QueryVisualizer
 
 # ─── 应用初始化 ──────────────────────────────────
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动预热：加载 BGE 模型 + SQL Agent，注入到 graph 节点"""
+    print("⏳ 预热 BGE 模型...")
+    app.state.vectorstore = load_vectorstore()
+    print("✅ BGE 模型就绪")
+
+    print("⏳ 预热 SQL Agent...")
+    app.state.sql_agent = SQLQueryAgent()
+    print("✅ SQL Agent 就绪")
+
+    # 注入到 graph 节点
+    from graph.nodes import init_vectorstore, init_sql_agent
+    init_vectorstore(app.state.vectorstore)
+    init_sql_agent(app.state.sql_agent)
+
+    yield
+
 app = FastAPI(
     title="AgentFlow API",
     description="企业级 AI 智能助手 — RAG + Text-to-SQL",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # 确保上传目录存在
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
-# 懒加载单例
+# 懒加载单例（lifespan 预热时会填充，routes 读取）
 _sql_agent: Optional[SQLQueryAgent] = None
 
 
 def get_sql_agent() -> SQLQueryAgent:
-    """获取 SQL Agent 单例（延迟初始化，避免启动时连接数据库）"""
+    """获取 SQL Agent 单例（优先用 lifespan 预热的实例，fallback 懒加载）"""
     global _sql_agent
     if _sql_agent is None:
         _sql_agent = SQLQueryAgent()

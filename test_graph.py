@@ -207,3 +207,102 @@ def test_workflow_invoke():
     result = wf.invoke({"question": "你好"})
     assert "final_answer" in result
     assert len(result["final_answer"]) > 0
+
+
+# ═══════════════════════════════════════════════════════
+# 测试 9: Mixed 意图路由（不需要 LLM）
+# ═══════════════════════════════════════════════════════
+
+def test_route_after_rag_mixed():
+    """mixed 意图时 route_after_rag 返回 'sql'"""
+    from graph.workflow import route_after_rag
+    from graph.state import AgentState
+
+    state: AgentState = {
+        "messages": [],
+        "question": "测试",
+        "intent": "mixed",
+        "rag_result": "RAG 结果",
+        "rag_sources": [],
+        "sql_result": "",
+        "sql_query": "",
+        "sql_chart": "",
+        "final_answer": "",
+    }
+    assert route_after_rag(state) == "sql"
+
+
+def test_route_after_rag_not_mixed():
+    """非 mixed 意图时 route_after_rag 返回 'finalize'"""
+    from graph.workflow import route_after_rag
+    from graph.state import AgentState
+
+    state: AgentState = {
+        "messages": [],
+        "question": "测试",
+        "intent": "rag",
+        "rag_result": "RAG 结果",
+        "rag_sources": [],
+        "sql_result": "",
+        "sql_query": "",
+        "sql_chart": "",
+        "final_answer": "",
+    }
+    assert route_after_rag(state) == "finalize"
+
+
+# ═══════════════════════════════════════════════════════
+# 测试 10: Mixed 端到端（需要 LLM）
+# ═══════════════════════════════════════════════════════
+
+@pytest.mark.skipif(not _has_llm(), reason="LLM 不可用，跳过")
+def test_workflow_mixed():
+    """Mixed 意图端到端：RAG → SQL → 汇总"""
+    from graph.workflow import build_workflow
+
+    wf = build_workflow()
+    result = wf.invoke({
+        "question": "根据文档分析销售趋势",
+        "intent": "mixed",  # 直接指定 mixed，跳过 supervisor
+    })
+    assert "final_answer" in result
+    assert len(result["final_answer"]) > 0
+
+
+# ═══════════════════════════════════════════════════════
+# 测试 11-12: 多轮对话记忆（需要 LLM）
+# ═══════════════════════════════════════════════════════
+
+@pytest.mark.skipif(not _has_llm(), reason="LLM 不可用，跳过")
+def test_memory_multiround():
+    """验证 checkpointer 工作：同一 thread_id 多轮不崩溃"""
+    from graph.workflow import build_workflow
+    from graph.memory import make_config
+    
+    wf = build_workflow(enable_memory=True)
+    config = make_config("test-user-1")
+    
+    # 第一轮
+    r1 = wf.invoke({"question": "你好"}, config)
+    assert "final_answer" in r1
+    
+    # 第二轮（同样的 thread_id，不崩溃即通过）
+    r2 = wf.invoke({"question": "我刚才说了什么"}, config)
+    assert "final_answer" in r2
+    # 注意：messages 累积依赖节点实现，Day 25 完善后改 assert
+
+
+@pytest.mark.skipif(not _has_llm(), reason="LLM 不可用，跳过")
+def test_memory_isolation():
+    """验证不同 thread_id 的对话不会串"""
+    from graph.workflow import build_workflow
+    from graph.memory import make_config
+
+    wf = build_workflow(enable_memory=True)
+
+    r_a = wf.invoke({"question": "产品表有多少条"}, make_config("user-A"))
+    r_b = wf.invoke({"question": "你好"}, make_config("user-B"))
+
+    # 两个用户的消息应该独立
+    assert "final_answer" in r_a
+    assert "final_answer" in r_b

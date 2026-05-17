@@ -7,6 +7,7 @@ from langgraph.graph import StateGraph, START, END
 from graph.state import AgentState
 from graph.nodes import rag_node, sql_node
 from graph.supervisor import supervisor_node, route_by_intent
+from graph.memory import get_memory
 
 
 def finalize_node(state: AgentState) -> dict:
@@ -64,14 +65,31 @@ def fallback_node(state: AgentState) -> dict:
     }
 
 
-def build_workflow():
+def route_after_rag(state: AgentState) -> str:
+    """RAG 节点后的路由：mixed 意图继续走 SQL，否则直接汇总
+
+    Args:
+        state: 当前工作流状态（需含 intent 字段）
+
+    Returns:
+        下一个节点名称
+    """
+    if state.get("intent") == "mixed":
+        return "sql"
+    return "finalize"
+
+
+def build_workflow(enable_memory: bool = True):
     """构建并编译多Agent 工作流
 
     图结构：
         START → supervisor → [rag | sql | fallback]
-        rag → finalize → END
+        rag → [mixed→sql | 其他→finalize]
         sql → finalize → END
         fallback → END
+
+    Args:
+        enable_memory: 是否启用多轮对话记忆（默认 True）
 
     Returns:
         编译后的 CompiledGraph，可调用 .invoke()
@@ -96,9 +114,15 @@ def build_workflow():
             "fallback": "fallback",
         },
     )
-    graph.add_edge("rag", "finalize")
+    # RAG 后条件路由：mixed → SQL → finalize；其他 → finalize
+    graph.add_conditional_edges("rag", route_after_rag, {
+        "sql": "sql",
+        "finalize": "finalize",
+    })
     graph.add_edge("sql", "finalize")
     graph.add_edge("finalize", END)
     graph.add_edge("fallback", END)
 
+    if enable_memory:
+        return graph.compile(checkpointer=get_memory())
     return graph.compile()

@@ -12,16 +12,37 @@
 | RAG | ✅ 完成 | loader + vectorstore(BGE本地) + chain(LCEL) |
 | Text-to-SQL | ✅ 完成 | sql/agent.py + visualizer.py + tools.py (FC封装) |
 | FastAPI | ✅ 完成 | main.py (7端点: RAG 4 + SQL 3, 代理按provider区分) |
-| LangGraph | ✅ 完成 | graph/ (5模块) + test_graph.py (7/8通过) |
+| LangGraph | ✅ 完成 | graph/(6模块)+eval/(3文件)+MemorySaver+Mixed双路 |
 | WebUI | ⏳ 待开发 | Streamlit 未创建 |
 | Prompt-体系 | ✅ 完成 | prompts/ (5文件) |
 | FunctionCalling | ✅ 完成 | sql/tools.py + test (9项) |
-| 笔记库 | ✅ 16篇 | notes/ (含面试话术+踩坑) |
-| 下一步 | ⏳ Week 5 | LangGraph Day 23-25: mixed 双路并行 + 状态管理 + 评估 |
+| 笔记库 | ✅ 20篇 | notes/ (含面试话术+踩坑) |
+| 下一步 | ⏳ Week 6 | Streamlit WebUI |
 
 ---
 
 ## 📜 历史记录
+
+### 2026-05-17 · 会话2 [Hermes] — Week 5 Day 23-25 完成（BGE预热 + Mixed双路 + MemorySaver + 评估）
+
+**完成内容：**
+- `main.py` — FastAPI lifespan 预热 BGE 模型 + SQL Agent，注入到 graph 节点
+- `graph/nodes.py` — 改为模块级单例 + fallback 懒加载，sql_node 支持 mixed 上下文注入
+- `graph/workflow.py` — Mixed 双路并行（route_after_rag: mixed→SQL→finalize）
+- `graph/memory.py` — MemorySaver 单例 + make_config(thread_id) + clear_memory
+- `eval/` 模块 — 3项评估指标（路由准确率/端到端成功率/LLM-as-Judge）+ 10题测试集
+- `test_graph.py` — 新增 5 项测试（route_after_rag×2 + memory×2 + mixed_e2e×1）
+- `notes/2026-05-17_tech_langgraph-day23-25完善.md` — 关键技术讲解笔记
+
+**测试结果:** 11/13 通过（test_rag_node + test_workflow_mixed 因 BGE 加载超时）
+
+**踩坑：**
+1. Claude Code 定义了 route_after_rag 但忘记接入图 → 手动补 add_conditional_edges
+2. Claude Code 在 main.py lifespan 里用无意义的 global _sql_agent → 删掉
+3. 评估脚本运行报 WinError 1455（页面文件太小）→ Windows 虚拟内存不足，非代码问题
+4. 今天 3 次 Claude Code 调用共 $1.60（Task1+2: $0.64超时, Task3: $0.49, Task4: $0.47）
+
+**下一步：** Week 6 Streamlit WebUI（Day 26-30）
 
 ### 2026-05-17 · 会话 [Hermes] — Week 5 Day 21-22 完成（LangGraph 多Agent 基础框架）
 
