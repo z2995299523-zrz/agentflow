@@ -3,6 +3,7 @@
 
 # ChromaDB 向量库数据
 chroma_data/
+chroma_data_eval/
 
 # 上传文件
 uploads/

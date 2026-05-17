@@ -34,12 +34,12 @@
 ## 二、时间线总览（8周）
 
 ```
-Week 1-2: RAG 模块实现
-Week 3-4: Text-to-SQL + Function Calling
-Week 5:   LangGraph 多Agent 工作流串联
-Week 6:   FastAPI + Streamlit WebUI
-Week 7:   Docker 部署 + 测试 + 文档
-Week 8:   面试准备（README截图、Demo录制、简历更新）
+Week 1-2: RAG 模块实现                       ✅ 2026-05-14
+Week 3-4: Text-to-SQL + Function Calling      ✅ 2026-05-16
+Week 5:   LangGraph 多Agent 工作流串联        ✅ 2026-05-17
+Week 6:   Streamlit WebUI                     ⏳
+Week 7:   Docker 部署 + 测试 + 文档            ⏳
+Week 8:   面试准备                             ⏳
 ```
 
 ---
@@ -106,7 +106,7 @@ Week 8:   面试准备（README截图、Demo录制、简历更新）
 
 ---
 
-## 四-补：RAG 检索质量评估基线 🔴 待补
+## 四-补：RAG 检索质量评估基线 ✅ 2026-05-17 完成
 
 > 2026-05-16 新增：每个模块完成后必须建立评估基线，测试驱动改进
 
@@ -137,7 +137,7 @@ Week 8:   面试准备（README截图、Demo录制、简历更新）
 
 ---
 
-## 五、Week 5：LangGraph 多Agent 工作流（进阶关键，50%岗位要求）
+## 五、Week 5：LangGraph 多Agent 工作流 ✅ 2026-05-17 完成
 
 **Day 21-22：LangGraph 入门 + 单 Agent 改造**
 - 将 RAG Agent 改造为 LangGraph 节点
