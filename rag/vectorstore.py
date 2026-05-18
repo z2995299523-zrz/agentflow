@@ -1,9 +1,13 @@
 """
 向量存储 — ChromaDB 集成
-文档向量化（本地模型，免费）、存储、相似度检索
+文档向量化（本地模型，GPU加速）、存储、相似度检索
 """
 import os
 from typing import List, Optional
+
+# ⚠️ 国内必须设 HF 镜像，否则 huggingface.co 连接超时
+if not os.getenv("HF_ENDPOINT"):
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -11,27 +15,42 @@ from langchain_core.documents import Document
 
 from config import CHROMA_PERSIST_DIR
 
-
 # 中文友好的本地 Embedding 模型（首次自动下载，约 100MB）
 LOCAL_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 
 _embeddings = None
 
 
+def _detect_device() -> str:
+    """检测可用设备：优先 CUDA GPU，fallback CPU"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0)
+            mem_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            print(f"🖥️  检测到 GPU: {device_name} ({mem_gb:.1f}GB)，使用 CUDA 加速")
+            return "cuda"
+    except ImportError:
+        pass
+    print("🖥️  未检测到 GPU，使用 CPU（加载/推理较慢）")
+    return "cpu"
+
+
 def get_embeddings():
     """
     获取本地 Embedding 模型（单例，避免重复加载）
-    使用中文优化模型，免费、离线可用
+    自动检测 GPU，使用中文优化模型，免费、离线可用
     """
     global _embeddings
     if _embeddings is None:
-        print(f"⏳ 加载本地 Embedding 模型: {LOCAL_EMBEDDING_MODEL} ...")
+        device = _detect_device()
+        print(f"⏳ 加载本地 Embedding 模型: {LOCAL_EMBEDDING_MODEL} (device={device}) ...")
         _embeddings = HuggingFaceEmbeddings(
             model_name=LOCAL_EMBEDDING_MODEL,
-            model_kwargs={"device": "cpu"},
+            model_kwargs={"device": device},
             encode_kwargs={"normalize_embeddings": True},
         )
-        print("✅ Embedding 模型加载完成")
+        print(f"✅ Embedding 模型加载完成 (device={device})")
     return _embeddings
 
 
