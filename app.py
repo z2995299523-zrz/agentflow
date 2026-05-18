@@ -90,13 +90,13 @@ with st.sidebar:
 # 模块1：智能对话
 # ============================================
 def render_chat():
-    """聊天界面 — 调用 LangGraph 工作流进行多 Agent 协作"""
+    """聊天界面 — 调用 LangGraph 工作流进行多 Agent 协作（流式输出）"""
     st.header("💬 智能对话")
 
     # 知识库状态提示（文件系统检查不触发 BGE 加载）
     upload_dir = Path(UPLOAD_DIR)
     has_uploads = upload_dir.exists() and any(f.is_file() for f in upload_dir.iterdir())
-    
+
     if not has_uploads:
         st.info("📭 知识库为空，上传文档后可使用知识问答功能。切换到「📄 文档管理」上传文档。")
     else:
@@ -133,41 +133,63 @@ def render_chat():
     if prompt := st.chat_input("输入你的问题..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        with st.spinner("🤔 Agent 正在思考..."):
-            try:
-                wf = get_workflow()
-                result = wf.invoke(
+        try:
+            wf = get_workflow()
+            thinking_parts = []
+            final_state = None
+
+            with st.status("🤔 Agent 思考中...", expanded=True) as status:
+                for chunk in wf.stream(
                     {"question": prompt},
                     make_config(st.session_state.thread_id),
-                )
+                ):
+                    for node_name, state_update in chunk.items():
+                        if node_name == "supervisor":
+                            intent = state_update.get("intent", "unknown")
+                            st.write(f"🎯 Supervisor 识别意图: **{intent}**")
+                            thinking_parts.append(f"🎯 意图识别: {intent}")
 
-                answer = result.get("final_answer", "抱歉，未能获取到有效回答。")
-                intent = result.get("intent", "unknown")
-                rag_result = result.get("rag_result", "")
-                sql_result = result.get("sql_result", "")
+                        elif node_name == "rag":
+                            st.write("📚 RAG Agent 正在检索知识库...")
+                            thinking_parts.append("📚 路由到 RAG 知识库")
 
-                # 构造思考过程
-                thinking_lines = [f"🎯 意图识别: {intent}"]
-                if intent in ("rag", "mixed"):
-                    thinking_lines.append("📚 路由到 RAG 知识库")
-                if intent in ("sql", "mixed"):
-                    thinking_lines.append("🗄️ 路由到 SQL 数据库")
-                if intent == "parallel":
-                    thinking_lines.append("⚡ 并行路由: RAG ∥ SQL")
-                thinking = "\n".join(thinking_lines)
+                        elif node_name == "sql":
+                            st.write("🗄️ SQL Agent 正在查询数据库...")
+                            thinking_parts.append("🗄️ 路由到 SQL 数据库")
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "thinking": thinking,
-                })
+                        elif node_name == "finalize":
+                            st.write("📝 正在整理回答...")
 
-            except Exception as e:
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": f"❌ 处理请求时出错：{e}",
-                    "thinking": "",
-                })
+                        elif node_name == "fallback":
+                            st.write("⚠️ 无法识别意图，返回通用回答...")
+                            thinking_parts.append("⚠️ Fallback 兜底")
+
+                        if state_update:
+                            final_state = state_update
+
+                # 提取 final_answer
+                if final_state and final_state.get("final_answer"):
+                    answer = final_state["final_answer"]
+                else:
+                    answer = "抱歉，未能获取到有效回答。"
+
+                thinking = "\n".join(thinking_parts)
+
+                status.update(label="✅ 回答完成", state="complete")
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "thinking": thinking,
+            })
+
+        except Exception as e:
+            st.error(f"处理请求时出错：{e}")
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": f"❌ 处理请求时出错：{e}",
+                "thinking": "",
+            })
 
         st.rerun()
 
