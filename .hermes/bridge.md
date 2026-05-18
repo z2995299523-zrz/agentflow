@@ -11,20 +11,43 @@
 |------|------|------|
 | RAG | ✅ 完成 | loader + vectorstore(BGE本地) + chain(LCEL) |
 | Text-to-SQL | ✅ 完成 | sql/agent.py + visualizer.py + tools.py (FC封装) |
-| FastAPI | ✅ 完成 | main.py (7端点: RAG 4 + SQL 3, 代理按provider区分) |
-| LangGraph | ✅ 完成 | graph/(6模块)+eval/(3文件)+MemorySaver+Mixed双路+并行扇出 |
-| WebUI | ✅ 完成 | app.py — Chat+Upload+Query + 流式输出（wf.stream + st.status） |
+| FastAPI | ✅ 完成 | main.py (7端点: RAG 4 + SQL 3) |
+| LangGraph | ✅ 完成 | graph/(6模块)+eval/(3文件)+MemorySaver+Mixed双路 |
+| WebUI | ✅ 完成 | app.py — Chat+Upload+Query + 流式输出 |
 | Prompt-体系 | ✅ 完成 | prompts/ (5文件) |
 | FunctionCalling | ✅ 完成 | sql/tools.py + test (9项) |
-| Day 30 端到端测试 | ✅ 完成 | 3场景全绿 + 4 Bug修复 + 性能基线(P50=7.4s) |
+| 端到端测试 | ✅ 完成 | Day 30 三场景全绿 + 4 Bug修复 |
+| Docker 部署 | ✅ 完成 | Dockerfile + docker-compose.yml + start脚本 |
+| 测试体系 | ✅ 完成 | run_tests.py + run_eval.py |
+| README | ✅ 完成 | 架构图 + API表 + 测试基线 + 性能基线 |
 | 笔记库 | ✅ 24篇 | notes/ (含面试话术+踩坑) |
-| 下一步 | ⏳ Week 7 | Docker 部署完善 + 测试 + 文档 |
+| 下一步 | ⏳ Week 8 | 面试冲刺：简历更新 + 话术准备 + 投递 |
 
 ---
 
 ## 📜 历史记录
 
-### 2026-05-18 · 会话3 [Hermes] — Week 6 Day 30：端到端体验测试完成
+### 2026-05-18 · 会话4 [Hermes] — Week 7 完成：Docker + 测试体系 + README
+
+**Day 31-32: Docker 部署**
+- Dockerfile: Python 3.12-slim + wqy-microhei 中文字体 + HF 镜像 + uvicorn + streamlit
+- docker-compose.yml: ChromaDB/hf_cache/uploads/data 卷持久化 + .env 注入
+- start.bat / start.sh: 一键启动 FastAPI + Streamlit
+- .env.example: 含所有配置项说明（LLM/DB/Chroma/服务/上传）
+- requirements.txt: +langgraph
+
+**Day 33-34: 测试体系**
+- run_tests.py: 统一测试入口（SQL 18 + RAG 5 + FC 9 + Graph 17），支持 --quick 跳过 LLM
+- run_eval.py: 质量评估入口（路由准确率/端到端成功率/API 性能基线）
+- 删除 test_integration.py: FastAPI TestClient 全量 import 导致 segfault，已由 HTTP 端到端覆盖
+
+**Day 35: README 重写**
+- ASCII 架构图（Supervisor → RAG/SQL/Mixed/Fallback → Finalize）
+- 功能表格 + API 端点表 + 测试基线表 + 性能基线表
+- Docker/本地双启动方式
+- 面试话术（底部）
+
+**下一步:** Week 8 面试冲刺
 
 **测试结果:**
 - 三场景全绿（RAG查询/SQL查询+可视化/LangGraph工作流）
