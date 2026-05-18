@@ -13,17 +13,35 @@
 | Text-to-SQL | ✅ 完成 | sql/agent.py + visualizer.py + tools.py (FC封装) |
 | FastAPI | ✅ 完成 | main.py (7端点: RAG 4 + SQL 3, 代理按provider区分) |
 | LangGraph | ✅ 完成 | graph/(6模块)+eval/(3文件)+MemorySaver+Mixed双路+并行扇出 |
-| WebUI | 🚧 Day 28-29 完成 | app.py — Chat+Upload+Query + 流式输出（wf.stream + st.status） |
+| WebUI | ✅ 完成 | app.py — Chat+Upload+Query + 流式输出（wf.stream + st.status） |
 | Prompt-体系 | ✅ 完成 | prompts/ (5文件) |
 | FunctionCalling | ✅ 完成 | sql/tools.py + test (9项) |
-| 笔记库 | ✅ 23篇 | notes/ (含面试话术+踩坑) |
-| 下一步 | ⏳ Week 6 Day 30 | 端到端体验测试 + 截图 + 质量评估 |
+| Day 30 端到端测试 | ✅ 完成 | 3场景全绿 + 4 Bug修复 + 性能基线(P50=7.4s) |
+| 笔记库 | ✅ 24篇 | notes/ (含面试话术+踩坑) |
+| 下一步 | ⏳ Week 7 | Docker 部署完善 + 测试 + 文档 |
 
 ---
 
 ## 📜 历史记录
 
-### 2026-05-18 · 会话2 [Hermes] — Week 6 Day 28-29：流式输出 + SQL Agent 修复
+### 2026-05-18 · 会话3 [Hermes] — Week 6 Day 30：端到端体验测试完成
+
+**测试结果:**
+- 三场景全绿（RAG查询/SQL查询+可视化/LangGraph工作流）
+- P50 响应时间 7.4s | P95 15.8s（瓶颈在 DeepSeek LLM API 调用，非代码）
+- 所有测试套件回归：SQL 18/18, RAG 5/5, Graph 17/17
+
+**Bug 修复 (4个):**
+1. matplotlib 中文字体：`plt.style.use()` 在字体设置之后执行,覆盖 SimHei → 字体设置移到 style 之后
+2. test_graph.py MemorySaver：`build_workflow()` 默认 `enable_memory=True` 但测试没传 config → 传 `enable_memory=False`
+3. Pandas 3.0 + SQLAlchemy 2.0 断裂：`pd.read_sql_query()` 不兼容 Engine/Connection → 改用 `conn.exec_driver_sql()`
+4. test_rag.py：缺少 `import config`，HF_ENDPOINT 镜像不生效 → 在 import rag 之前 import config
+
+**修改文件:** visualizer.py, test_graph.py, test_rag.py, main.py, app.py
+
+**笔记:** `notes/2026-05-18_tech_day30-e2e-test.md`
+
+**下一步:** Week 7 — Docker 部署完善 + 测试 + 文档
 
 **流式输出：**
 - `app.py` render_chat() 改为 `wf.stream()` + `st.status()` 实时展示 Agent 思考过程

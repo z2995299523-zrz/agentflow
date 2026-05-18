@@ -15,10 +15,12 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# ⚠️ style.use() 会覆盖 font.sans-serif，所以字体设置必须在 style 之后
+plt.style.use('seaborn-v0_8-darkgrid')
+
 # Windows 中文字体 + 负号显示
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
-plt.style.use('seaborn-v0_8-darkgrid')
 
 # 深色配色方案
 COLORS = ['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#6A994E',

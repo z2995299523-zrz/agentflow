@@ -4,6 +4,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 os.chdir(os.path.dirname(__file__))
 
 def main():
+    # ⚠️ 必须先导入 config（在 rag 模块之前设置 HF_ENDPOINT 镜像）
+    import config as _  # noqa: F401
     # 1. 创建测试文档
     os.makedirs("data/test_docs", exist_ok=True)
     with open("data/test_docs/AgentFlow产品介绍.txt", "w", encoding="utf-8") as f:

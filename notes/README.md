@@ -8,6 +8,7 @@
 
 | 日期 | 类别 | 主题 |
 |------|------|------|
+| 2026-05-18 | tech | [[2026-05-18_tech_day30-e2e-test|Day 30 端到端体验测试：3场景全绿 + 4 Bug修复 + 性能基线]] |
 | 2026-05-18 | pitfall | [[2026-05-18_pitfall_sql-agent-agent_scratchpad修复|SQL Agent agent_scratchpad 错误修复：LangChain 1.2.13 React→tool-calling 迁移]] |
 | 2026-05-18 | discuss | [[2026-05-18_discuss_bge模型加载与本质|BGE 模型加载慢的原因 + 模型本质：参数/矩阵乘法/计算图]] |
 | 2026-05-18 | tech | [[2026-05-18_tech_streamlit-webui详解|Streamlit WebUI 详解：脚本模型、声明式UI、状态管理、三模块实现]] |

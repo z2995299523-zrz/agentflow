@@ -233,7 +233,13 @@ async def visualize_sql(request: QueryRequest):
         from sql.agent import SafeSQLDatabase
 
         db = SafeSQLDatabase.from_uri(get_db_uri())
-        df = pd.read_sql_query(result["sql"], db._engine)
+        # Pandas 3.0 的 read_sql_query 对 SQLAlchemy 2.0 Engine/Connection 不兼容
+        # 改用 exec_driver_sql 直接执行 SQL 获取结果
+        with db._engine.connect() as conn:
+            result_proxy = conn.exec_driver_sql(result["sql"])
+            rows = result_proxy.fetchall()
+            cols = result_proxy.keys()
+            df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
 
         if df.empty:
             raise HTTPException(404, "查询结果为空，无法生成图表")

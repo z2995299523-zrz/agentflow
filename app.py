@@ -314,8 +314,13 @@ def render_query():
                 if sql:
                     try:
                         db = SafeSQLDatabase.from_uri(get_db_uri())
-                        # ⚠️ db.run() 返回字符串，用 read_sql_query 直接获取 DataFrame
-                        df = pd.read_sql_query(sql, db._engine)
+                        # Pandas 3.0 + SQLAlchemy 2.0: read_sql_query 不兼容
+                        # 改用 exec_driver_sql 直接获取结果
+                        with db._engine.connect() as conn:
+                            result_proxy = conn.exec_driver_sql(sql)
+                            rows = result_proxy.fetchall()
+                            cols = result_proxy.keys()
+                            df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
                         if not df.empty:
                             st.subheader("📊 数据可视化")
 

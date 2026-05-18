@@ -252,7 +252,7 @@ def test_workflow_invoke():
     """端到端 invoke 返回 final_answer"""
     from graph.workflow import build_workflow
 
-    wf = build_workflow()
+    wf = build_workflow(enable_memory=False)
     result = wf.invoke({"question": "你好"})
     assert "final_answer" in result
     assert len(result["final_answer"]) > 0
@@ -341,7 +341,7 @@ def test_workflow_mixed():
     """Mixed 意图端到端：RAG → SQL → 汇总"""
     from graph.workflow import build_workflow
 
-    wf = build_workflow()
+    wf = build_workflow(enable_memory=False)
     result = wf.invoke({
         "question": "根据文档分析销售趋势",
         "intent": "mixed",  # 直接指定 mixed，跳过 supervisor
