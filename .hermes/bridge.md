@@ -13,15 +13,34 @@
 | Text-to-SQL | ✅ 完成 | sql/agent.py + visualizer.py + tools.py (FC封装) |
 | FastAPI | ✅ 完成 | main.py (7端点: RAG 4 + SQL 3, 代理按provider区分) |
 | LangGraph | ✅ 完成 | graph/(6模块)+eval/(3文件)+MemorySaver+Mixed双路+并行扇出 |
-| WebUI | 🚧 Day 26-27 完成 | app.py (334行) — Chat+Upload+Query 三模块，待运行验证 |
+| WebUI | 🚧 Day 28-29 完成 | app.py — Chat+Upload+Query + 流式输出（wf.stream + st.status） |
 | Prompt-体系 | ✅ 完成 | prompts/ (5文件) |
 | FunctionCalling | ✅ 完成 | sql/tools.py + test (9项) |
-| 笔记库 | ✅ 21篇 | notes/ (含面试话术+踩坑) |
-| 下一步 | ⏳ Week 6 Day 28-29 | 产品打磨：错误处理 + 流式输出 + 移动端适配 |
+| 笔记库 | ✅ 23篇 | notes/ (含面试话术+踩坑) |
+| 下一步 | ⏳ Week 6 Day 30 | 端到端体验测试 + 截图 + 质量评估 |
 
 ---
 
 ## 📜 历史记录
+
+### 2026-05-18 · 会话2 [Hermes] — Week 6 Day 28-29：流式输出 + SQL Agent 修复
+
+**流式输出：**
+- `app.py` render_chat() 改为 `wf.stream()` + `st.status()` 实时展示 Agent 思考过程
+- 用户发消息后看到逐步展开的进度：🎯 识别意图 → 🗄️ 查询数据库 → 📝 整理回答 → ✅ 完成
+- Claude Code 8 turns / $0.39
+
+**SQL Agent 修复：**
+- `agent_type` 从默认 `ZERO_SHOT_REACT_DESCRIPTION` 改为 `"tool-calling"`（修复 `agent_scratchpad` 错误）
+- SQL 提取适配 tool-calling 模式（`ast.literal_eval` 替代 `json.loads`）
+- 回调精确匹配 `tool_name == "sql_db_query"`
+
+**其他修复：**
+- Chat 页面首次加载不再被 BGE 模型阻塞（文件系统检查替代 `get_document_count()`）
+- BGE 模型 GPU 加速（GTX 1060 6GB CUDA） + HF 国内镜像
+- 清除损坏的 HuggingFace 缓存
+
+**笔记：** 4篇（Streamlit详解 + BGE本质讨论 + SQL agent_scratchpad修复 + 待写流式输出笔记）
 
 ### 2026-05-18 · 会话 [Hermes] — Week 6 Day 26-27：Streamlit WebUI 实现
 
