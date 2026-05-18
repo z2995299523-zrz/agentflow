@@ -32,9 +32,19 @@ class _SQLCaptureCallback(BaseCallbackHandler):
     ) -> None:
         """工具调用开始时记录 SQL"""
         tool_name = serialized.get("name", "")
-        # 只捕获 sql_db_query 类工具的输入（即生成的 SQL 语句）
-        if "sql" in tool_name.lower() and "query" in tool_name.lower():
-            self.sql_queries.append(input_str)
+        # 只捕获 sql_db_query 工具（不含 checker/schema/list）
+        if tool_name == "sql_db_query":
+            # tool-calling 模式下 input_str 是 Python repr 如 "{'query': 'SELECT ...'}"
+            import ast as _ast
+            try:
+                parsed = _ast.literal_eval(input_str)
+                if isinstance(parsed, dict):
+                    sql = parsed.get("query", "") or parsed.get("sql", "") or input_str
+                else:
+                    sql = input_str
+            except (ValueError, SyntaxError):
+                sql = input_str
+            self.sql_queries.append(sql)
 
 
 class SafeSQLDatabase(SQLDatabase):
@@ -88,14 +98,18 @@ class SQLQueryAgent:
         toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
 
         # Agent 系统提示词（从 prompts.sql 导入）
+        # ⚠️ 使用 tool-calling 模式而非默认的 zero-shot-react-description
+        #    原因：LangChain 1.2.13 的 React 模式要求 prompt 包含 {agent_scratchpad}，
+        #    自定义 prefix/suffix 会破坏模板结构。tool-calling 用 MessagesPlaceholder 正确处理。
         self.agent = create_sql_agent(
             llm=self.llm,
             toolkit=toolkit,
+            agent_type="tool-calling",
             verbose=False,
             prefix=SQL_AGENT_PREFIX,
-            suffix=SQL_AGENT_SUFFIX,
             handle_parsing_errors=True,
             return_intermediate_steps=True,
+            max_iterations=10,
         )
 
     def query(self, question: str) -> dict:
@@ -127,10 +141,28 @@ class SQLQueryAgent:
                 for step in result.get("intermediate_steps", []):
                     action = step[0] if step else None
                     if action and hasattr(action, "tool_input"):
-                        tool_input = str(action.tool_input)
-                        if any(kw in tool_input.upper() for kw in ("SELECT", "FROM")):
-                            sql = tool_input
+                        tool_input = action.tool_input
+                        # tool-calling 模式：tool_input 是 dict
+                        if isinstance(tool_input, dict):
+                            candidate = tool_input.get("query", "") or str(tool_input)
+                        else:
+                            candidate = str(tool_input)
+                        if any(kw in candidate.upper() for kw in ("SELECT", "FROM")):
+                            sql = candidate
                             break
+
+            # 清理 SQL 字符串：从 Python repr dict 中提取纯 SQL
+            sql = str(sql or "")
+            import ast as _ast
+            try:
+                parsed = _ast.literal_eval(sql)
+                if isinstance(parsed, dict):
+                    sql = parsed.get("query", "") or parsed.get("sql", "") or sql
+            except (ValueError, SyntaxError):
+                pass
+            # 去掉各种前缀包装
+            for wrap in ("SQL: ", "SQLQuery: ", "sql_db_query: "):
+                sql = sql.replace(wrap, "")
 
             return {
                 "question": question,
