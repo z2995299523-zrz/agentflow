@@ -43,6 +43,26 @@
 
 **下一步：** Week 6 Day 28-29：错误处理打磨 + 流式输出 + 移动端适配
 
+### 2026-05-18 · 讨论 — BGE 模型加载与本质
+
+**内容：** 深入讨论 BGE 加载慢的原因（IO+初始化，非计算慢），模型的本质（参数=压缩的知识，计算图=解压引擎），矩阵乘法的核心地位。笔记保存到 `notes/2026-05-18_discuss_bge模型加载与本质.md`。
+
+### 2026-05-18 · 会话 [Hermes] — Week 6 Day 26-27：Streamlit WebUI 实现
+
+**完成内容：**
+- `app.py` (334行) — Streamlit WebUI 三模块：
+  - 💬 智能对话：调用 LangGraph 工作流，展示 Agent 思考过程（intent + 路由）
+  - 📄 文档管理：多文件上传 → ETL 流水线 → ChromaDB，列表+删除
+  - 📊 数据查询：自然语言 → SQL → 表格 + 图表（可选 bar/line/pie）
+- `notes/2026-05-18_tech_streamlit-webui详解.md` — 深度讲解
+- 更新 `CLAUDE.md`（项目状态 + 代理配置变更）
+- 更新 `notes/README.md` 索引
+
+**踩坑：**
+1. Claude Code 用 `db.run(sql)` 返回字符串，不能直接 `pd.DataFrame()` → 改为 `pd.read_sql_query(sql, db._engine)`
+2. BGE 模型首次加载阻塞页面（`get_document_count()` 在首次 render 触发加载）→ 改为文件系统检查
+3. Claude Code 交付质量高，19 turns / $0.87，只发现 1 个 bug
+
 ---
 
 ## 📜 历史记录
