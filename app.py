@@ -93,15 +93,18 @@ def render_chat():
     """聊天界面 — 调用 LangGraph 工作流进行多 Agent 协作"""
     st.header("💬 智能对话")
 
-    # 知识库状态提示
-    try:
-        doc_count = get_document_count()
-        if doc_count == 0:
-            st.info("📭 知识库为空，上传文档后可使用知识问答功能。切换到「📄 文档管理」上传文档。")
-        else:
+    # 知识库状态提示（文件系统检查不触发 BGE 加载）
+    upload_dir = Path(UPLOAD_DIR)
+    has_uploads = upload_dir.exists() and any(f.is_file() for f in upload_dir.iterdir())
+    
+    if not has_uploads:
+        st.info("📭 知识库为空，上传文档后可使用知识问答功能。切换到「📄 文档管理」上传文档。")
+    else:
+        try:
+            doc_count = get_document_count()
             st.caption(f"📚 知识库已就绪（{doc_count} 个文本块）")
-    except Exception:
-        pass
+        except Exception:
+            st.caption("📚 知识库已就绪")
 
     # 欢迎消息
     if not st.session_state.messages:
