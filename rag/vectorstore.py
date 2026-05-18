@@ -5,10 +5,6 @@
 import os
 from typing import List, Optional
 
-# ⚠️ 国内必须设 HF 镜像，否则 huggingface.co 连接超时
-if not os.getenv("HF_ENDPOINT"):
-    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document

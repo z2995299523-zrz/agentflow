@@ -3,6 +3,12 @@ AgentFlow 配置管理
 从 .env 文件读取，兼容 Hermes 已有的 DeepSeek / DashScope Key
 """
 import os
+
+# ⚠️ 必须在所有其他 import 之前设置（huggingface_hub 读取此变量）
+# huggingface.co 国内被墙，用镜像加速模型下载
+if not os.getenv("HF_ENDPOINT"):
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 from dotenv import load_dotenv
 
 # 先加载项目自己的 .env，再加载 Hermes 的 .env（作为 fallback）
