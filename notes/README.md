@@ -8,6 +8,7 @@
 
 | 日期 | 类别 | 主题 |
 |------|------|------|
+| 2026-05-18 | tech | [[2026-05-18_tech_streamlit-webui详解|Streamlit WebUI 详解：脚本模型、声明式UI、状态管理、三模块实现]] |
 | 2026-05-17 | tech | [[2026-05-17_tech_rag评估指标详解|RAG 评估指标详解：Recall/Precision/MRR/AnswerRelevance + RAGAS Faithfulness]] |
 | 2026-05-17 | tech | [[2026-05-17_tech_rag评估与集成测试|RAG 评估基线（10题+4指标）+ 集成测试（5端点）]] |
 | 2026-05-17 | design | [[2026-05-17_design_mixed双向路由|Mixed 双向路由：RAG↔SQL 对称设计 + Post-condition Guard 防死循环]] |

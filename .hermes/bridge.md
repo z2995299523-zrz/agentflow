@@ -1,6 +1,6 @@
 # Hermes ↔ OpenClaw 共享上下文
 
-> 最后更新: 2026-05-15 09:30 | Hermes Agent 写入
+> 最后更新: 2026-05-18 14:30 | Hermes Agent 写入
 > 格式说明：每次对话追加到「历史记录」顶部，不覆盖。项目关键信息保持稳定。
 
 ---
@@ -12,12 +12,36 @@
 | RAG | ✅ 完成 | loader + vectorstore(BGE本地) + chain(LCEL) |
 | Text-to-SQL | ✅ 完成 | sql/agent.py + visualizer.py + tools.py (FC封装) |
 | FastAPI | ✅ 完成 | main.py (7端点: RAG 4 + SQL 3, 代理按provider区分) |
-| LangGraph | ✅ 完成 | graph/(6模块)+eval/(3文件)+MemorySaver+Mixed双路 |
-| WebUI | ⏳ 待开发 | Streamlit 未创建 |
+| LangGraph | ✅ 完成 | graph/(6模块)+eval/(3文件)+MemorySaver+Mixed双路+并行扇出 |
+| WebUI | 🚧 Day 26-27 完成 | app.py (334行) — Chat+Upload+Query 三模块，待运行验证 |
 | Prompt-体系 | ✅ 完成 | prompts/ (5文件) |
 | FunctionCalling | ✅ 完成 | sql/tools.py + test (9项) |
-| 笔记库 | ✅ 20篇 | notes/ (含面试话术+踩坑) |
-| 下一步 | ⏳ Week 6 | Streamlit WebUI |
+| 笔记库 | ✅ 21篇 | notes/ (含面试话术+踩坑) |
+| 下一步 | ⏳ Week 6 Day 28-29 | 产品打磨：错误处理 + 流式输出 + 移动端适配 |
+
+---
+
+## 📜 历史记录
+
+### 2026-05-18 · 会话 [Hermes] — Week 6 Day 26-27：Streamlit WebUI 实现
+
+**完成内容：**
+- `app.py` (334行) — Streamlit WebUI 三模块：
+  - 💬 智能对话：调用 LangGraph 工作流，展示 Agent 思考过程（intent + 路由）
+  - 📄 文档管理：多文件上传 → ETL 流水线 → ChromaDB，列表+删除
+  - 📊 数据查询：自然语言 → SQL → 表格 + 图表（可选 bar/line/pie）
+- `notes/2026-05-18_tech_streamlit-webui详解.md` — 深度讲解（Streamlit 脚本模型、声明式UI、状态管理、选型对比）
+- 更新 `CLAUDE.md`（项目状态 + 代理配置变更）
+- 更新 `notes/README.md` 索引
+
+**技术选型：** Streamlit 选型理由 — 纯 Python、`st.chat_message` 原生支持聊天界面、开发速度最快
+
+**踩坑：**
+1. Claude Code 用 `db.run(sql)` 返回字符串，不能直接 `pd.DataFrame()` → 改为 `pd.read_sql_query(sql, db._engine)`
+2. BGE 模型首次加载超时（>120s）→ 已知 Windows 虚拟内存限制，用户需手动 `streamlit run app.py`
+3. Claude Code 交付质量高，19 turns / $0.87，只发现 1 个 bug（已修）
+
+**下一步：** Week 6 Day 28-29：错误处理打磨 + 流式输出 + 移动端适配
 
 ---
 
