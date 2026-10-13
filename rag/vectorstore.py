@@ -24,11 +24,11 @@ def _detect_device() -> str:
         if torch.cuda.is_available():
             device_name = torch.cuda.get_device_name(0)
             mem_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            print(f"🖥️  检测到 GPU: {device_name} ({mem_gb:.1f}GB)，使用 CUDA 加速")
+            print(f"[GPU] {device_name} ({mem_gb:.1f}GB), CUDA accelerated")
             return "cuda"
     except ImportError:
         pass
-    print("🖥️  未检测到 GPU，使用 CPU（加载/推理较慢）")
+    print("[CPU] No GPU detected, using CPU (slower)")
     return "cpu"
 
 

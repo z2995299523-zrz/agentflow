@@ -1,119 +1,129 @@
-# AgentFlow — Project Context for Claude Code
+# CLAUDE.md
 
-> 最后更新: 2026-05-18 | 同步自 Hermes Agent
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
-AgentFlow 是企业级 AI 智能助手平台（个人作品项目，面试展示用）。
+> 最后更新: 2026-06-03 | 由 /init 生成
 
-核心能力：知识库问答(RAG) + 自然语言数据分析(Text-to-SQL) + 多Agent协作(LangGraph)
+## Quick Commands
 
-## Current Status (2026-05-18)
+```bash
+# 安装依赖
+pip install -r requirements.txt
+# 国内加速:
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-| 模块 | 状态 | 文件 |
-|------|------|------|
-| RAG | ✅ | rag/ (loader+vectorstore+chain), test_rag.py |
-| Text-to-SQL | ✅ | sql/agent.py + visualizer.py + tools.py |
-| Function Calling | ✅ | sql/tools.py + test_sql_tools.py |
-| Prompt 体系 | ✅ | prompts/ (system/rag/sql/examples) |
-| FastAPI | ✅ | main.py (7 endpoints) |
-| 笔记库 | ✅ | notes/ (20+篇,含面试话术+踩坑) |
-| LangGraph | ✅ | graph/ (6模块) + eval/ (3项评估) + parallel+mixed路由 |
-| RAG评估基线 | ✅ | eval/rag_eval.py (Recall 90%/MRR 0.90) |
-| WebUI | 🚧 | app.py 正在开发 (2026-05-18) |
+# 运行全部测试
+python run_tests.py
 
-详细进度见 `.hermes/bridge.md`，升级计划见 `.hermes/upgrade-plan.md`
+# 快速模式（跳过 LLM 调用，仅单元测试）
+python run_tests.py --quick
+
+# 运行单个测试套件
+python test_sql.py          # SQL 模块 (unittest, 18项)
+python test_rag.py          # RAG 模块 (unittest, 5项)
+python test_sql_tools.py    # Function Calling (unittest, 9项)
+python -m pytest test_graph.py -v --tb=short   # LangGraph (pytest, 17项)
+
+# 运行单个 pytest 用例
+python -m pytest test_graph.py::test_supervisor_routing -v
+
+# 质量评估
+python run_eval.py
+
+# 本地启动（Windows）
+start.bat
+# 本地启动（Linux/Mac）
+bash start.sh
+
+# 单独启动服务
+uvicorn main:app --host 0.0.0.0 --port 8000     # FastAPI → http://localhost:8000/docs
+streamlit run app.py --server.port 8501           # WebUI → http://localhost:8501
+
+# Docker
+docker-compose up -d
+docker-compose down
+```
+
+## Environment Setup
+
+- 配置从 **两个 `.env` 文件** 加载：项目 `.env`（优先）+ `D:/hermes-agent-home/.env`（fallback）
+- 复制 `.env.example` → `.env`，填入 `DEEPSEEK_API_KEY`
+- `HF_ENDPOINT=https://hf-mirror.com` 在 `config.py` 顶部设置（必须在其他 import 之前，否则 BGE 模型下载失败）
+- `run_tests.py` 和 `run_eval.py` 各自硬编码读取 `D:/hermes-agent-home/.env` — 如果该路径不存在，测试会因缺 Key 失败
+
+## Architecture
+
+### LangGraph Workflow (核心路由逻辑)
+
+```
+START → supervisor → rag | sql | fallback
+         rag → [mixed且SQL未跑 → sql] | [其他 → finalize]
+         sql → [mixed且RAG未跑 → rag] | [其他 → finalize]
+         finalize → END
+         fallback → END
+```
+
+- **supervisor**: LLM 零样本意图分类 → `rag` / `sql` / `fallback`
+- **mixed 双路**: 当意图为 `mixed` 时，RAG 和 SQL 节点会相互路由，确保两者都执行后再 finalize
+- **防死循环**: `route_after_rag`/`route_after_sql` 检查对方结果是否已存在，避免无限循环
+- **MemorySaver**: 通过 `thread_id` 隔离多轮对话，`make_config(thread_id)` 创建会话，`clear_memory(thread_id)` 清除
+
+### State 定义 (`graph/state.py`)
+
+`AgentState` 是一个 `TypedDict`，字段在各节点间流转：
+- `messages` — 用 `add_messages` reducer 自动追加（不覆盖）
+- `question` / `intent` / `rag_result` / `sql_result` / `final_answer` — 普通字段，节点返回部分字典即可合并
+
+### 模块依赖关系
+
+```
+app.py (Streamlit WebUI) ──→ graph/ (LangGraph workflow)
+main.py (FastAPI)       ──→ rag/ + sql/  (独立调用，不走 graph)
+config.py               ←── 所有模块共用（get_llm_kwargs / get_db_uri）
+prompts/                ←── rag/ + sql/ + graph/supervisor 引用
+```
+
+- `app.py` 用 `wf.stream()` 实现流式输出，通过 `st.status()` 实时展示 supervisor 意图和 agent 执行过程
+- `main.py` 的 7 个 REST 端点是独立调用，不经过 LangGraph（Week 5 之前的遗留设计）
+
+### Test Infrastructure
+
+| 套件 | 框架 | 文件 | LLM 依赖 |
+|------|------|------|:--:|
+| SQL 模块 | `unittest` | `test_sql.py` | 是 |
+| RAG 模块 | `unittest` | `test_rag.py` | 是 |
+| FC 工具 | `unittest` | `test_sql_tools.py` | 否 |
+| LangGraph | `pytest` | `test_graph.py` | 是 |
+| 评估 | `pytest` | `eval/langgraph_eval.py` | 是 |
+
+`run_tests.py --quick` 跳过 LangGraph 评估，其他套件即使需要 LLM 也会运行（需 Key）。
 
 ## Tech Stack
-- Python 3.12+
-- LangChain 1.x（⚠️ 不要用 0.x 的 chains 模块，用 LCEL）
-- LangGraph 1.1.3（已安装，Week 5 用）
-- 向量模型: BAAI/bge-small-zh-v1.5 (本地免费, sentence-transformers)
-- 向量数据库: ChromaDB (本地持久化 ~/agentflow/chroma_data/)
-- LLM: DeepSeek v4-pro (via OpenAI 兼容 API, 从 Hermes .env 读 Key)
-- Web: FastAPI + Streamlit
 
-## Project Structure
-```
-C:\Users\DELL\agentflow\
-├── main.py              # FastAPI 入口 (RAG 4端点 + SQL 3端点)
-├── config.py            # 全局配置 (LLM/DB/代理/上传)
-├── rag/                 # RAG 模块 ✅
-│   ├── loader.py        #   文档加载 (PDF/Word/TXT/MD)
-│   ├── vectorstore.py   #   向量存储 (ChromaDB + BGE)
-│   ├── chain.py         #   LCEL 问答链
-│   └── __init__.py
-├── sql/                 # Text-to-SQL 模块 ✅
-│   ├── agent.py         #   SQL Agent (LangChain create_sql_agent)
-│   ├── visualizer.py    #   图表生成 (matplotlib → Base64 PNG)
-│   ├── tools.py         #   Function Calling 工具封装
-│   └── __init__.py
-├── prompts/             # Prompt 集中管理 ✅
-│   ├── system.py        #   系统级角色设定
-│   ├── rag.py           #   RAG 提示词
-│   ├── sql.py           #   SQL 提示词 (含 suffix 格式约束)
-│   ├── examples.py      #   Few-shot 示例
-│   └── __init__.py      #   统一导出
-├── graph/               # LangGraph 多Agent 工作流 ✅
-│   ├── __init__.py      #   导出 AgentState, build_workflow, make_config
-│   ├── state.py         #   共享 State 定义 (AgentState TypedDict)
-│   ├── nodes.py         #   RAG + SQL 节点 (支持外部注入预热)
-│   ├── supervisor.py    #   路由器 (LLM 零样本意图分类)
-│   ├── workflow.py      #   StateGraph 组装 + Mixed双路 + MemorySaver
-│   └── memory.py        #   多轮对话记忆 (make_config/clear_memory)
-├── eval/                # LangGraph 评估模块 ✅
-│   ├── __init__.py
-│   ├── langgraph_eval.py  # 3项评估指标 (路由/端到端/LLM-as-Judge)
-│   └── test_questions.json # 10题测试集
-├── notes/               # 技术笔记库 (面试准备) ✅
-│   └── README.md        #   20篇笔记索引
-├── data/
-│   └── sample.db        # SQLite 示例库 (3表72条)
-├── chroma_data/         # ChromaDB 持久化 (gitignore)
-├── uploads/             # 文档上传目录
-├── test_rag.py          # RAG 测试
-├── test_sql.py          # SQL 测试 (18项)
-├── test_sql_tools.py    # Function Calling 测试 (9项)
-├── test_graph.py        # LangGraph 测试 (8项, 7/8通过)
-├── .hermes/
-│   ├── bridge.md        # Hermes↔ClaudeCode 协作桥梁
-│   ├── upgrade-plan.md  # 8周升级计划
-│   └── plans/           # 实施计划存档
-└── requirements.txt
-```
-
-## Key Config (config.py)
-
-```python
-# LLM: 默认 deepseek，支持 openai/dashscope 切换
-get_llm_kwargs()  # 返回 {model, api_key, temperature, base_url}
-
-# 代理逻辑已移除（2026-05-17）
-# 所有 LLM 直连，HuggingFace 用 HF_ENDPOINT=https://hf-mirror.com 镜像
-
-# 数据库: SQLite ./data/sample.db (3表: products/customers/sales)
-# 向量库: ChromaDB ./chroma_data/
-# 上传: ./uploads/ (Max 50MB)
-```
+| 层 | 技术 | 注意 |
+|----|------|------|
+| LLM | DeepSeek Chat (via OpenAI 兼容 API) | 默认 provider，便宜/国内直连/中文好 |
+| AI 框架 | LangChain 1.x + LangGraph 1.x | ⚠️ 禁止用 0.x chains 模块，用 LCEL |
+| Embedding | BAAI/bge-small-zh-v1.5 (sentence-transformers) | 本地免费，GPU 加速 |
+| 向量库 | ChromaDB | 本地持久化 `./chroma_data/` |
+| 后端 | FastAPI | 异步，7 端点 |
+| 前端 | Streamlit | app.py，三模块：Chat/Upload/Query |
+| 数据库 | SQLite `./data/sample.db` | 3 表：products/customers/sales（72 条） |
+| 部署 | Docker Compose | 4 个卷持久化：chroma_data/uploads/data/hf_cache |
 
 ## LangChain 1.x 关键约束（踩坑总结）
 
-1. **禁止 import langchain.chains** — 用 LCEL 手动组合
-2. **langchain_chroma 包不存在** — 用 `langchain_community.vectorstores.Chroma`
-3. **@tool 装饰器语法**: `@tool(description=...)` 不是 `@tool("...")`
-4. **create_sql_agent 必须**: `handle_parsing_errors=True` + `return_intermediate_steps=True`
-5. **SafeSQLDatabase.run() 必须透传 **kwargs**（否则 execution_options 报错）
+1. **禁止 `import langchain.chains`** — 用 LCEL 手动组合
+2. **`langchain_chroma` 包不存在** — 用 `langchain_community.vectorstores.Chroma`
+3. **`@tool` 装饰器语法**: `@tool(description=...)` 不是 `@tool("...")`
+4. **`create_sql_agent` 必须**: `handle_parsing_errors=True` + `return_intermediate_steps=True`
+5. **`SafeSQLDatabase.run()` 必须透传 `**kwargs`**（否则 `execution_options` 报错）
 6. **DeepSeek 输出格式不稳定** — 通过 suffix 强制 `Final Answer:` 格式解决
-7. **matplotlib.use('Agg') 必须在 import pyplot 之前**
+7. **`matplotlib.use('Agg')` 必须在 `import pyplot` 之前**
 8. **Windows 中文字体**: SimHei + `axes.unicode_minus = False`
+9. **Pandas 3.0 + SQLAlchemy 2.0**: `read_sql_query` 不兼容，用 `conn.exec_driver_sql()` 替代
 
 完整踩坑记录见 `notes/2026-05-16_pitfall_fastapi-启动踩坑.md`
-
-## Coding Standards
-- 所有公开函数写中文 docstring + type hints
-- 4 空格缩进，UTF-8 编码
-- 代码注释用中文
-- LLM 调用统一走 `config.get_llm_kwargs()`，不硬编码 Key
-- 新增 Prompt 写入 `prompts/` 目录，不从代码里拼字符串
 
 ## ⛔ 硬性规则（不可跳过）
 
@@ -122,11 +132,30 @@ get_llm_kwargs()  # 返回 {model, api_key, temperature, base_url}
 3. **评估基线**: 每个模块必须有数字指标（Recall/准确率/成功率），不做玄学优化
 4. **讨论即笔记**: 任何技术讨论/问答内容自动写入 notes/
 
-六步教学法详细说明见 agentflow-dev skill。
+## Coding Standards
+
+- 所有公开函数写中文 docstring + type hints
+- 4 空格缩进，UTF-8 编码
+- 代码注释用中文
+- LLM 调用统一走 `config.get_llm_kwargs()`，不硬编码 Key
+- 新增 Prompt 写入 `prompts/` 目录，不从代码里拼字符串
+
+## Current Status (2026-06-03)
+
+| 模块 | 状态 |
+|------|:--:|
+| RAG + Embedding | ✅ |
+| Text-to-SQL + FC | ✅ |
+| LangGraph 多Agent | ✅ |
+| FastAPI (7 端点) | ✅ |
+| Streamlit WebUI (流式输出) | ✅ |
+| Docker 部署 | ✅ |
+| 测试体系 + 评估 | ✅ |
+| README + 文档 | ✅ |
+| 面试冲刺 (Week 8) | ⏳ |
 
 ## 用户背景（张润泽）
-- 6年银行对公数据开发（ETL/数据库/调度）
-- 大专学历，全职转型 AI 应用开发
+- 6 年银行对公数据开发（ETL/数据库/调度），大专学历，全职转型 AI 应用开发
 - 不能读英文技术文档（需翻译辅助）
 - 目标城市：长三角（上海/杭州/宁波）或珠三角
 - 所有讲解必须用 ETL/数据库概念做类比
@@ -136,4 +165,4 @@ get_llm_kwargs()  # 返回 {model, api_key, temperature, base_url}
 - Hermes 负责：需求理解、任务分解、写计划、进度跟进、中文沟通、代码讲解
 - Claude Code 负责：编码实现、代码审查、运行测试、修复 bug
 - 桥梁文件：`.hermes/bridge.md`（每次会话结束后更新）
-- 项目知识库：`notes/`（20+篇笔记，面试可直接用）
+- 项目知识库：`notes/`（24 篇笔记，面试可直接用）
