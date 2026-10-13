@@ -8,6 +8,8 @@
 
 | 日期 | 类别 | 主题 |
 |------|------|------|
+| 2026-10-13 | design | [[2026-10-13_design_nl2sql专题库改造|NL2SQL 改造设计：元数据标准格式 + 血缘图 + 七步流水线 + 静态校验 + 模拟专题库 + 三组对照评估]] |
+| 2026-10-13 | discuss | [[2026-10-13_discuss_nl2sql改造需求澄清|NL2SQL 改造需求澄清：专题库模型结构 + 血缘驱动，6 项结论及设计影响]] |
 | 2026-05-18 | tech | [[2026-05-18_tech_day30-e2e-test|Day 30 端到端体验测试：3场景全绿 + 4 Bug修复 + 性能基线]] |
 | 2026-05-18 | pitfall | [[2026-05-18_pitfall_sql-agent-agent_scratchpad修复|SQL Agent agent_scratchpad 错误修复：LangChain 1.2.13 React→tool-calling 迁移]] |
 | 2026-05-18 | discuss | [[2026-05-18_discuss_bge模型加载与本质|BGE 模型加载慢的原因 + 模型本质：参数/矩阵乘法/计算图]] |
