@@ -1,0 +1,498 @@
+# NL2SQL 评估题库（模拟专题库：银行对公存贷款）
+#
+# 评估时固定「今天」为 2026-10-13，所以「上月末」是 2026-09-30，「年初」对比的是 2025-12-31。
+# 标准 SQL 按 GaussDB / PostgreSQL 方言书写，评估时转换成 DuckDB 方言在模拟库上执行。
+#
+# 字段说明：
+#   id            题目编号
+#   category      类别
+#   turns         用户输入，追问题有两轮
+#   expect        sql 表示期望生成 SQL，clarify 表示期望被反问
+#   ordered       结果是否要求行顺序（默认 false）
+#   gold_tables   标准用表
+#   gold_columns  关键字段
+#   gold_sql      标准 SQL（追问题是第二轮的标准 SQL）
+#
+# 有涉及维度列的题目，题面里都写明了要列出哪些列，避免因为多列少列产生争议。
+
+# ═══════════════ 基础时点余额：单表、口径明确 ═══════════════
+
+- id: B01
+  category: 基础时点余额
+  turns: ["查 2026 年 9 月末全行对公贷款余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb]
+  gold_sql: |
+    SELECT SUM(loan_bal_rmb) AS loan_bal_rmb
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: B02
+  category: 基础时点余额
+  turns: ["查 2026 年 6 月 30 日全行对公不良贷款余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.npl_bal_rmb]
+  gold_sql: |
+    SELECT SUM(npl_bal_rmb) AS npl_bal_rmb
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt = DATE '2026-06-30'
+
+- id: B03
+  category: 基础时点余额
+  turns: ["查 2026 年 9 月末全行对公保证金存款余额"]
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.margin_bal_rmb]
+  gold_sql: |
+    SELECT SUM(margin_bal_rmb) AS margin_bal_rmb
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: B04
+  category: 基础时点余额
+  turns: ["查 2026 年 9 月末客户 C000015 的对公贷款余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb, ads.corp_cust_loan_bal_d.cust_no]
+  gold_sql: |
+    SELECT SUM(loan_bal_rmb) AS loan_bal_rmb
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+      AND cust_no = 'C000015'
+
+- id: B05
+  category: 基础时点余额
+  turns: ["查 2026 年 9 月末各放款机构的对公贷款余额，列出机构号和贷款余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb, ads.corp_cust_loan_bal_d.org_no]
+  gold_sql: |
+    SELECT org_no, SUM(loan_bal_rmb) AS loan_bal_rmb
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+    GROUP BY org_no
+
+- id: B06
+  category: 基础时点余额
+  turns: ["查 2026 年 9 月末机构 1101 的有余额对公客户数"]
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_cust_cnt, ads.org_corp_dep_bal_d.org_no]
+  gold_sql: |
+    SELECT dep_cust_cnt
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+      AND org_no = '1101'
+
+- id: B07
+  category: 基础时点余额
+  turns: ["查 2026 年 9 月末全行对公贷款借据笔数"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.duebill_cnt]
+  gold_sql: |
+    SELECT SUM(duebill_cnt) AS duebill_cnt
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: B08
+  category: 基础时点余额
+  turns: ["查 2026 年 9 月末全行对公活期存款余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_dep_bal_d]
+  gold_columns: [ads.corp_cust_dep_bal_d.cur_dep_bal_rmb]
+  gold_sql: |
+    SELECT SUM(cur_dep_bal_rmb) AS cur_dep_bal_rmb
+    FROM ads.corp_cust_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+# ═══════════════ 口径区分：名字相近的字段要选对 ═══════════════
+
+- id: K01
+  category: 口径区分
+  turns: ["查 2026 年 9 月末全行不含保证金的对公存款余额"]
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_bal_rmb]
+  gold_sql: |
+    SELECT SUM(dep_bal_rmb) AS dep_bal_rmb
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: K02
+  category: 口径区分
+  turns: ["查 2026 年 9 月末全行含保证金的对公存款余额"]
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_bal_tot_rmb]
+  gold_sql: |
+    SELECT SUM(dep_bal_tot_rmb) AS dep_bal_tot_rmb
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: K03
+  category: 口径区分
+  turns: ["查 2026 年 9 月末各开户机构的对公存款，把不含保证金的存款余额和保证金存款余额分成两列，连同机构号一起列出"]
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_bal_rmb, ads.org_corp_dep_bal_d.margin_bal_rmb]
+  gold_sql: |
+    SELECT org_no, dep_bal_rmb, margin_bal_rmb
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: K04
+  category: 口径区分
+  turns: ["查 2026 年 9 月末全行对公定期存款余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_dep_bal_d]
+  gold_columns: [ads.corp_cust_dep_bal_d.fix_dep_bal_rmb]
+  gold_sql: |
+    SELECT SUM(fix_dep_bal_rmb) AS fix_dep_bal_rmb
+    FROM ads.corp_cust_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: K05
+  category: 口径区分
+  turns: ["查 2026 年 9 月末全行对公贷款不良率，用百分比表示并保留两位小数"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.npl_bal_rmb, ads.corp_cust_loan_bal_d.loan_bal_rmb]
+  gold_sql: |
+    SELECT ROUND(100.0 * SUM(npl_bal_rmb) / SUM(loan_bal_rmb), 2) AS npl_ratio_pct
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: K06
+  category: 口径区分
+  turns: ["查 2026 年 9 月末全行全口径存款余额大于零的对公客户数，同一客户在多个机构开户只算一次"]
+  expect: sql
+  gold_tables: [ads.corp_cust_dep_bal_d]
+  gold_columns: [ads.corp_cust_dep_bal_d.cust_no, ads.corp_cust_dep_bal_d.dep_bal_tot_rmb]
+  gold_sql: |
+    SELECT COUNT(DISTINCT cust_no) AS cust_cnt
+    FROM ads.corp_cust_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+      AND dep_bal_tot_rmb > 0
+
+# ═══════════════ 维度关联：要关联维表，并注意粒度 ═══════════════
+
+- id: D01
+  category: 维度关联
+  turns: ["查 2026 年 9 月末各一级分行不含保证金的对公存款余额，列出一级分行名称和余额"]
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d, dim.org]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_bal_rmb, dim.org.lvl1_org_nm]
+  gold_sql: |
+    SELECT o.lvl1_org_nm, SUM(b.dep_bal_rmb) AS dep_bal_rmb
+    FROM ads.org_corp_dep_bal_d b
+    JOIN dim.org o ON b.org_no = o.org_no
+    WHERE b.data_dt = DATE '2026-09-30'
+    GROUP BY o.lvl1_org_nm
+
+- id: D02
+  category: 维度关联
+  turns: ["查 2026 年 9 月末各行业不含保证金的对公存款余额，列出行业名称和余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_dep_bal_d, dim.corp_cust]
+  gold_columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb, dim.corp_cust.industry_nm]
+  gold_sql: |
+    SELECT c.industry_nm, SUM(b.dep_bal_rmb) AS dep_bal_rmb
+    FROM ads.corp_cust_dep_bal_d b
+    JOIN dim.corp_cust c ON b.cust_no = c.cust_no
+    WHERE b.data_dt = DATE '2026-09-30'
+    GROUP BY c.industry_nm
+
+- id: D03
+  category: 维度关联
+  turns: ["查 2026 年 9 月末不含保证金存款余额最高的 10 个对公客户，列出客户号、客户名称和余额，按余额从高到低排列"]
+  expect: sql
+  ordered: true
+  gold_tables: [ads.corp_cust_dep_bal_d, dim.corp_cust]
+  gold_columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb, ads.corp_cust_dep_bal_d.cust_no, dim.corp_cust.cust_nm]
+  gold_sql: |
+    SELECT b.cust_no, c.cust_nm, SUM(b.dep_bal_rmb) AS dep_bal_rmb
+    FROM ads.corp_cust_dep_bal_d b
+    JOIN dim.corp_cust c ON b.cust_no = c.cust_no
+    WHERE b.data_dt = DATE '2026-09-30'
+    GROUP BY b.cust_no, c.cust_nm
+    ORDER BY dep_bal_rmb DESC
+    LIMIT 10
+
+- id: D04
+  category: 维度关联
+  turns: ["查 2026 年 9 月末各企业规模的对公贷款余额，列出规模名称和余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d, dim.corp_cust]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb, dim.corp_cust.scale_nm]
+  gold_sql: |
+    SELECT c.scale_nm, SUM(l.loan_bal_rmb) AS loan_bal_rmb
+    FROM ads.corp_cust_loan_bal_d l
+    JOIN dim.corp_cust c ON l.cust_no = c.cust_no
+    WHERE l.data_dt = DATE '2026-09-30'
+    GROUP BY c.scale_nm
+
+- id: D05
+  category: 维度关联
+  turns: ["查 2026 年 9 月末各二级分行的对公贷款余额，列出二级分行名称和余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d, dim.org]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb, dim.org.lvl2_org_nm]
+  gold_sql: |
+    SELECT o.lvl2_org_nm, SUM(l.loan_bal_rmb) AS loan_bal_rmb
+    FROM ads.corp_cust_loan_bal_d l
+    JOIN dim.org o ON l.org_no = o.org_no
+    WHERE l.data_dt = DATE '2026-09-30'
+    GROUP BY o.lvl2_org_nm
+
+- id: D06
+  category: 维度关联
+  turns: ["查 2026 年 9 月末一级分行「上海分行」辖内、行业为「制造业」的客户不含保证金的对公存款余额合计"]
+  expect: sql
+  gold_tables: [ads.corp_cust_dep_bal_d, dim.org, dim.corp_cust]
+  gold_columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb, dim.org.lvl1_org_nm, dim.corp_cust.industry_nm]
+  gold_sql: |
+    SELECT SUM(b.dep_bal_rmb) AS dep_bal_rmb
+    FROM ads.corp_cust_dep_bal_d b
+    JOIN dim.org o ON b.org_no = o.org_no
+    JOIN dim.corp_cust c ON b.cust_no = c.cust_no
+    WHERE b.data_dt = DATE '2026-09-30'
+      AND o.lvl1_org_nm = '上海分行'
+      AND c.industry_nm = '制造业'
+
+# ═══════════════ 时间口径：较年初、较上月、日均、相对日期 ═══════════════
+
+- id: T01
+  category: 时间口径
+  turns: ["查 2026 年 9 月末各一级分行对公贷款余额较上月末的增量，列出一级分行名称和增量"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d, dim.org]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb, ads.corp_cust_loan_bal_d.data_dt, dim.org.lvl1_org_nm]
+  gold_sql: |
+    SELECT o.lvl1_org_nm,
+           SUM(CASE WHEN l.data_dt = DATE '2026-09-30' THEN l.loan_bal_rmb ELSE 0 END)
+         - SUM(CASE WHEN l.data_dt = DATE '2026-08-31' THEN l.loan_bal_rmb ELSE 0 END) AS loan_bal_inc
+    FROM ads.corp_cust_loan_bal_d l
+    JOIN dim.org o ON l.org_no = o.org_no
+    WHERE l.data_dt IN (DATE '2026-09-30', DATE '2026-08-31')
+    GROUP BY o.lvl1_org_nm
+
+- id: T02
+  category: 时间口径
+  turns: ["查 2026 年 9 月末全行不含保证金的对公存款余额较年初的增量"]
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_bal_rmb, ads.org_corp_dep_bal_d.data_dt]
+  gold_sql: |
+    SELECT SUM(CASE WHEN data_dt = DATE '2026-09-30' THEN dep_bal_rmb ELSE 0 END)
+         - SUM(CASE WHEN data_dt = DATE '2025-12-31' THEN dep_bal_rmb ELSE 0 END) AS dep_bal_inc
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt IN (DATE '2026-09-30', DATE '2025-12-31')
+
+- id: T03
+  category: 时间口径
+  turns: ["查 2026 年 9 月末各开户机构不含保证金的对公存款年日均余额，列出机构号和年日均余额"]
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.ytd_avg_bal_rmb, ads.org_corp_dep_bal_d.org_no]
+  gold_sql: |
+    SELECT org_no, ytd_avg_bal_rmb
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: T04
+  category: 时间口径
+  turns: ["查 2026 年 9 月末全行不含保证金的对公存款月日均余额"]
+  expect: sql
+  gold_tables: [ads.corp_cust_dep_bal_d]
+  gold_columns: [ads.corp_cust_dep_bal_d.mtd_avg_bal_rmb]
+  gold_sql: |
+    SELECT SUM(mtd_avg_bal_rmb) AS mtd_avg_bal_rmb
+    FROM ads.corp_cust_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: T05
+  category: 时间口径
+  turns: ["查上月末全行对公贷款余额较年初的增幅，用百分比表示并保留两位小数"]
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb, ads.corp_cust_loan_bal_d.data_dt]
+  gold_sql: |
+    SELECT ROUND(100.0 * (SUM(CASE WHEN data_dt = DATE '2026-09-30' THEN loan_bal_rmb ELSE 0 END)
+                        - SUM(CASE WHEN data_dt = DATE '2025-12-31' THEN loan_bal_rmb ELSE 0 END))
+                 / SUM(CASE WHEN data_dt = DATE '2025-12-31' THEN loan_bal_rmb ELSE 0 END), 2) AS loan_bal_growth_pct
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt IN (DATE '2026-09-30', DATE '2025-12-31')
+
+# ═══════════════ 向上溯源：专题层没有的维度或明细，要上溯并还原加工条件 ═══════════════
+
+- id: U01
+  category: 向上溯源
+  turns: ["查 2026 年 9 月末各币种不含保证金的对公存款原币余额，列出币种代码和原币余额"]
+  expect: sql
+  gold_tables: [dwd.corp_dep_acct_d, dim.corp_cust]
+  gold_columns: [dwd.corp_dep_acct_d.acct_bal, dwd.corp_dep_acct_d.ccy_cd, dwd.corp_dep_acct_d.is_margin]
+  gold_sql: |
+    SELECT a.ccy_cd, SUM(a.acct_bal) AS acct_bal
+    FROM dwd.corp_dep_acct_d a
+    JOIN dim.corp_cust c ON a.cust_no = c.cust_no
+    WHERE a.data_dt = DATE '2026-09-30'
+      AND a.is_margin = '0'
+    GROUP BY a.ccy_cd
+
+- id: U02
+  category: 向上溯源
+  turns: ["查 2026 年 9 月末各贷款产品的对公贷款余额（折人民币），列出产品代码和余额"]
+  expect: sql
+  gold_tables: [dwd.corp_loan_duebill_d, dim.corp_cust]
+  gold_columns: [dwd.corp_loan_duebill_d.bal_rmb, dwd.corp_loan_duebill_d.prod_cd]
+  gold_sql: |
+    SELECT l.prod_cd, SUM(l.bal_rmb) AS loan_bal_rmb
+    FROM dwd.corp_loan_duebill_d l
+    JOIN dim.corp_cust c ON l.cust_no = c.cust_no
+    WHERE l.data_dt = DATE '2026-09-30'
+    GROUP BY l.prod_cd
+
+- id: U03
+  category: 向上溯源
+  turns: ["查 2026 年 9 月末对公贷款各五级分类的余额（折人民币），列出五级分类代码和余额"]
+  expect: sql
+  gold_tables: [dwd.corp_loan_duebill_d, dim.corp_cust]
+  gold_columns: [dwd.corp_loan_duebill_d.bal_rmb, dwd.corp_loan_duebill_d.five_cls_cd]
+  gold_sql: |
+    SELECT l.five_cls_cd, SUM(l.bal_rmb) AS loan_bal_rmb
+    FROM dwd.corp_loan_duebill_d l
+    JOIN dim.corp_cust c ON l.cust_no = c.cust_no
+    WHERE l.data_dt = DATE '2026-09-30'
+    GROUP BY l.five_cls_cd
+
+- id: U04
+  category: 向上溯源
+  turns: ["查 2026 年 9 月末客户 C000030 的对公存款账户明细，列出账号、币种代码、是否保证金和折人民币余额"]
+  expect: sql
+  gold_tables: [dwd.corp_dep_acct_d]
+  gold_columns: [dwd.corp_dep_acct_d.acct_no, dwd.corp_dep_acct_d.bal_rmb, dwd.corp_dep_acct_d.cust_no]
+  gold_sql: |
+    SELECT acct_no, ccy_cd, is_margin, bal_rmb
+    FROM dwd.corp_dep_acct_d
+    WHERE data_dt = DATE '2026-09-30'
+      AND cust_no = 'C000030'
+
+- id: U05
+  category: 向上溯源
+  turns: ["查 2026 年 9 月末已销户的对公存款账户数"]
+  expect: sql
+  gold_tables: [ods.core_dep_acct]
+  gold_columns: [ods.core_dep_acct.acct_stat, ods.core_dep_acct.cust_type]
+  gold_sql: |
+    SELECT COUNT(*) AS acct_cnt
+    FROM ods.core_dep_acct
+    WHERE data_dt = DATE '2026-09-30'
+      AND cust_type = '1'
+      AND acct_stat = '1'
+
+# ═══════════════ 反问：口径没说清，应该先问再生成 ═══════════════
+
+- id: A01
+  category: 反问
+  turns: ["查 2026 年 9 月末各开户机构的对公存款余额，列出机构号和余额"]
+  expect: clarify
+
+- id: A02
+  category: 反问
+  turns: ["查 2026 年 9 月末对公存款余额最高的 10 个客户，列出客户名称和余额"]
+  expect: clarify
+
+- id: A03
+  category: 反问
+  turns: ["查 2026 年 9 月末全行对公存款余额较年初的增量"]
+  expect: clarify
+
+- id: A04
+  category: 反问
+  turns: ["查 2026 年 9 月末各行业的对公存款余额，列出行业名称和余额"]
+  expect: clarify
+
+- id: A05
+  category: 反问
+  turns: ["查 2026 年 9 月末全行不含保证金的对公存款日均余额"]
+  expect: clarify
+
+# ═══════════════ 追问：第二轮基于第一轮的结果继续问 ═══════════════
+
+- id: F01
+  category: 追问
+  turns:
+    - "查 2026 年 9 月末全行不含保证金的对公存款余额"
+    - "按一级分行拆开，列出一级分行名称和余额"
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d, dim.org]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_bal_rmb, dim.org.lvl1_org_nm]
+  gold_sql: |
+    SELECT o.lvl1_org_nm, SUM(b.dep_bal_rmb) AS dep_bal_rmb
+    FROM ads.org_corp_dep_bal_d b
+    JOIN dim.org o ON b.org_no = o.org_no
+    WHERE b.data_dt = DATE '2026-09-30'
+    GROUP BY o.lvl1_org_nm
+
+- id: F02
+  category: 追问
+  turns:
+    - "查 2026 年 9 月末各行业的对公贷款余额，列出行业名称和余额"
+    - "换成 2026 年 6 月末的"
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d, dim.corp_cust]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb, dim.corp_cust.industry_nm]
+  gold_sql: |
+    SELECT c.industry_nm, SUM(l.loan_bal_rmb) AS loan_bal_rmb
+    FROM ads.corp_cust_loan_bal_d l
+    JOIN dim.corp_cust c ON l.cust_no = c.cust_no
+    WHERE l.data_dt = DATE '2026-06-30'
+    GROUP BY c.industry_nm
+
+- id: F03
+  category: 追问
+  turns:
+    - "查 2026 年 9 月末各开户机构不含保证金的对公存款余额，列出机构号和余额"
+    - "改成含保证金的口径"
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_bal_tot_rmb, ads.org_corp_dep_bal_d.org_no]
+  gold_sql: |
+    SELECT org_no, dep_bal_tot_rmb
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+
+- id: F04
+  category: 追问
+  turns:
+    - "查 2026 年 9 月末不含保证金存款余额最高的 10 个对公客户，列出客户名称和余额，按余额从高到低排列"
+    - "只看制造业的客户"
+  expect: sql
+  ordered: true
+  gold_tables: [ads.corp_cust_dep_bal_d, dim.corp_cust]
+  gold_columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb, dim.corp_cust.cust_nm, dim.corp_cust.industry_nm]
+  gold_sql: |
+    SELECT c.cust_nm, SUM(b.dep_bal_rmb) AS dep_bal_rmb
+    FROM ads.corp_cust_dep_bal_d b
+    JOIN dim.corp_cust c ON b.cust_no = c.cust_no
+    WHERE b.data_dt = DATE '2026-09-30'
+      AND c.industry_nm = '制造业'
+    GROUP BY b.cust_no, c.cust_nm
+    ORDER BY dep_bal_rmb DESC
+    LIMIT 10
+
+- id: F05
+  category: 追问
+  turns:
+    - "查 2026 年 9 月末全行对公贷款余额"
+    - "再看一下其中的不良贷款余额"
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.npl_bal_rmb]
+  gold_sql: |
+    SELECT SUM(npl_bal_rmb) AS npl_bal_rmb
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt = DATE '2026-09-30'
