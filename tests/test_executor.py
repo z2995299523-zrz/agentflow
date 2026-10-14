@@ -131,3 +131,28 @@ def test_trailing_semicolon_is_accepted(small_db):
     result = DuckDBExecutor(small_db).execute("SELECT COUNT(*) AS n FROM ads.bal;")
 
     assert result.executed and result.rows == [(3,)]
+
+
+def test_trailing_comment_is_not_a_separate_statement(small_db):
+    # 模型生成的 SQL 末尾常带一句说明，分号后面的注释不能被当成第二条语句
+    assert transpile_statements("SELECT 1; -- 说明") == ["SELECT 1"]
+    assert transpile_statements("SELECT 1;\n/* 口径说明 */\n") == ["SELECT 1"]
+
+    result = DuckDBExecutor(small_db).execute("SELECT COUNT(*) AS n FROM ads.bal;\n-- 全部机构")
+
+    assert result.executed, result.error
+    assert result.rows == [(3,)]
+
+
+def test_generated_sql_cannot_read_or_write_local_files(small_db, tmp_path):
+    executor = DuckDBExecutor(small_db)
+    target = tmp_path / "leak.csv"
+    source = tmp_path / "secret.csv"
+    source.write_text("a\n1\n", encoding="utf-8")
+
+    written = executor.execute(f"COPY (SELECT 1 AS a) TO '{target.as_posix()}' (FORMAT CSV)")
+    read = executor.execute(f"SELECT * FROM read_csv('{source.as_posix()}')")
+
+    assert not written.executed and not target.exists()
+    assert not read.executed
+    assert executor.execute("SELECT COUNT(*) FROM ads.bal").rows == [(3,)]     # 库本身照常可读

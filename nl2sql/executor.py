@@ -77,7 +77,9 @@ class DuckDBExecutor:
             statements = transpile_statements(sql, source=self.source_dialect)
             if len(statements) != 1:
                 raise ValueError(f"只能执行单条语句，收到 {len(statements)} 条")
-            con = duckdb.connect(str(self.db_path), read_only=True)
+            # 只读只保护库文件本身；关掉外部访问，生成的 SQL 才读写不了本机的其它文件
+            con = duckdb.connect(str(self.db_path), read_only=True,
+                                 config={"enable_external_access": False})
             try:
                 cursor = con.execute(statements[0])
                 columns = [item[0] for item in cursor.description or []]
