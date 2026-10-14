@@ -1,0 +1,15 @@
+﻿层级,模式名,表英文名,表中文名,表类型,粒度字段,数据日期字段,表说明
+贴源层,ods,core_dep_acct,核心存款账户表,快照表,"data_dt,acct_no",data_dt,核心系统存款账户每日全量快照，含对公和个人
+贴源层,ods,core_loan_duebill,核心贷款借据表,快照表,"data_dt,duebill_no",data_dt,核心系统贷款借据每日全量快照，含对公和个人
+贴源层,ods,ecif_corp_cust,对公客户信息表,维表,cust_no,,客户信息系统的对公客户基本信息
+贴源层,ods,industry_dict,行业代码表,维表,industry_cd,,国民经济行业门类代码
+贴源层,ods,org_info,机构信息表,维表,org_no,,机构及其上下级关系
+贴源层,ods,exch_rate,汇率表,快照表,"data_dt,ccy_cd",data_dt,每日各币种折人民币中间价
+贴源层,ods,gl_subject,科目表,维表,subj_no,,存款科目及其类别
+整合层,dwd,corp_dep_acct_d,对公存款账户日快照,快照表,"data_dt,acct_no",data_dt,对公存款账户每日快照
+整合层,dwd,corp_loan_duebill_d,对公贷款借据日快照,快照表,"data_dt,duebill_no",data_dt,对公贷款借据每日快照
+整合层,dim,corp_cust,对公客户维表,维表,cust_no,,对公客户及其行业和规模
+整合层,dim,org,机构维表,维表,org_no,,机构及其所属的一级分行和二级分行
+专题层,ads,corp_cust_dep_bal_d,对公客户存款余额日汇总,快照表,"data_dt,cust_no,org_no",data_dt,按客户和开户机构汇总的对公存款余额
+专题层,ads,org_corp_dep_bal_d,机构对公存款余额日汇总,快照表,"data_dt,org_no",data_dt,按开户机构汇总的对公存款余额
+专题层,ads,corp_cust_loan_bal_d,对公客户贷款余额日汇总,快照表,"data_dt,cust_no,org_no",data_dt,按客户和放款机构汇总的对公贷款余额

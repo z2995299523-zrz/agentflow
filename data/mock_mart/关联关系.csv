@@ -1,0 +1,2 @@
+﻿左表,左字段,右表,右字段,对应关系,说明
+ads.corp_cust_dep_bal_d,"data_dt,cust_no,org_no",ads.corp_cust_loan_bal_d,"data_dt,cust_no,org_no",1:1,同一客户在同一机构的存款与贷款并排分析
