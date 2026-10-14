@@ -36,3 +36,7 @@ data/sample.db
 # Hermes Agent 规划文件
 .hermes/claude-tasks/
 .hermes/plans/
+
+# NL2SQL：专题库资料的生成物（元数据库、模拟库、导入报告）与真实资料
+data/*/build/
+data/real_mart/

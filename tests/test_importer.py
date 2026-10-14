@@ -1,0 +1,150 @@
+"""元数据导入的测试"""
+import sqlite3
+from contextlib import closing
+
+from metadata.importer import build_mart, default_db_path, load_mart, main, run_import
+from metadata.loader import load_raw
+from metadata.store import MetadataStore
+from tests.helpers import write_mart
+
+
+def dump(db_path) -> list[str]:
+    """导出元数据库的全部内容，用来比较两次导入的结果"""
+    with closing(sqlite3.connect(db_path)) as conn:
+        return list(conn.iterdump())
+
+
+def test_build_mart_converts_rows_to_models(tiny_mart):
+    mart = build_mart(load_raw(tiny_mart))
+
+    assert [t.table_id for t in mart.tables] == ["ods.acct", "ads.cust_bal", "ods.cust"]
+    assert mart.tables[0].grain_columns == ["data_dt", "acct_no"]
+    assert mart.tables[0].date_column == "data_dt"
+    assert mart.tables[2].date_column is None
+    acct_columns = [c for c in mart.columns if c.table_id == "ods.acct"]
+    assert [(c.column_name, c.ordinal, c.is_pk) for c in acct_columns] == [
+        ("data_dt", 1, True), ("acct_no", 2, True), ("cust_no", 3, False), ("bal", 4, False),
+    ]
+    assert acct_columns[3].description == "原币"
+    assert all(not edge.source_external for edge in mart.lineage)
+    assert mart.lineage[0].script_name == "load_cust_bal.sql"
+    relation = mart.relations[0]
+    assert (relation.left_columns, relation.right_columns) == (["cust_no"], ["cust_no"])
+    assert (relation.cardinality, relation.origin) == ("N:1", "manual")
+
+
+def test_external_source_is_flagged_and_still_imported(tmp_path, tiny_sheets):
+    tiny_sheets["血缘清单"].append(["ods.cust", "cust_nm", "src.cust_info", "cust_nm", "", ""])
+
+    mart, issues = load_mart(write_mart(tmp_path / "m", tiny_sheets))
+
+    assert [issue.rule for issue in issues] == ["W01"]      # 只有警告，可以入库
+    assert [edge.source_external for edge in mart.lineage] == [False, False, False, True]
+
+
+def test_load_mart_returns_none_on_error(tmp_path, tiny_sheets):
+    tiny_sheets["表清单"][0][0] = "明细层"
+
+    mart, issues = load_mart(write_mart(tmp_path / "m", tiny_sheets))
+
+    assert mart is None
+    assert [issue.rule for issue in issues] == ["M05"]
+
+
+def test_successful_import(tiny_mart):
+    report = run_import(tiny_mart)
+
+    assert report.succeeded and report.issues == []
+    assert report.db_path == default_db_path(tiny_mart) == tiny_mart / "build" / "metadata.db"
+    assert report.counts == {"表": 3, "字段": 9, "血缘": 3, "关联关系": 1}
+    assert MetadataStore(report.db_path).counts() == report.counts
+    text = (tiny_mart / "build" / "import_report.md").read_text(encoding="utf-8")
+    assert "结果：成功" in text and "| 表 | 3 |" in text
+
+
+def test_custom_database_path(tiny_mart, tmp_path):
+    report = run_import(tiny_mart, db_path=tmp_path / "elsewhere" / "meta.db")
+
+    assert report.db_path == tmp_path / "elsewhere" / "meta.db"
+    assert MetadataStore(report.db_path).counts()["表"] == 3
+
+
+def test_failed_import_keeps_previous_database(tmp_path, tiny_sheets):
+    mart_dir = write_mart(tmp_path / "m", tiny_sheets)
+    run_import(mart_dir)
+    tiny_sheets["表清单"][0][0] = "明细层"
+    tiny_sheets["关联关系"].clear()
+    write_mart(mart_dir, tiny_sheets)
+
+    report = run_import(mart_dir)
+
+    assert not report.succeeded
+    assert [issue.rule for issue in report.errors] == ["M05"]
+    assert MetadataStore(report.db_path).counts()["关联关系"] == 1     # 仍是上一次成功导入的内容
+    text = (mart_dir / "build" / "import_report.md").read_text(encoding="utf-8")
+    assert "失败，元数据库未更新" in text
+    assert "| 错误 | M05 | 表清单 | 2 |" in text
+
+
+def test_import_is_idempotent(tiny_mart):
+    report = run_import(tiny_mart)
+    first = dump(report.db_path)
+
+    run_import(tiny_mart)
+
+    assert dump(report.db_path) == first
+
+
+def test_main_exit_codes(tmp_path, tiny_sheets, capsys):
+    good = write_mart(tmp_path / "good", tiny_sheets)
+    assert main([str(good)]) == 0
+    assert "结果：成功" in capsys.readouterr().out
+
+    tiny_sheets["表清单"][0][0] = "明细层"
+    bad = write_mart(tmp_path / "bad", tiny_sheets)
+    assert main([str(bad)]) == 1
+    assert "M05" in capsys.readouterr().out
+
+    assert main([str(tmp_path / "nope")]) == 1
+    assert "资料目录不存在" in capsys.readouterr().out
+
+
+def test_mart_directory_with_chinese_and_spaces(tmp_path, tiny_sheets):
+    mart_dir = write_mart(tmp_path / "专题库 资料", tiny_sheets)
+
+    report = run_import(mart_dir)
+
+    assert report.succeeded
+    assert MetadataStore(report.db_path).table("ads.cust_bal").table_cn == "客户余额汇总"
+
+
+def test_main_without_argument_uses_configured_mart_dir(tiny_mart, monkeypatch, capsys):
+    import config
+
+    monkeypatch.setattr(config, "MART_DIR", str(tiny_mart))
+
+    assert main([]) == 0
+    assert "结果：成功" in capsys.readouterr().out
+    assert (tiny_mart / "build" / "metadata.db").exists()
+
+
+def test_main_reports_unreadable_file_in_one_line(tmp_path, tiny_sheets, capsys):
+    mart_dir = write_mart(tmp_path / "m", tiny_sheets)
+    (mart_dir / "表清单.csv").write_bytes(bytes([0xFF, 0xFE, 0xFF]))
+
+    assert main([str(mart_dir)]) == 1
+    assert "导入失败: 无法识别 表清单.csv 的编码" in capsys.readouterr().out
+
+
+def test_incomplete_but_usable_mart_is_imported_with_warnings(tmp_path, tiny_sheets):
+    tiny_sheets["表清单"][2][4:6] = ["全量表", ""]        # 全量表，粒度不清楚
+    tiny_sheets["字段清单"][8][3] = ""                    # 有一个字段不知道类型
+    mart_dir = write_mart(tmp_path / "m", tiny_sheets)
+
+    report = run_import(mart_dir)
+
+    assert report.succeeded
+    assert sorted(issue.rule for issue in report.warnings) == ["W04", "W05"]
+    store = MetadataStore(report.db_path)
+    assert store.table("ods.cust").table_type == "全量表"
+    assert store.table("ods.cust").grain_columns == []

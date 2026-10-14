@@ -48,6 +48,12 @@ PG_DATABASE = os.getenv("PG_DATABASE", "agentflow")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
 
 # ============================================
+# NL2SQL 专题库配置
+# ============================================
+# 专题库资料目录（四张清单、加工脚本、样例）。切换到真实资料只改这一项
+MART_DIR = os.getenv("MART_DIR", "./data/mock_mart")
+
+# ============================================
 # 服务配置
 # ============================================
 FASTAPI_HOST = os.getenv("FASTAPI_HOST", "0.0.0.0")
