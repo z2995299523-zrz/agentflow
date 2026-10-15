@@ -1,7 +1,7 @@
 """
 元数据标准模板
 定义四张清单的名称、列、必填项和填写说明，并能生成空白的 Excel 模板
-用法: python -m metadata.template [输出路径.xlsx]
+用法: python -m metadata.template [输出路径.xlsx] [--force]（目标已存在时不覆盖，除非带 --force）
 """
 import sys
 from dataclasses import dataclass
@@ -136,7 +136,11 @@ USAGE = ("用法: python -m metadata.template [输出文件] [--force]\n"
 
 
 def main(argv: list[str] | None = None) -> int:
-    """命令行入口。目标文件已存在时不覆盖（它可能是已经填好的清单），除非带 --force"""
+    """命令行入口。目标文件已存在时不覆盖（它可能是已经填好的清单），除非带 --force
+
+    Returns:
+        0 表示已生成；1 表示目标已存在、没有覆盖；2 表示参数不认识，打印了用法
+    """
     args = sys.argv[1:] if argv is None else argv
     force = "--force" in args
     names = [arg for arg in args if arg != "--force"]
