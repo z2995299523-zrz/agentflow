@@ -50,3 +50,23 @@ def test_main_writes_to_given_path(tmp_path, capsys):
     assert main([str(target)]) == 0
     assert target.exists()
     assert "空白模板已生成" in capsys.readouterr().out
+
+
+def test_main_refuses_to_overwrite_an_existing_workbook(tmp_path, capsys):
+    target = tmp_path / "metadata.xlsx"
+    target.write_bytes(b"filled")        # 代表一份已经填好的清单
+
+    assert main([str(target)]) == 1
+    assert target.read_bytes() == b"filled"
+    assert "--force" in capsys.readouterr().out
+
+    assert main([str(target), "--force"]) == 0
+    assert target.read_bytes() != b"filled"
+
+
+def test_main_prints_usage_for_unknown_options(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["--help"]) == 2
+    assert "用法" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []      # 没有生成一个叫 --help 的文件

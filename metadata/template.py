@@ -131,10 +131,22 @@ def write_blank_template(path: Path) -> Path:
     return path
 
 
+USAGE = ("用法: python -m metadata.template [输出文件] [--force]\n"
+         "  不带输出文件时写到当前目录的 metadata_template.xlsx；目标已存在时不覆盖，确实要覆盖请加 --force")
+
+
 def main(argv: list[str] | None = None) -> int:
-    """命令行入口"""
+    """命令行入口。目标文件已存在时不覆盖（它可能是已经填好的清单），除非带 --force"""
     args = sys.argv[1:] if argv is None else argv
-    target = Path(args[0]) if args else Path("metadata_template.xlsx")
+    force = "--force" in args
+    names = [arg for arg in args if arg != "--force"]
+    if len(names) > 1 or any(name.startswith("-") for name in names):
+        print(USAGE)
+        return 2
+    target = Path(names[0]) if names else Path("metadata_template.xlsx")
+    if target.exists() and not force:
+        print(f"{target} 已存在，没有覆盖：它可能是已经填好的清单。确实要覆盖请加 --force")
+        return 1
     print(f"空白模板已生成: {write_blank_template(target)}")
     return 0
 

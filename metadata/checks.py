@@ -95,12 +95,15 @@ class _BareNames:
 
 
 def _check_structure(raw: RawMart, issues: list[Issue]) -> bool:
-    """M01：清单和必填列是否齐全。不齐全时后续规则无法进行"""
+    """M01：清单和必填列是否齐全，表清单里是否至少有一张表。不齐全时后续规则无法进行"""
     for name in raw.missing_sheets:
         issues.append(Issue(ERROR, "M01", name, None, f"缺少清单「{name}」"))
     for name, headers in raw.missing_columns.items():
         issues.append(Issue(ERROR, "M01", name, None,
                             f"清单「{name}」缺少必填列：{'、'.join(headers)}"))
+    if TABLE_SHEET.name not in raw.missing_sheets and not raw.rows.get("tables"):
+        # 只有表头的空清单（例如刚生成的空白模板）照常导入的话，会把原有的元数据库清空
+        issues.append(Issue(ERROR, "M01", TABLE_SHEET.name, None, "表清单里没有任何一张表"))
     return not issues
 
 

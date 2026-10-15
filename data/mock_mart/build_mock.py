@@ -493,8 +493,8 @@ def build(db_path: Path = DEFAULT_DB_PATH, start: date = DEFAULT_START, end: dat
     marker = db_path.with_name(db_path.name + FINGERPRINT_SUFFIX)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        db_path.unlink(missing_ok=True)      # 先删库：库被占用时报错，指纹还留着，下次不必无谓地重造
         marker.unlink(missing_ok=True)
-        db_path.unlink(missing_ok=True)
     except PermissionError as error:
         raise RuntimeError(
             f"模拟专题库文件正被其它程序占用，请先关闭占用它的程序再重试: {db_path}") from error

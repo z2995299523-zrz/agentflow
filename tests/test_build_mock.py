@@ -237,6 +237,8 @@ def test_build_into_directory_with_chinese_and_spaces(tmp_path):
 def test_database_locked_by_another_program_gives_readable_error(tmp_path, monkeypatch):
     target = tmp_path / "locked.duckdb"
     target.write_bytes(b"")
+    marker = target.with_name(target.name + ".fingerprint")
+    marker.write_text("旧指纹", encoding="utf-8")
     original_unlink = Path.unlink
 
     def unlink(self, missing_ok=False):
@@ -248,6 +250,7 @@ def test_database_locked_by_another_program_gives_readable_error(tmp_path, monke
 
     with pytest.raises(RuntimeError, match="正被其它程序占用"):
         build(target, **SHORT)
+    assert marker.read_text(encoding="utf-8") == "旧指纹"      # 库没删成，指纹也要留着，否则下次会无谓地重造
 
 
 def test_build_refuses_columns_without_data_type(tmp_path, tiny_sheets):

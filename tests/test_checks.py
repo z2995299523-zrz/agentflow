@@ -300,3 +300,12 @@ def test_tables_without_grain_are_summarised_per_layer(tmp_path, tiny_sheets):
     messages = {issue.message.split("有")[0]: issue.message for issue in issues}
     assert "2 张表" in messages["贴源层"] and "ods.acct、ods.cust" in messages["贴源层"]
     assert "1 张表" in messages["专题层"]
+
+
+def test_empty_table_list_is_m01(tmp_path, tiny_sheets):
+    # 只有表头的清单（例如刚生成的空白模板）不能「导入成功」，否则会把原有的元数据库清空
+    tiny_sheets["表清单"] = []
+
+    issues = run_checks(tmp_path, tiny_sheets)
+
+    assert [(i.level, i.rule, i.sheet) for i in issues] == [(ERROR, "M01", "表清单")]
