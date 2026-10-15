@@ -13,7 +13,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 已完成：元数据层 `metadata/`、真实资料转换器、模拟专题库 `data/mock_mart/`、方言转换与执行层 `nl2sql/`、评估题库 `eval/nl2sql_questions.yaml`
 - 真实专题库：资料、转换器、转换结果都在 `data/real_mart/`，这个目录不入库。真实的表名、模式名、路径不得写进任何会提交的文件
 - 待做：血缘图、候选召回、样例库、静态校验、查询流水线、评估、新界面
-- 测试以 `python -m pytest tests -q` 的结果为准：`run_tests.py` 判定套件时不看退出码，夹具出错时可能把 NL2SQL 套件报成通过
 
 ```bash
 python -m pytest tests -q                 # NL2SQL 单元测试，不调模型，229 项

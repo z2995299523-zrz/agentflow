@@ -49,19 +49,22 @@ def run_suite(name: str, cmd: list[str], timeout: int = 300) -> dict:
             passed_count = int(match.group(1))
             failed = total - passed_count if total > passed_count else 0
         else:
-            # Check for FAILED count
+            # pytest 的汇总行：失败和出错（例如夹具出错）都算没通过，总数 = 通过 + 失败 + 出错
             fail_match = re.search(r"(\d+) failed", result.stdout)
-            failed = int(fail_match.group(1)) if fail_match else 0
-            if not match and not fail_match:
+            error_match = re.search(r"(\d+) errors?\b", result.stdout)
+            failed = sum(int(m.group(1)) for m in (fail_match, error_match) if m)
+            total += failed
+            if not match and not fail_match and not error_match:
                 total = "?"
                 failed = "?"
 
         return {
             "name": name,
-            "passed": total != "?" and failed == 0,
+            # 以退出码为准：输出里数得出通过数，不代表整个套件通过了
+            "passed": result.returncode == 0 and total != "?" and failed == 0,
             "tests": f"{total - failed if isinstance(total, int) and isinstance(failed, int) else '?'}/{total}",
             "time": elapsed,
-            "error": None,
+            "error": None if result.returncode == 0 else f"退出码 {result.returncode}",
         }
     except subprocess.TimeoutExpired:
         return {"name": name, "passed": False, "tests": "TIMEOUT", "time": timeout, "error": "超时"}
