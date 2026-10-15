@@ -13,11 +13,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 已完成：元数据层 `metadata/`、真实资料转换器、模拟专题库 `data/mock_mart/`、方言转换与执行层 `nl2sql/`、评估题库 `eval/nl2sql_questions.yaml`
 - 真实专题库：资料、转换器、转换结果都在 `data/real_mart/`，这个目录不入库。真实的表名、模式名、路径不得写进任何会提交的文件
 - 待做：血缘图、候选召回、样例库、静态校验、查询流水线、评估、新界面
+- 测试以 `python -m pytest tests -q` 的结果为准：`run_tests.py` 判定套件时不看退出码，夹具出错时可能把 NL2SQL 套件报成通过
 
 ```bash
-python -m pytest tests -q                 # NL2SQL 单元测试，不调模型，224 项
+python -m pytest tests -q                 # NL2SQL 单元测试，不调模型，229 项
 python -m metadata.importer               # 导入 MART_DIR 指向的资料，生成元数据库和导入报告
-python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel 模板
+python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel 模板（目标已存在时不覆盖，要覆盖加 --force）
 python -m data.mock_mart.build_mock       # 重新生成模拟专题库（库文件在固态盘上约 15 秒，在机械盘上约 1.5 分钟）
 python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
 python -m metadata.importer data/real_mart   # 导入真实专题库的元数据

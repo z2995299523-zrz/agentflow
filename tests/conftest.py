@@ -22,7 +22,7 @@ def tiny_mart(tmp_path: Path, tiny_sheets: dict[str, list[list[str]]]) -> Path:
 def mock_db() -> Path:
     """完整的模拟专题库
 
-    清单、加工脚本、造数程序都没变时直接复用已生成的库，否则重新生成（十几秒）。
+    清单、加工脚本、造数程序都没变时直接复用已生成的库，否则重新生成（库文件在固态盘上十几秒，在机械盘上一分多钟）。
     """
     from data.mock_mart.build_mock import DEFAULT_DB_PATH, ensure_built
 
