@@ -2,10 +2,24 @@
 import sqlite3
 from contextlib import closing
 
+import numpy as np
 import pytest
 
-from metadata.models import ColumnMeta, LineageEdge, Mart, Relation, TableMeta
-from metadata.store import MetadataStore, write_store
+from metadata.models import (
+    ColumnMeta,
+    Example,
+    FieldRef,
+    JoinKey,
+    LineageEdge,
+    Mart,
+    Relation,
+    ScriptColumn,
+    ScriptFilter,
+    ScriptJoin,
+    ScriptStatement,
+    TableMeta,
+)
+from metadata.store import MetadataStore, VectorBundle, VectorSet, write_store
 
 
 def make_mart() -> Mart:
@@ -29,18 +43,39 @@ def make_mart() -> Mart:
             ColumnMeta(table_id="ads.cust_bal", column_name="bal", ordinal=1, column_cn="余额",
                        data_type="numeric(18,2)"),
             ColumnMeta(table_id="ods.cust", column_name="cust_no", ordinal=1, column_cn="客户号",
-                       data_type="varchar(20)", is_pk=True),
+                       data_type="varchar(20)", is_pk=True, enum_values="示例码值"),
         ],
         lineage=[
             LineageEdge(target_table="ads.cust_bal", target_column="bal", source_table="ods.acct",
-                        source_column="bal", script_name="load_cust_bal.sql"),
+                        source_column="bal", transform="SUM(ods.acct.bal)", script_name="load_cust_bal.sql",
+                        origin="script"),
             LineageEdge(target_table="ods.cust", target_column="cust_no", source_table="src.cust_info",
-                        source_column="cust_no", source_external=True),
+                        source_column="cust_no", source_external=True, is_passthrough=True),
         ],
         relations=[
-            Relation(left_table="ads.cust_bal", left_columns=["data_dt", "cust_no"],
-                     right_table="ods.cust", right_columns=["data_dt", "cust_no"],
-                     cardinality="N:1", note="示例"),
+            Relation(left_table="ads.cust_bal", left_columns=["cust_no"],
+                     right_table="ods.cust", right_columns=["cust_id"],
+                     cardinality="N:1", origin="script", note="示例"),
+        ],
+        scripts=[
+            ScriptStatement(
+                script_name="load_cust_bal.sql", stmt_index=2, target_table="ads.cust_bal",
+                sql_text="INSERT INTO ads.cust_bal ...", select_sql="SELECT ...", parsed=True,
+                filters=[ScriptFilter(scope="main", clause="WHERE", condition="ods.acct.flag = '是'")],
+                joins=[ScriptJoin(scope="main", join_type="LEFT", table="ods.cust",
+                                  condition="ods.acct.cust_no = ods.cust.cust_no",
+                                  keys=[JoinKey(left=FieldRef(table="ods.acct", column="cust_no"),
+                                                right=FieldRef(table="ods.cust", column="cust_no"))])],
+            ),
+        ],
+        script_columns=[
+            ScriptColumn(script_name="load_cust_bal.sql", stmt_index=2, target_table="ads.cust_bal",
+                         target_column="bal", expression="SUM(ods.acct.bal)",
+                         sources=[FieldRef(table="ods.acct", column="bal")], kind="derived"),
+        ],
+        examples=[
+            Example(example_id="ex.sql#1", requirement="查各客户余额", caliber_note="原币",
+                    sql_text="SELECT 1", tables=["ads.cust_bal"], source_file="ex.sql", line_no=1),
         ],
     )
 
@@ -56,7 +91,101 @@ def test_round_trip(tmp_path):
     assert store.columns("ods.acct") == mart.columns[:2]
     assert store.lineage_edges() == mart.lineage
     assert store.relations() == mart.relations
-    assert store.counts() == {"表": 3, "字段": 4, "血缘": 2, "关联关系": 1}
+    assert store.scripts() == mart.scripts
+    assert store.scripts(target_table="ods.acct") == []
+    assert store.script_columns("ads.cust_bal") == mart.script_columns
+    assert store.script_column("ads.cust_bal", "bal").sources == [FieldRef(table="ods.acct", column="bal")]
+    assert store.script_column("ads.cust_bal", "no_such") is None
+    assert store.examples() == mart.examples
+    assert store.counts() == {"表": 3, "字段": 4, "血缘": 2, "关联关系": 1, "加工语句": 1, "样例": 1,
+                              "字段向量": 0}
+
+
+def test_from_mart_matches_reading_back(tmp_path):
+    mart = make_mart()
+    write_store(tmp_path / "m.db", mart)
+
+    from_file = MetadataStore(tmp_path / "m.db")
+    in_memory = MetadataStore.from_mart(mart)
+
+    assert in_memory.db_path is None
+    assert in_memory.tables() == from_file.tables()
+    assert in_memory.columns("ods.acct") == from_file.columns("ods.acct")
+    assert in_memory.lineage_edges() == from_file.lineage_edges()
+    assert in_memory.relations() == from_file.relations()
+    assert in_memory.scripts() == from_file.scripts()
+    assert in_memory.counts() == from_file.counts()
+
+
+def make_vectors() -> VectorBundle:
+    """两条字段向量，维度 4"""
+    matrix = np.array([[1, 0, 0, 0], [0, 0.6, 0.8, 0]], dtype=np.float32)
+    return VectorBundle(embedder="test-4", dim=4, sets={
+        "field": VectorSet(kind="field", ref_ids=["ods.acct.bal", "ods.cust.cust_no"],
+                           texts=["账户表 余额 原币", "客户表 客户号"], matrix=matrix),
+    })
+
+
+def test_vectors_round_trip(tmp_path):
+    write_store(tmp_path / "m.db", make_mart(), make_vectors())
+    store = MetadataStore(tmp_path / "m.db")
+
+    field = store.vectors("field")
+    assert store.embedder_name == "test-4"
+    assert field.ref_ids == ["ods.acct.bal", "ods.cust.cust_no"]
+    assert field.texts[1] == "客户表 客户号"
+    assert field.matrix.dtype == np.float32 and field.matrix.shape == (2, 4)
+    assert np.array_equal(field.matrix, make_vectors().sets["field"].matrix)
+    assert store.vectors("example") is None
+    assert store.counts()["字段向量"] == 2
+
+
+def test_store_without_vectors(tmp_path):
+    write_store(tmp_path / "m.db", make_mart())
+    store = MetadataStore(tmp_path / "m.db")
+
+    assert store.vectors("field") is None
+    assert store.embedder_name is None
+
+
+def test_vectors_with_wrong_shape_are_rejected_and_keep_old_database(tmp_path):
+    db_path = tmp_path / "m.db"
+    write_store(db_path, make_mart(), make_vectors())
+    broken = make_vectors()
+    broken.sets["field"].texts.pop()
+
+    with pytest.raises(ValueError, match="对不上"):
+        write_store(db_path, make_mart(), broken)
+
+    assert MetadataStore(db_path).counts()["字段向量"] == 2
+
+
+def test_json_columns_keep_chinese_readable(tmp_path):
+    write_store(tmp_path / "m.db", make_mart())
+
+    with closing(sqlite3.connect(tmp_path / "m.db")) as conn:
+        filters, = conn.execute("SELECT filters FROM meta_script").fetchone()
+
+    assert "'是'" in filters                     # 中文没有被转成 \u 转义
+
+
+def test_old_database_without_new_tables_tells_how_to_fix(tmp_path):
+    db_path = tmp_path / "old.db"
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("CREATE TABLE meta_table (table_id TEXT)")
+
+    with pytest.raises(RuntimeError, match="重新运行 python -m metadata.importer"):
+        MetadataStore(db_path)
+
+
+def test_columns_of_unlisted_table_do_not_break_the_store():
+    mart = make_mart()
+    mart.columns.append(ColumnMeta(table_id="ods.other", column_name="x", ordinal=1, column_cn="某字段"))
+
+    store = MetadataStore.from_mart(mart)
+
+    assert store.table("ods.other") is None
+    assert [c.column_name for c in store.columns("ods.other")] == ["x"]
 
 
 def test_lookups(tmp_path):

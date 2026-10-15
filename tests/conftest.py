@@ -1,9 +1,17 @@
 """测试公共夹具"""
+import os
 from pathlib import Path
 
 import pytest
 
-from tests.helpers import TINY_MART, write_mart
+# 单元测试一律用哈希向量器，不加载 BGE 模型。写成环境变量而不是夹具，子进程和导入期也管得到
+os.environ.setdefault("METADATA_EMBEDDER", "hash")
+
+from metadata.importer import enrich_mart, load_mart  # noqa: E402
+from metadata.store import MetadataStore  # noqa: E402
+from tests.helpers import TINY_MART, write_mart  # noqa: E402
+
+MOCK_MART_DIR = Path(__file__).resolve().parents[1] / "data" / "mock_mart"
 
 
 @pytest.fixture
@@ -16,6 +24,21 @@ def tiny_sheets() -> dict[str, list[list[str]]]:
 def tiny_mart(tmp_path: Path, tiny_sheets: dict[str, list[list[str]]]) -> Path:
     """写在临时目录里的最小合法资料"""
     return write_mart(tmp_path / "mart", tiny_sheets)
+
+
+@pytest.fixture
+def tiny_store(tiny_mart: Path) -> MetadataStore:
+    """最小合法资料的只读入口，不写元数据库"""
+    mart, _ = load_mart(tiny_mart)
+    return MetadataStore.from_mart(mart)
+
+
+@pytest.fixture(scope="session")
+def mock_store() -> MetadataStore:
+    """模拟专题库补全之后（解析加工脚本、合并血缘、推导关联、收样例）的只读入口，不算向量"""
+    mart, _ = load_mart(MOCK_MART_DIR)
+    mart, _, _ = enrich_mart(mart, MOCK_MART_DIR)
+    return MetadataStore.from_mart(mart)
 
 
 @pytest.fixture(scope="session")

@@ -2,7 +2,10 @@
 import sqlite3
 from contextlib import closing
 
-from metadata.importer import build_mart, default_db_path, load_mart, main, run_import
+from pathlib import Path
+
+from metadata.checks import ERROR, Issue, ReportSection
+from metadata.importer import ImportReport, build_mart, default_db_path, load_mart, main, run_import
 from metadata.loader import load_raw
 from metadata.store import MetadataStore
 from tests.helpers import write_mart
@@ -56,7 +59,8 @@ def test_successful_import(tiny_mart):
 
     assert report.succeeded and report.issues == []
     assert report.db_path == default_db_path(tiny_mart) == tiny_mart / "build" / "metadata.db"
-    assert report.counts == {"表": 3, "字段": 9, "血缘": 3, "关联关系": 1}
+    # 关联关系、向量等补全结果的数量随推导规则变化，这里只钉住清单本身的数量
+    assert {name: report.counts[name] for name in ("表", "字段", "血缘")} == {"表": 3, "字段": 9, "血缘": 3}
     assert MetadataStore(report.db_path).counts() == report.counts
     text = (tiny_mart / "build" / "import_report.md").read_text(encoding="utf-8")
     assert "结果：成功" in text and "| 表 | 3 |" in text
@@ -71,7 +75,7 @@ def test_custom_database_path(tiny_mart, tmp_path):
 
 def test_failed_import_keeps_previous_database(tmp_path, tiny_sheets):
     mart_dir = write_mart(tmp_path / "m", tiny_sheets)
-    run_import(mart_dir)
+    previous = dump(run_import(mart_dir).db_path)
     tiny_sheets["表清单"][0][0] = "明细层"
     tiny_sheets["关联关系"].clear()
     write_mart(mart_dir, tiny_sheets)
@@ -80,7 +84,7 @@ def test_failed_import_keeps_previous_database(tmp_path, tiny_sheets):
 
     assert not report.succeeded
     assert [issue.rule for issue in report.errors] == ["M05"]
-    assert MetadataStore(report.db_path).counts()["关联关系"] == 1     # 仍是上一次成功导入的内容
+    assert dump(report.db_path) == previous                       # 仍是上一次成功导入的内容
     text = (mart_dir / "build" / "import_report.md").read_text(encoding="utf-8")
     assert "失败，元数据库未更新" in text
     assert "| 错误 | M05 | 表清单 | 2 |" in text
@@ -148,3 +152,40 @@ def test_incomplete_but_usable_mart_is_imported_with_warnings(tmp_path, tiny_she
     store = MetadataStore(report.db_path)
     assert store.table("ods.cust").table_type == "全量表"
     assert store.table("ods.cust").grain_columns == []
+
+
+def test_report_escapes_pipes_and_line_breaks_in_messages():
+    report = ImportReport(mart_dir=Path("m"), db_path=Path("m/build/metadata.db"), succeeded=True,
+                          issues=[Issue(ERROR, "W06", "加工脚本", None, "a || b\n第二行")])
+
+    assert "| a \\|\\| b 第二行 |" in report.to_markdown()
+
+
+def test_report_renders_sections_with_content_before_issues():
+    report = ImportReport(
+        mart_dir=Path("m"), db_path=Path("m/build/metadata.db"), succeeded=True,
+        issues=[Issue(ERROR, "W06", "加工脚本", None, "说明")],
+        sections=[ReportSection("加工脚本", ("- 7 个文件",)), ReportSection("没有内容的节", ())],
+    )
+
+    text = report.to_markdown()
+
+    assert "## 加工脚本\n\n- 7 个文件" in text
+    assert "没有内容的节" not in text
+    assert text.index("## 加工脚本") < text.index("## 问题清单")
+
+
+def test_main_no_index_skips_vectors(tmp_path, tiny_sheets):
+    with_index = write_mart(tmp_path / "with", tiny_sheets)
+    without_index = write_mart(tmp_path / "without", tiny_sheets)
+
+    assert main([str(with_index)]) == 0
+    assert main([str(without_index), "--no-index"]) == 0
+
+    assert MetadataStore(default_db_path(with_index)).embedder_name is not None
+    assert MetadataStore(default_db_path(without_index)).embedder_name is None
+
+
+def test_main_rejects_unknown_option(capsys):
+    assert main(["--nope"]) == 2
+    assert "用法" in capsys.readouterr().out

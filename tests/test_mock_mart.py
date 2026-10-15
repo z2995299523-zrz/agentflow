@@ -49,8 +49,11 @@ def test_lineage_scripts_all_exist():
     assert {edge.script_name for edge in mart.lineage} == script_files
 
 
-def test_lineage_has_no_transform_text_like_the_real_one():
-    """真实的血缘清单是字段级、不带加工逻辑的，模拟资料保持一致"""
+def test_lineage_list_leaves_transform_to_the_scripts():
+    """模拟库的血缘清单不填加工逻辑，加工表达式全部在导入时从脚本里解析回填
+
+    真实清单虽然有加工逻辑一栏，但多是文字说明，同样不能直接当 SQL 用。
+    """
     mart, _ = load_mart(MOCK_MART)
 
     assert all(edge.transform == "" for edge in mart.lineage)

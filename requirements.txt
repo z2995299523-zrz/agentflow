@@ -53,7 +53,10 @@ python-multipart>=0.0.9
 pydantic>=2.0
 openpyxl>=3.1.0
 networkx>=3.0
-sqlglot>=25.0.0
+# 脚本解析和静态校验依赖语法树的类名与作用域行为，升大版本前要先跑 sqlscope 的测试
+sqlglot>=25.34,<26
 duckdb>=1.0.0
+# 向量存在元数据库里，检索用 numpy 算全量相似度
+numpy>=1.26
 pyyaml>=6.0
 pytest>=8.0.0

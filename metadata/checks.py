@@ -17,6 +17,11 @@
     W02 血缘存在环                W03 整合层或专题层的表没有血缘
     W04 表没有填粒度字段（按层级汇总）
     W05 表里有字段没有填数据类型
+    W06 加工脚本里的语句无法结构化解析（只保存原文），或者 INSERT 的列数对不上
+    W07 加工脚本的目标表不在表清单里
+    W08 样例没有通过静态校验，已拒收
+
+W06 到 W08 由脚本解析和样例解析在导入的补全阶段报出，规则写在各自的模块里。
 """
 from collections import Counter
 from dataclasses import dataclass
@@ -43,6 +48,14 @@ class Issue:
     sheet: str             # 清单名
     row_no: int | None     # 行号，不针对具体行时为 None
     message: str
+
+
+@dataclass(frozen=True)
+class ReportSection:
+    """导入报告里的一节统计，由各个补全步骤给出，渲染在问题清单之前"""
+
+    title: str                  # 小节标题
+    lines: tuple[str, ...]      # 小节内容，每个元素是一行 Markdown；为空时不渲染这一节
 
 
 def split_list(text: str) -> list[str]:

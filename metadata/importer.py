@@ -1,23 +1,36 @@
 """
 元数据导入
-读取资料 → 校验 → 写入元数据库 → 输出导入报告
-用法: python -m metadata.importer [资料目录]
-      不带参数时使用 .env 里的 MART_DIR
+读取资料 → 校验 → 补全（解析加工脚本、合并血缘、推导关联、收样例）→ 算向量 → 写入元数据库 → 输出导入报告
+用法: python -m metadata.importer [资料目录] [--no-index]
+      不带资料目录时使用 .env 里的 MART_DIR
+      --no-index 不算向量：不加载向量模型、导入更快，召回只能走关键字
 """
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from metadata.checks import ERROR, WARNING, Issue, check_mart, split_list, table_id_of
+from metadata.checks import ERROR, WARNING, Issue, ReportSection, check_mart, split_list, table_id_of
+from metadata.examples import EXAMPLES_DIR_NAME, load_examples
+from metadata.index import Embedder, build_vectors, default_embedder
 from metadata.loader import RawMart, load_raw
 from metadata.models import ColumnMeta, LineageEdge, Mart, Relation, TableMeta
-from metadata.store import write_store
+from metadata.relations import derive_relations
+from metadata.script_parser import SCRIPTS_DIR_NAME, merge_lineage, parse_scripts
+from metadata.store import MetadataStore, write_store
 
 BUILD_DIR_NAME = "build"
 DB_FILE_NAME = "metadata.db"
 REPORT_FILE_NAME = "import_report.md"
 TRUE_TEXTS = ("是", "y", "yes", "1", "true")
+NO_INDEX_FLAG = "--no-index"
+USAGE = ("用法: python -m metadata.importer [资料目录] [--no-index]\n"
+         "  不带资料目录时使用 .env 里的 MART_DIR；--no-index 不算向量，导入更快，召回只能走关键字")
+
+
+def _cell(text: str) -> str:
+    """Markdown 表格单元格里的竖线和换行会把表格撑乱，转成安全的写法"""
+    return text.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
 @dataclass
@@ -29,6 +42,7 @@ class ImportReport:
     succeeded: bool
     issues: list[Issue] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
+    sections: list[ReportSection] = field(default_factory=list)   # 各补全步骤的统计
 
     @property
     def errors(self) -> list[Issue]:
@@ -53,12 +67,15 @@ class ImportReport:
         if self.counts:
             lines += ["", "## 入库数量", "", "| 类别 | 数量 |", "|------|------|"]
             lines += [f"| {name} | {count} |" for name, count in self.counts.items()]
+        for section in self.sections:
+            if section.lines:
+                lines += ["", f"## {section.title}", "", *section.lines]
         if self.issues:
             lines += ["", "## 问题清单", "", "| 级别 | 规则 | 清单 | 行号 | 说明 |",
                       "|------|------|------|------|------|"]
             lines += [
-                f"| {issue.level} | {issue.rule} | {issue.sheet} | "
-                f"{issue.row_no if issue.row_no is not None else ''} | {issue.message} |"
+                f"| {issue.level} | {issue.rule} | {_cell(issue.sheet)} | "
+                f"{issue.row_no if issue.row_no is not None else ''} | {_cell(issue.message)} |"
                 for issue in self.issues
             ]
         return "\n".join(lines) + "\n"
@@ -141,7 +158,7 @@ def build_mart(raw: RawMart) -> Mart:
 
 
 def load_mart(mart_dir: Path) -> tuple[Mart | None, list[Issue]]:
-    """读取并校验一套资料
+    """读取并校验一套资料的四张清单，不解析加工脚本、不推导关联
 
     Args:
         mart_dir: 资料目录
@@ -156,7 +173,45 @@ def load_mart(mart_dir: Path) -> tuple[Mart | None, list[Issue]]:
     return build_mart(raw), issues
 
 
-def run_import(mart_dir: Path, db_path: Path | None = None) -> ImportReport:
+def enrich_mart(mart: Mart, mart_dir: Path) -> tuple[Mart, list[Issue], list[ReportSection]]:
+    """补全一套已经校验通过的资料：解析加工脚本 → 合并血缘 → 推导关联 → 收样例
+
+    这一步只产生警告，不会让导入失败。
+
+    Args:
+        mart: load_mart 得到的资料
+        mart_dir: 资料目录，加工脚本和样例在它的子目录里
+
+    Returns:
+        (补全后的资料, 问题清单, 报告节)
+    """
+    mart_dir = Path(mart_dir)
+    parsed = parse_scripts(mart_dir / SCRIPTS_DIR_NAME, mart)
+    issues = list(parsed.issues)
+    sections = [parsed.section]
+
+    lineage, section = merge_lineage(mart, parsed)
+    sections.append(section)
+    mart = mart.model_copy(update={"scripts": parsed.statements, "script_columns": parsed.columns,
+                                   "lineage": lineage})
+
+    relations, section = derive_relations(mart)
+    sections.append(section)
+    mart = mart.model_copy(update={"relations": relations})
+
+    # 唯一一处由底层 metadata 向上依赖 nl2sql：样例要用静态校验器把关，只在导入时用到，所以延迟导入
+    from nl2sql.validator import SqlValidator
+
+    validate = SqlValidator(MetadataStore.from_mart(mart)).validate
+    examples, example_issues, section = load_examples(mart_dir / EXAMPLES_DIR_NAME, validate)
+    issues += example_issues
+    sections.append(section)
+    mart = mart.model_copy(update={"examples": examples})
+    return mart, issues, sections
+
+
+def run_import(mart_dir: Path, db_path: Path | None = None, *, build_index: bool = True,
+               embedder: Embedder | None = None) -> ImportReport:
     """导入一套资料到元数据库，并把导入报告写到资料目录的 build 子目录
 
     有错误时不写元数据库，原有的元数据库保持不变。
@@ -164,6 +219,8 @@ def run_import(mart_dir: Path, db_path: Path | None = None) -> ImportReport:
     Args:
         mart_dir: 资料目录
         db_path: 元数据库路径，默认是 资料目录/build/metadata.db
+        build_index: 是否为字段和样例算向量
+        embedder: 向量器，为 None 时按环境变量取默认的
 
     Returns:
         导入报告
@@ -176,11 +233,16 @@ def run_import(mart_dir: Path, db_path: Path | None = None) -> ImportReport:
     if mart is None:
         report = ImportReport(mart_dir=mart_dir, db_path=db_path, succeeded=False, issues=issues)
     else:
-        write_store(db_path, mart)
+        mart, enrich_issues, sections = enrich_mart(mart, mart_dir)
+        issues = issues + enrich_issues
+        vectors = None
+        if build_index:
+            vectors, section = build_vectors(mart, embedder if embedder is not None else default_embedder())
+            sections.append(section)
+        write_store(db_path, mart, vectors)
         report = ImportReport(
-            mart_dir=mart_dir, db_path=db_path, succeeded=True, issues=issues,
-            counts={"表": len(mart.tables), "字段": len(mart.columns),
-                    "血缘": len(mart.lineage), "关联关系": len(mart.relations)},
+            mart_dir=mart_dir, db_path=db_path, succeeded=True, issues=issues, sections=sections,
+            counts=MetadataStore.from_mart(mart, vectors).counts(),
         )
 
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -189,16 +251,25 @@ def run_import(mart_dir: Path, db_path: Path | None = None) -> ImportReport:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """命令行入口。导入成功返回 0，失败返回 1"""
+    """命令行入口
+
+    Returns:
+        0 表示导入成功；1 表示失败；2 表示参数不认识，打印了用法
+    """
     args = sys.argv[1:] if argv is None else argv
-    if args:
-        mart_dir = Path(args[0])
+    build_index = NO_INDEX_FLAG not in args
+    names = [arg for arg in args if arg != NO_INDEX_FLAG]
+    if len(names) > 1 or any(name.startswith("-") for name in names):
+        print(USAGE)
+        return 2
+    if names:
+        mart_dir = Path(names[0])
     else:
         import config  # 延迟导入：只有不带参数运行时才需要读取 .env
         mart_dir = Path(config.MART_DIR)
 
     try:
-        report = run_import(mart_dir)
+        report = run_import(mart_dir, build_index=build_index)
     except (FileNotFoundError, ValueError, RuntimeError) as error:
         print(f"导入失败: {error}")
         return 1
