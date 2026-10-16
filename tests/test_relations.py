@@ -509,6 +509,16 @@ def test_same_mapping_in_several_scripts_is_one_relation_naming_them():
     assert "first.sql" in rel.note and "second.sql" in rel.note
 
 
+def test_note_names_at_most_three_scripts_then_counts_the_rest():
+    mart = make_mart([("ods.a", [], ["k"]), ("ods.b", ["k"], ["k"])],
+                     joins=[(f"s{i}.sql", [("ods.a.k", "ods.b.k")]) for i in range(1, 6)])
+
+    relations, _ = derive_relations(mart)
+
+    note = one(relations, "ods.a", "ods.b", "script").note
+    assert "s1.sql、s2.sql、s3.sql 等 5 个脚本" in note and "s4.sql" not in note
+
+
 def test_keys_written_in_opposite_directions_merge_into_one_composite_key():
     mart = make_mart([("ods.a", [], ["x", "y"]), ("ods.b", ["x", "y"], ["x", "y"])],
                      joins=[("load.sql", [("ods.a.x", "ods.b.x"), ("ods.b.y", "ods.a.y")])])
