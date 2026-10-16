@@ -476,16 +476,50 @@ def test_expression_over_always_null_column_stays_null(catalog):
                SUM(u.r) AS p3,
                COALESCE(NULL, NULL) AS p4,
                COALESCE(u.r, '0') AS c1,
-               COUNT(u.r) AS c2,
-               u.r IS NULL AS c3,
-               COUNT(*) AS c4
+               u.r IS NULL AS c2
         FROM u
     """
     resolver, root = analyze(sql, catalog)
     kinds = {name: resolver.resolve_output(root, name).kind for name in resolver.output_names(root)}
 
     assert kinds == {"p1": "null", "p2": "null", "p3": "null", "p4": "null",
-                     "c1": "constant", "c2": "constant", "c3": "constant", "c4": "constant"}
+                     "c1": "constant", "c2": "constant"}
+
+
+def test_aggregate_or_window_without_fields_is_derived(catalog):
+    """COUNT(*) 这类不引用字段的聚合、窗口函数是由行计数得到的度量，算加工、来源为空；纯字面量才是常量"""
+    aggregates, aggregate_root = analyze("""
+        SELECT COUNT(*) AS d1, COUNT(1) AS d2, SUM(1) AS d3,
+               '1' AS k1, CAST('1' AS VARCHAR(1)) AS k2, 0 AS k3
+        FROM dwd.corp_dep_acct_d a
+    """, catalog)
+    windows, window_root = analyze("""
+        SELECT a.cust_no AS cust_no, ROW_NUMBER() OVER () AS rn, RANK() OVER (ORDER BY a.bal_rmb) AS rk
+        FROM dwd.corp_dep_acct_d a
+    """, catalog)
+    nested, nested_root = analyze("""
+        WITH n AS (SELECT a.org_no AS org_no, COUNT(*) AS cnt FROM dwd.corp_dep_acct_d a GROUP BY a.org_no),
+             f AS (SELECT '1' AS flag FROM dwd.corp_loan_duebill_d l)
+        SELECT n.cnt AS cnt, COALESCE(n.cnt, 0) AS cnt0,
+               (SELECT COUNT(f.flag) FROM f) AS flag_cnt,
+               (SELECT COUNT(*) FROM dim.org o) AS org_cnt
+        FROM n
+    """, catalog)
+    union, union_root = analyze(
+        "SELECT COUNT(*) AS cnt FROM dwd.corp_dep_acct_d a UNION ALL SELECT NULL FROM dwd.corp_loan_duebill_d l",
+        catalog)
+    measure = Resolution("derived", frozenset())
+
+    assert {name: aggregates.resolve_output(aggregate_root, name)
+            for name in aggregates.output_names(aggregate_root)} == {
+        "d1": measure, "d2": measure, "d3": measure,
+        "k1": Resolution("constant"), "k2": Resolution("constant"), "k3": Resolution("constant")}
+    assert windows.resolve_output(window_root, "rn") == measure
+    assert windows.resolve_output(window_root, "rk") == Resolution("derived", frozenset({ref(DEP, "bal_rmb")}))
+    # 经过 CTE、外面再包一层、在标量子查询里，都仍是加工
+    assert {name: nested.resolve_output(nested_root, name) for name in nested.output_names(nested_root)} == {
+        "cnt": measure, "cnt0": measure, "flag_cnt": measure, "org_cnt": measure}
+    assert union.resolve_output(union_root, "cnt") == measure
 
 
 def test_scalar_subquery_contributes_its_columns(catalog):

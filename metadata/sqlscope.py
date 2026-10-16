@@ -71,7 +71,7 @@ class Resolution:
     """一个输出字段或表达式的追溯结果"""
 
     kind: str                                   # 取值见 metadata.models.COLUMN_KINDS
-    sources: frozenset[FieldRef] = frozenset()  # 追溯到的实体表字段
+    sources: frozenset[FieldRef] = frozenset()  # 追溯到的实体表字段；COUNT(*) 这类行计数的加工为空
 
 
 @dataclass
@@ -88,6 +88,7 @@ _UNRESOLVED = Resolution("unresolved")
 _NULL = Resolution("null")
 _CONSTANT = Resolution("constant")
 _ETL_TIME = Resolution("etl_time")
+_MEASURE = Resolution("derived")          # 不引用实体字段的加工，例如 COUNT(*)、ROW_NUMBER() OVER ()
 
 
 # ── 解析与小工具 ──────────────────────────────────────────
@@ -452,8 +453,16 @@ def _stays_null(expr: exp.Expression) -> bool:
     return True
 
 
+def _has_aggregate(node: exp.Expression) -> bool:
+    """表达式里（含标量子查询里）是否有聚合函数或窗口函数，例如 COUNT(*)、SUM(1)、ROW_NUMBER() OVER ()"""
+    return any(isinstance(item, (exp.AggFunc, exp.Window)) for item in node.walk())
+
+
 def _without_sources(expr: exp.Expression, kinds: set[str]) -> Resolution:
-    """追溯不到任何实体字段的表达式：恒为空、加工时间、或者常量
+    """追溯不到任何实体字段的表达式：恒为空、加工时间、行计数这类加工、或者常量
+
+    依次判断：字段全为空且只经过保持空值的运算 → 空值；有取加工时间的函数或字段 → 加工时间；
+    引用的字段本身是加工，或者有聚合、窗口函数（由行计数得到的度量）→ 加工，来源为空；其余 → 常量。
 
     Args:
         expr: 剥壳后的表达式
@@ -463,6 +472,8 @@ def _without_sources(expr: exp.Expression, kinds: set[str]) -> Resolution:
         return _NULL
     if "etl_time" in kinds or _has_time_function(expr):
         return _ETL_TIME
+    if "derived" in kinds or _has_aggregate(expr):
+        return _MEASURE
     return _CONSTANT
 
 
@@ -681,8 +692,8 @@ class ScopeResolver:
         """追溯一个查询层的输出字段
 
         剥掉别名、括号、非日期时间类型的 CAST、TRIM 之后：是字段就按字段追溯；否则收集表达式里
-        （含标量子查询里）的全部字段，有来源为加工；一个字段都没有时按恒为空、加工时间、常量区分。
-        UNION 按位置合并各分支的结果。
+        （含标量子查询里）的全部字段，有来源为加工；追溯不到实体来源时，按恒为空、加工时间、
+        行计数这类加工（COUNT(*)、窗口函数，来源为空）、常量区分。UNION 按位置合并各分支的结果。
         """
         return self._output(scope, name, 0)
 
