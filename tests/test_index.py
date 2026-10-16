@@ -343,6 +343,29 @@ def test_no_index_import_writes_no_vectors_and_never_calls_the_embedder(tiny_mar
     assert report.counts["字段向量"] == 0
 
 
+def test_reimport_with_another_embedder_replaces_every_vector(tiny_mart):
+    run_import(tiny_mart, embedder=HashEmbedder(256))
+
+    report = run_import(tiny_mart, embedder=HashEmbedder(512))
+
+    store = MetadataStore(report.db_path)
+    assert store.embedder_name == "hash-bigram-512"
+    assert store.vectors("field").matrix.shape == (9, 512)
+    with closing(sqlite3.connect(report.db_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM meta_vector").fetchone() == (9,)         # 没有旧向量残留
+        assert dict(conn.execute("SELECT key, value FROM meta_info")) == {"embedder": "hash-bigram-512", "dim": "512"}
+
+
+def test_reimport_with_no_index_drops_the_old_vectors(tiny_mart):
+    run_import(tiny_mart)
+    assert MetadataStore(default_db_path(tiny_mart)).vectors("field") is not None
+
+    report = run_import(tiny_mart, build_index=False)
+
+    store = MetadataStore(report.db_path)
+    assert store.vectors("field") is None and store.embedder_name is None
+
+
 def test_command_line_no_index_flag_never_asks_for_the_default_embedder(tiny_mart, monkeypatch):
     def refuse():
         raise AssertionError("--no-index 不应该去取向量器")
