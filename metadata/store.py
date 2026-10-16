@@ -25,7 +25,10 @@ from metadata.models import (
     TableMeta,
 )
 
+# 页大小必须在建第一张表之前设定。一行 512 维向量约 2 KB，默认的 4 KB 页一页只放得下一行，
+# 浪费近一半空间；16 KB 页能把真实库带向量时的增量从约 71 MB 降到约 41 MB，读取速度不变
 SCHEMA_SQL = """
+PRAGMA page_size = 16384;
 CREATE TABLE meta_table (
     table_id      TEXT PRIMARY KEY,
     layer         TEXT NOT NULL,

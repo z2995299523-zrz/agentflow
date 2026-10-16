@@ -268,3 +268,12 @@ def test_empty_grain_reads_back_as_empty_list(tmp_path):
 
     assert store.table("ods.cust").grain_columns == []
     assert store.column("ods.acct", "bal").data_type == ""
+
+
+def test_database_uses_large_pages_to_hold_vectors(tmp_path):
+    write_store(tmp_path / "m.db", make_mart(), make_vectors())
+
+    with closing(sqlite3.connect(tmp_path / "m.db")) as conn:
+        page_size, = conn.execute("PRAGMA page_size").fetchone()
+
+    assert page_size == 16384
