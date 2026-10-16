@@ -12,7 +12,7 @@ from pathlib import Path
 
 from metadata.checks import ERROR, WARNING, Issue, ReportSection, check_mart, split_list, table_id_of
 from metadata.examples import EXAMPLES_DIR_NAME, load_examples
-from metadata.index import Embedder, build_vectors, default_embedder
+from metadata.index import BgeEmbedder, Embedder, build_vectors, default_embedder
 from metadata.loader import RawMart, load_raw
 from metadata.models import ColumnMeta, LineageEdge, Mart, Relation, TableMeta
 from metadata.relations import derive_relations
@@ -26,6 +26,8 @@ TRUE_TEXTS = ("是", "y", "yes", "1", "true")
 NO_INDEX_FLAG = "--no-index"
 USAGE = ("用法: python -m metadata.importer [资料目录] [--no-index]\n"
          "  不带资料目录时使用 .env 里的 MART_DIR；--no-index 不算向量，导入更快，召回只能走关键字")
+MODEL_HINT = ("正在为字段和样例算向量。第一次加载向量模型可能较慢，机械盘上冷启动要几分钟；"
+              "不需要向量时加 --no-index 跳过")
 
 
 def _cell(text: str) -> str:
@@ -269,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
         mart_dir = Path(config.MART_DIR)
 
     try:
+        if build_index and isinstance(default_embedder(), BgeEmbedder):
+            print(MODEL_HINT, flush=True)       # 加载模型期间没有任何输出，先说一声免得以为卡住了
         report = run_import(mart_dir, build_index=build_index)
     except (FileNotFoundError, ValueError, RuntimeError) as error:
         print(f"导入失败: {error}")

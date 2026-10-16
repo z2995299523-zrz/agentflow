@@ -189,3 +189,17 @@ def test_main_no_index_skips_vectors(tmp_path, tiny_sheets):
 def test_main_rejects_unknown_option(capsys):
     assert main(["--nope"]) == 2
     assert "用法" in capsys.readouterr().out
+
+
+def test_main_says_so_before_loading_the_model(tiny_mart, monkeypatch, capsys):
+    import metadata.importer as importer
+
+    monkeypatch.setenv("METADATA_EMBEDDER", "bge")
+    monkeypatch.setattr(importer, "run_import", lambda mart_dir, build_index: ImportReport(
+        mart_dir=mart_dir, db_path=mart_dir / "build" / "metadata.db", succeeded=True))
+
+    assert main([str(tiny_mart)]) == 0
+    assert "第一次加载向量模型可能较慢" in capsys.readouterr().out
+
+    assert main([str(tiny_mart), "--no-index"]) == 0
+    assert "向量模型" not in capsys.readouterr().out
