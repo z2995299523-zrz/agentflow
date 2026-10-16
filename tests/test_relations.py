@@ -653,7 +653,8 @@ def test_unknown_candidates_are_kept():
 
 def test_limits_are_the_documented_values():
     assert (MAX_DOMAIN_SIZE, MAX_PROPAGATION_PER_JOIN, MAX_GRAIN_FANIN, MAX_MAPPINGS_PER_PAIR) == (50, 400, 150, 3)
-    assert GENERIC_KEY_NAMES == {"id", "uuid", "guid", "row_id", "rowid", "pk_id"}
+    assert GENERIC_KEY_NAMES == {"id", "uuid", "guid", "row_id", "rowid", "pk_id",
+                                 "record_id", "attachment_id", "relation_id", "member_id"}
 
 
 def test_domain_larger_than_the_limit_does_not_propagate(monkeypatch):

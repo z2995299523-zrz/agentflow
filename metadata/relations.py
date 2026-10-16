@@ -36,7 +36,10 @@ from metadata.models import (
 )
 
 SECTION_RELATIONS = "关联关系推导"
-GENERIC_KEY_NAMES = frozenset({"id", "uuid", "guid", "row_id", "rowid", "pk_id"})
+# 各表自己的行编号常用的名字：两张表的粒度恰好都叫这个名字，并不说明它们能关联。
+# 后四个来自真实库的统计：按它们推出的同名粒度键几乎全是 1:1，实际是各表的行编号撞了名
+GENERIC_KEY_NAMES = frozenset({"id", "uuid", "guid", "row_id", "rowid", "pk_id",
+                               "record_id", "attachment_id", "relation_id", "member_id"})
 MAX_DOMAIN_SIZE = 50              # 键域超过这么多字段时不从它传递
 MAX_PROPAGATION_PER_JOIN = 400    # 一条脚本关联传递出的候选超过这么多对时整条跳过
 MAX_GRAIN_FANIN = 150             # 一张表被超过这么多张表按同名粒度键关联时跳过
