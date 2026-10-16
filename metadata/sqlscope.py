@@ -162,6 +162,15 @@ def _is_cte_reference(table: exp.Table) -> bool:
     return False
 
 
+def is_table_function(source: object) -> bool:
+    """来源节点是不是表函数，例如 generate_series(...) AS d(dt)
+
+    表函数也是 exp.Table 节点，但它的 this 不是标识符。它的字段由函数产生，不属于任何实体表，
+    不能当实体表查元数据、追溯来源或展开。
+    """
+    return isinstance(source, exp.Table) and not isinstance(source.this, exp.Identifier)
+
+
 def physical_tables(expr: exp.Expression) -> list[exp.Table]:
     """语法树里引用的实体表节点，不含 CTE 引用和表函数
 
@@ -175,7 +184,7 @@ def physical_tables(expr: exp.Expression) -> list[exp.Table]:
     """
     tables: list[exp.Table] = []
     for table in expr.find_all(exp.Table, bfs=False):
-        if not isinstance(table.this, exp.Identifier):
+        if is_table_function(table):
             continue                          # 表函数，例如 generate_series(...)
         if not table.args.get("db") and _is_cte_reference(table):
             continue
@@ -318,7 +327,7 @@ def _referenced_tables(tree: exp.Expression, catalog: Catalog) -> tuple[dict[str
     for scope in traverse_scope(tree):
         aliases: dict[str, str] = {}
         for alias, source in _own_sources(scope).items():
-            if not isinstance(source, exp.Table) or not isinstance(source.this, exp.Identifier):
+            if not isinstance(source, exp.Table) or is_table_function(source):
                 continue
             tid = table_id(source)
             if tid in unknown:
@@ -637,7 +646,7 @@ class ScopeResolver:
                 if name in (self._columns_of(source) or ())]
 
     def _star_source(self, scope: Scope, name: str) -> exp.Table | Scope | None:
-        """投影里没有 name、但有 * 时，找出 name 来自哪个来源"""
+        """投影里没有 name、但有 * 时，找出 name 来自哪个来源；表函数产生的字段不属于任何来源"""
         own = self._own(scope)
         known: list[exp.Table | Scope] = []
         unknown: list[exp.Table | Scope] = []
@@ -647,7 +656,7 @@ class ScopeResolver:
             aliases = [projection.table] if isinstance(projection, exp.Column) and projection.table else list(own)
             for alias in aliases:
                 source = own.get(alias)
-                if source is None:
+                if source is None or is_table_function(source):
                     continue
                 columns = self._columns_of(source)
                 if columns is None:
@@ -702,6 +711,8 @@ class ScopeResolver:
         located = self._locate(scope, column)
         if isinstance(located, Resolution):
             return located
+        if is_table_function(located):
+            return _UNRESOLVED                # 函数产生的值，不属于任何实体表字段
         if isinstance(located, exp.Table):
             return Resolution("passthrough", frozenset({FieldRef(table=table_id(located),
                                                                   column=_ident(column.this))}))
@@ -836,7 +847,7 @@ class ScopeResolver:
         """一个字段的展开结果：实体表字段写全名，查询层的输出换成展开后的表达式，到了深度上限原样保留"""
         located = self._locate(scope, column)
         if isinstance(located, exp.Table):
-            return _entity_column(located, column)
+            return column if is_table_function(located) else _entity_column(located, column)
         if isinstance(located, Scope) and depth < self.render_depth:
             expanded = self._expand_output(located, column.name, depth + 1)
             if expanded is not None:

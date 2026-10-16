@@ -177,6 +177,35 @@ def test_r1_trailing_semicolon_and_comment_still_one_statement(validator):
     assert report.tables == ["dim.org"]
 
 
+@pytest.mark.parametrize("sql, rule, word", [
+    ("WITH c AS (SELECT o.org_no FROM dim.nonexist o) (SELECT c.org_no FROM c)", "R3", "dim.nonexist"),
+    ("(SELECT o.org_no FROM dim.org o) ORDER BY zzz", "R4", "zzz"),
+    ("SELECT x.org_no FROM ((SELECT o.org_no FROM dim.org o) ORDER BY zzz) x", "R4", "zzz"),
+    ("WITH c AS (SELECT o.org_no FROM dim.org o) (SELECT c.zzz FROM c)", "R4", "CTE c"),
+    ("(SELECT o.org_no FROM dim.org o ORDER BY 1) ORDER BY 1", "R1", "ORDER BY"),
+    ("(SELECT o.org_no FROM dim.org o LIMIT 3) LIMIT 5", "R1", "LIMIT"),
+    ("WITH a AS (SELECT 1 AS x) (WITH b AS (SELECT 2 AS y) SELECT * FROM b)", "R1", "WITH"),
+], ids=["with-on-paren", "order-on-paren", "nested-order-on-paren", "with-on-paren-r4", "order-twice", "limit-twice",
+        "with-twice"])
+def test_clauses_hanging_on_parentheses_are_still_checked(validator, sql, rule, word):
+    """括号上挂的 WITH、ORDER BY 不能在剥括号时丢掉，否则 CTE 体和排序表达式就绕过了 R3、R4"""
+    report = validator.validate(sql)
+
+    assert any(word in message for message in of(report, rule)), report.issues
+
+
+def test_clauses_hanging_on_parentheses_move_into_the_query(validator):
+    with_order = validator.validate(
+        "WITH c AS (SELECT o.org_no FROM dim.org o) (SELECT c.org_no FROM c) ORDER BY org_no LIMIT 3")
+    union = validator.validate(
+        "(SELECT o.org_no FROM dim.org o UNION SELECT p.org_no FROM dim.org p) ORDER BY org_no")
+    input_column = validator.validate("(SELECT o.org_no FROM dim.org o) ORDER BY o.org_nm")      # PostgreSQL 允许
+
+    assert with_order.issues == [] and with_order.columns == ["dim.org.org_no"]
+    assert union.issues == []
+    assert input_column.issues == [] and input_column.columns == ["dim.org.org_nm", "dim.org.org_no"]
+
+
 # ── R2 只能是查询 ─────────────────────────────────────────
 
 WRITES = {
@@ -451,6 +480,52 @@ def test_r4_join_on_must_not_use_output_alias(validator):
     assert "JOIN 的关联条件里不能引用 SELECT 的输出别名 k" in message
 
 
+ALIAS_BASE = f"FROM {LOAN} l WHERE l.data_dt = {DAY}"
+
+
+@pytest.mark.parametrize("sql, place", [
+    (f"SELECT SUM(l.loan_bal_rmb) AS total, total/10000 AS wan {ALIAS_BASE}", "SELECT 列表"),
+    (f"SELECT l.org_no, SUM(l.loan_bal_rmb) AS total {ALIAS_BASE} GROUP BY l.org_no ORDER BY total * -1",
+     "ORDER BY 子句"),
+    (f"SELECT l.org_no AS o2, SUM(l.loan_bal_rmb) {ALIAS_BASE} GROUP BY o2 || 'x'", "GROUP BY 子句"),
+    (f"SELECT l.org_no, SUM(l.loan_bal_rmb) AS total, RANK() OVER (ORDER BY total) AS rk {ALIAS_BASE} "
+     "GROUP BY l.org_no", "SELECT 列表"),
+    (f"SELECT l.org_no, SUM(l.loan_bal_rmb) AS total, CASE WHEN total > 0 THEN 1 ELSE 0 END {ALIAS_BASE} "
+     "GROUP BY l.org_no", "SELECT 列表"),
+    (f"SELECT x.b FROM (SELECT l.loan_bal_rmb AS a, a + 1 AS b {ALIAS_BASE}) x", "SELECT 列表"),
+    (f"SELECT l.org_no, SUM(l.loan_bal_rmb) AS t, SUM(l.loan_bal_rmb) OVER w {ALIAS_BASE} GROUP BY l.org_no "
+     "WINDOW w AS (ORDER BY t)", "WINDOW 子句"),
+    (f"SELECT l.org_no, SUM(l.loan_bal_rmb) AS t {ALIAS_BASE} GROUP BY l.org_no ORDER BY COALESCE(t, 0)",
+     "ORDER BY 子句"),
+], ids=["select-list", "order-by-expression", "group-by-expression", "window-order", "case-when", "derived-table",
+        "named-window", "order-by-function"])
+def test_r4_output_alias_is_not_visible_inside_expressions(validator, sql, place):
+    """同层的输出别名在 SELECT 列表、窗口里互相看不到，ORDER BY、GROUP BY 里只能单独出现；DuckDB 能跑，PostgreSQL 报错"""
+    messages = [m for m in of(validator.validate(sql), "R4") if "输出别名" in m]
+
+    assert any(place in message for message in messages)
+
+
+@pytest.mark.parametrize("tail", [
+    "GROUP BY o ORDER BY t DESC, o",
+    "GROUP BY 1 ORDER BY 2 DESC",
+    "GROUP BY (o) ORDER BY (t) DESC NULLS LAST",
+    "GROUP BY ROLLUP(o) ORDER BY t",
+    "GROUP BY l.org_no ORDER BY SUM(l.loan_bal_rmb) DESC",
+])
+def test_r4_output_alias_standing_alone_or_by_position_is_fine(validator, tail):
+    sql = f"SELECT l.org_no AS o, SUM(l.loan_bal_rmb) AS t {ALIAS_BASE} {tail}"
+
+    assert of(validator.validate(sql), "R4") == []
+
+
+def test_r4_alias_that_is_also_an_input_column_is_fine(validator):
+    """别名和某个来源的字段同名时，表达式里的名字指的是那个字段，PostgreSQL 不报错"""
+    sql = f"SELECT l.org_no, COUNT(*) AS org_no {ALIAS_BASE} GROUP BY l.org_no ORDER BY LOWER(org_no)"
+
+    assert of(validator.validate(sql), "R4") == []
+
+
 # ── R5 快照表带数据日期 ───────────────────────────────────
 
 def test_r5_snapshot_without_date_condition(validator):
@@ -512,6 +587,90 @@ def test_r5_snapshot_in_subquery_needs_its_own_date(validator):
 
 def test_r5_not_required_for_other_table_types(validator):
     assert validator.validate("SELECT o.org_nm, c.cust_nm FROM dim.org o, dim.corp_cust c").issues == []
+
+
+ALIGNED = f"FROM {LOAN} a JOIN {DEP} b ON a.cust_no = b.cust_no AND a.org_no = b.org_no AND a.data_dt = b.data_dt"
+
+
+@pytest.mark.parametrize("sql, aliases", [
+    (f"SELECT SUM(a.loan_bal_rmb) {ALIGNED}", ["a", "b"]),
+    (f"SELECT SUM(a.loan_bal_rmb) FROM {LOAN} a JOIN {DEP} b USING (data_dt)", ["a", "b"]),
+    (f"SELECT SUM(a.loan_bal_rmb) FROM {LOAN} a, {DEP} b WHERE a.data_dt = b.data_dt", ["a", "b"]),
+    (f"SELECT SUM(a.loan_bal_rmb) FROM {LOAN} a, {DEP} b WHERE a.data_dt::date = b.data_dt::date", ["a", "b"]),
+    (f"SELECT SUM(a.loan_bal_rmb) {ALIGNED} WHERE b.data_dt IS NOT NULL", ["a", "b"]),
+    (f"SELECT SUM(a.loan_bal_rmb) FROM {LOAN} a WHERE a.data_dt IS NOT NULL", ["a"]),
+    (f"SELECT SUM(a.loan_bal_rmb) FROM {LOAN} a WHERE NOT (a.data_dt IS NULL)", ["a"]),
+    (f"SELECT SUM(a.loan_bal_rmb) {ALIGNED} JOIN {ORG_BAL} c ON c.org_no = a.org_no WHERE c.data_dt = {DAY}",
+     ["a", "b"]),
+], ids=["on-aligned", "using", "where-aligned", "cast-aligned", "aligned-and-not-null", "not-null", "not-is-null",
+        "other-table-dated"])
+def test_r5_dates_only_aligned_with_each_other_do_not_count(validator, sql, aliases):
+    """两张快照表的日期只互相对齐、或者只写 IS NOT NULL，并没有限定是哪天，照样会跨日累加"""
+    messages = of(validator.validate(sql), "R5")
+
+    assert [alias for alias in ("a", "b", "c") if any(f"（别名 {alias}）" in m for m in messages)] == aliases
+
+
+@pytest.mark.parametrize("where", [
+    f"a.data_dt = {DAY}",
+    f"b.data_dt = {DAY}",                                         # 整块对齐的字段都算有
+    f"a.data_dt IN ({DAY}, DATE '2026-08-31')",
+    f"a.data_dt BETWEEN DATE '2026-09-01' AND {DAY}",
+    "a.data_dt IS NOT NULL AND a.data_dt >= DATE '2026-09-01'",
+    f"a.data_dt = (SELECT MAX(x.data_dt) FROM {LOAN} x)",
+    "b.data_dt = CURRENT_DATE",
+], ids=["equal", "other-side", "in", "between", "not-null-plus-range", "latest-subquery", "function"])
+def test_r5_one_concrete_condition_covers_the_aligned_dates(validator, where):
+    assert of(validator.validate(f"SELECT SUM(a.loan_bal_rmb) {ALIGNED} WHERE {where}"), "R5") == []
+
+
+def test_r5_date_equal_to_a_non_snapshot_column_counts(validator):
+    """日期等于 CTE、维表这类不是快照表日期的字段，不当作互相对齐"""
+    report = validator.validate(f"""
+        WITH latest AS (SELECT MAX(m.data_dt) AS dt FROM {LOAN} m)
+        SELECT SUM(a.loan_bal_rmb) FROM {LOAN} a JOIN latest ON a.data_dt = latest.dt
+    """)
+
+    assert of(report, "R5") == []
+
+
+@pytest.mark.parametrize("sql", [
+    f"SELECT l.cust_no FROM {LOAN} l WHERE l.data_dt = (SELECT MAX(m.data_dt) FROM {LOAN} m)",
+    f"SELECT l.cust_no FROM {LOAN} l WHERE l.data_dt = (SELECT MAX(m.data_dt) FROM {LOAN} m WHERE m.org_no = 'x')",
+    f"SELECT MAX(l.data_dt) FROM {LOAN} l",
+    f"SELECT MIN(l.data_dt), MAX(l.data_dt) AS latest FROM {LOAN} l",
+    f"SELECT MAX(l.data_dt) FROM {LOAN} l WHERE l.org_no = '1101'",
+    f"SELECT DISTINCT l.data_dt FROM {LOAN} l",
+    f"SELECT DISTINCT l.data_dt FROM {LOAN} l ORDER BY l.data_dt DESC LIMIT 5",
+    f"SELECT COUNT(DISTINCT l.data_dt) FROM {LOAN} l",
+], ids=["latest-subquery", "latest-subquery-filtered", "max", "min-max", "max-filtered", "distinct", "distinct-order",
+        "count-distinct"])
+def test_r5_not_required_when_only_date_extremes_are_taken(validator, sql):
+    """只取最早、最晚、去重日期的结果不是跨日累加，不能逼模型去编造一个日期"""
+    assert of(validator.validate(sql), "R5") == []
+
+
+@pytest.mark.parametrize("sql", [
+    f"SELECT MAX(l.data_dt), SUM(l.loan_bal_rmb) FROM {LOAN} l",
+    f"SELECT l.org_no, MAX(l.data_dt) FROM {LOAN} l GROUP BY l.org_no",
+    f"SELECT DISTINCT l.data_dt, l.org_no FROM {LOAN} l",
+    f"SELECT MAX(l.loan_bal_rmb) FROM {LOAN} l",
+    f"SELECT COUNT(*) FROM {LOAN} l",
+    f"SELECT COUNT(l.data_dt) FROM {LOAN} l",
+    f"SELECT MAX(l.data_dt) FROM {LOAN} l GROUP BY l.org_no HAVING SUM(l.loan_bal_rmb) > 0",
+], ids=["max-and-sum", "other-field", "distinct-two-fields", "max-of-measure", "count-star", "count-date",
+        "having-sum"])
+def test_r5_still_required_when_other_fields_are_taken(validator, sql):
+    (message,) = of(validator.validate(sql), "R5")
+
+    assert "（别名 l）" in message
+
+
+def test_r5_date_extremes_exempt_only_their_own_table(validator):
+    sql = f"SELECT MAX(l.data_dt) FROM {LOAN} l JOIN {DEP} d ON d.cust_no = l.cust_no"
+
+    (message,) = of(validator.validate(sql), "R5")
+    assert "（别名 d）" in message
 
 
 # ── R6 已知关联 ───────────────────────────────────────────
@@ -733,6 +892,41 @@ def test_report_star_counts_every_column(validator):
 
     assert len(report.columns) == 7
     assert report.columns == sorted(report.columns)
+
+
+def test_table_function_alias_is_not_an_entity_table(validator):
+    """generate_series 之类表函数的别名不进 tables、columns，不参与 R6，字段也不误报 R4"""
+    report = validator.validate(f"""
+        SELECT d.dt, SUM(l.loan_bal_rmb)
+        FROM generate_series(DATE '2026-09-01', DATE '2026-09-30', INTERVAL '1 day') AS d(dt)
+        JOIN {LOAN} l ON l.data_dt = d.dt
+        GROUP BY d.dt
+    """)
+
+    assert report.issues == []
+    assert report.tables == [LOAN]
+    assert report.columns == [f"{LOAN}.data_dt", f"{LOAN}.loan_bal_rmb"]
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT g.n FROM generate_series(1, 3) AS g(n)",
+    "SELECT n FROM generate_series(1, 3) AS g(n)",
+    "SELECT * FROM generate_series(1, 3)",
+    "SELECT u.x FROM unnest(ARRAY[1, 2]) AS u(x)",
+])
+def test_table_function_only_query_uses_no_entity_table(validator, sql):
+    report = validator.validate(sql)
+
+    assert report.issues == []
+    assert report.tables == [] and report.columns == []
+
+
+def test_table_function_joined_to_an_entity_table_skips_r6(unrelated):
+    """函数产生的值不属于实体表字段，即使一个关联关系都没有也不报 R6"""
+    report = unrelated.validate(
+        "SELECT o.org_nm FROM dim.org o JOIN generate_series(1, 3) AS g(n) ON o.org_no = CAST(g.n AS VARCHAR)")
+
+    assert report.issues == []
 
 
 # ── 标准 SQL 与模拟脚本 ───────────────────────────────────

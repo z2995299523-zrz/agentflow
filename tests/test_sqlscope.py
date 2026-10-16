@@ -18,6 +18,7 @@ from metadata.sqlscope import (
     ScopeResolver,
     SqlScopeError,
     conjuncts,
+    is_table_function,
     parse_statements,
     physical_tables,
     qualify_with_catalog,
@@ -549,6 +550,31 @@ def test_star_over_external_table_resolves_by_name(catalog):
     assert resolver.render_output(root, "k") == "ext.raw_src.k"
 
 
+GENERATE_DAYS = "generate_series(DATE '2026-09-01', DATE '2026-09-30', INTERVAL '1 day') AS d(dt)"
+
+
+def test_table_function_columns_are_not_traced_to_an_entity_table(catalog):
+    """表函数的字段由函数产生：不是实体表字段，来源追溯不到，展开时原样保留"""
+    sql = f"""
+        SELECT d.dt AS dt, d.dt + 1 AS next_dt, l.cust_no AS cust_no
+        FROM {GENERATE_DAYS} JOIN {LOAN} l ON l.data_dt = d.dt
+    """
+    resolver, root = analyze(sql, catalog)
+
+    assert is_table_function(resolver.source_of(root, "d")) and not is_table_function(resolver.source_of(root, "l"))
+    assert resolver.resolve_output(root, "dt") == Resolution("unresolved")
+    assert resolver.resolve_output(root, "next_dt") == Resolution("unresolved")
+    assert resolver.resolve_output(root, "cust_no") == passthrough(ref(LOAN, "cust_no"))
+    assert resolver.render_output(root, "dt") == "d.dt"
+
+
+def test_star_over_table_function_is_not_an_entity_table(catalog):
+    resolver, root = analyze("SELECT * FROM generate_series(1, 3) AS g(n)", catalog)
+
+    assert resolver.resolve_output(root, "n") == Resolution("unresolved")
+    assert resolver.render_output(root, "n") == "g.n"
+
+
 def test_depth_limit(catalog):
     shallow, shallow_root = analyze(cte_chain(3), catalog, max_depth=3)
     deep, deep_root = analyze(cte_chain(4), catalog, max_depth=3)
@@ -805,6 +831,15 @@ def test_joins_in_correlated_subquery(catalog):
     assert resolver.joins(root) == []
     assert [(j.join_type, j.alias, j.keys) for j in resolver.joins(sub)] == [
         ("IMPLICIT", "c", [JoinKey(left=ref(DEP, "cust_no"), right=ref(CUST, "cust_no"))])]
+
+
+def test_joins_ignore_keys_on_table_function_columns(catalog):
+    """一侧是表函数产生的值，不是实体表字段，不出键对"""
+    resolver, root = analyze(f"SELECT l.cust_no FROM {GENERATE_DAYS} JOIN {LOAN} l ON l.data_dt = d.dt", catalog)
+
+    (join,) = resolver.joins(root)
+
+    assert join.alias == "l" and join.keys == []
 
 
 def test_resolver_requires_a_scope():

@@ -5,7 +5,7 @@
     R2 只能是查询语句                            错误
     R3 每张表都存在于元数据                      错误
     R4 每个字段都存在于它所属的表                错误
-    R5 快照表在所在查询层带数据日期条件          错误
+    R5 快照表在所在查询层带具体的数据日期条件    错误（只取最早、最晚、去重日期的除外）
     R6 表之间的等值关联属于已知关联关系          警告
     R7 汇总查询里被关联的表按粒度字段全部约束    警告
     R8 实际使用的表和字段与查询方案一致          警告
@@ -16,12 +16,12 @@ R5–R7 在限定后的作用域树上按查询层检查；R8 对比查询方案
 """
 import difflib
 import re
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass, field
 
 from sqlglot import exp
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
-from sqlglot.optimizer.scope import Scope, build_scope
+from sqlglot.optimizer.scope import Scope, build_scope, walk_in_scope
 
 from metadata.checks import ERROR, SNAPSHOT_TYPE, WARNING
 from metadata.models import ColumnMeta, FieldRef, JoinKey, Relation, TableMeta
@@ -30,6 +30,7 @@ from metadata.sqlscope import (
     PSEUDO_COLUMNS,
     ScopeResolver,
     conjuncts,
+    is_table_function,
     parse_statements,
     physical_tables,
     qualify_with_catalog,
@@ -55,6 +56,14 @@ FORBIDDEN_NODES: tuple[tuple[type, str], ...] = tuple(
 _FORBIDDEN_TYPES = tuple(node_type for node_type, _ in FORBIDDEN_NODES)
 # 不能引用 SELECT 输出别名的子句：语法树里的参数名 → 写进问题里的称呼
 _ALIAS_FREE_CLAUSES = {"where": "WHERE 子句", "having": "HAVING 子句", "joins": "JOIN 的关联条件"}
+# 在没限定的树上还要查的位置：同层的别名在 SELECT 列表、窗口里互相看不到，在 ORDER BY、GROUP BY 里只能单独出现
+_ALIAS_SITES = {**_ALIAS_FREE_CLAUSES, "expressions": "SELECT 列表", "windows": "WINDOW 子句",
+                "order": "ORDER BY 子句", "group": "GROUP BY 子句"}
+# ORDER BY、GROUP BY 里不改变「这个名字单独出现」的外壳节点：排序项、括号、分组集合
+_STANDALONE_WRAPPERS = tuple(
+    getattr(exp, name) for name in ("Ordered", "Paren", "Tuple", "Rollup", "Cube", "GroupingSets") if hasattr(exp, name))
+# 挂在括号上、PostgreSQL 视同写在括号里面那条查询上的子句：语法树里的参数名 → 称呼
+_WRAPPER_CLAUSES = {"with": "WITH", "order": "ORDER BY", "limit": "LIMIT", "offset": "OFFSET"}
 # 包在聚合函数外面、不改变它是不是窗口函数的节点
 _AGG_WRAPPERS = tuple(getattr(exp, name) for name in ("Filter", "IgnoreNulls", "RespectNulls") if hasattr(exp, name))
 
@@ -229,11 +238,51 @@ def _describe(node: exp.Expression) -> str:
 
 
 def _unwrap_query(statement: exp.Expression) -> exp.Expression:
-    """剥掉整条查询外面的括号：(SELECT ...) 按里面的 SELECT 分析"""
+    """剥掉整条查询外面的括号：(SELECT ...) 按里面的 SELECT 分析
+
+    括号上挂的 WITH、ORDER BY 等要先用 _hoist_wrapper_clauses 挪进去，否则剥掉括号就丢了。
+    """
     node = statement
     while isinstance(node, exp.Subquery) and isinstance(node.this, exp.Query):
         node = node.this
     return node
+
+
+def _hoist_wrapper_clauses(tree: exp.Expression) -> list[str]:
+    """把挂在括号上的 WITH、ORDER BY、LIMIT、OFFSET 挪进括号里面的查询，直接改 tree
+
+    sqlglot 把「WITH c AS (…) (SELECT … FROM c)」和「(SELECT …) ORDER BY x」解析成括号节点带着这些子句，
+    剥括号、建作用域时它们不在查询层里，CTE 体和排序表达式就绕过了检查。PostgreSQL 把它们当作写在
+    括号里面那条查询上，所以这里照样处理。括号里面已经有同类子句时 PostgreSQL 报语法错误，这里不动它。
+
+    Args:
+        tree: 语法树，整棵树里的括号都处理
+
+    Returns:
+        括号里外都有的子句称呼（WITH、ORDER BY、LIMIT、OFFSET），按出现顺序，没有重复时为空列表
+    """
+    clashes: list[str] = []
+
+    def push_down(wrapper: exp.Subquery) -> None:
+        inner = wrapper.this
+        if not isinstance(inner, exp.Query):
+            return
+        for key, label in _WRAPPER_CLAUSES.items():
+            clause = wrapper.args.get(key)
+            if clause is None:
+                continue
+            if inner.args.get(key) is not None:
+                if label not in clashes:
+                    clashes.append(label)
+                continue
+            wrapper.set(key, None)
+            inner.set(key, clause)
+        if isinstance(inner, exp.Subquery):         # 多层括号：继续往里挪
+            push_down(inner)
+
+    for wrapper in list(tree.find_all(exp.Subquery)):
+        push_down(wrapper)
+    return clashes
 
 
 def _scope_label(scope: Scope) -> str:
@@ -269,9 +318,46 @@ def _explicit_aliases(select: exp.Expression) -> set[str]:
 
 
 def _alias_misuse(clause: str, name: str) -> str:
-    """WHERE、HAVING、JOIN 条件引用了输出别名的问题文字"""
-    return (f"{_ALIAS_FREE_CLAUSES[clause]}里不能引用 SELECT 的输出别名 {name}，PostgreSQL 在这里还看不到 SELECT 列表，"
+    """在不该用输出别名的位置引用了输出别名的问题文字"""
+    where = _ALIAS_SITES[clause]
+    if clause in ("order", "group"):
+        return (f"{where}里的输出别名 {name} 只能单独出现，放进表达式 PostgreSQL 就认不出了，"
+                "请写出别名对应的原表达式")
+    if clause in ("expressions", "windows"):
+        return f"{where}里不能引用同一层的输出别名 {name}，同层的别名互相看不到，请写出别名对应的原表达式"
+    return (f"{where}里不能引用 SELECT 的输出别名 {name}，PostgreSQL 在这里还看不到 SELECT 列表，"
             "请写出别名对应的原表达式")
+
+
+def _embedded(column: exp.Column, clause: exp.Expression) -> bool:
+    """ORDER BY、GROUP BY 里的字段是不是嵌在表达式里：字段往上到子句之间只隔着排序项、括号、分组集合，就是单独出现"""
+    node = column.parent
+    while node is not None and node is not clause:
+        if not isinstance(node, _STANDALONE_WRAPPERS):
+            return True
+        node = node.parent
+    return False
+
+
+def _alias_sites(select: exp.Select) -> Iterator[tuple[str, exp.Column]]:
+    """本层 SELECT 里 PostgreSQL 看不到同层输出别名的位置上，没带别名的字段
+
+    WHERE、HAVING、SELECT 列表、WINDOW 子句的任何位置都看不到；ORDER BY、GROUP BY 里只有别名单独出现才看得到
+    （位置序号不是字段，不在其内）。嵌套子查询里的字段属于它自己那一层。
+
+    Yields:
+        (子句的参数名, 字段)
+    """
+    for clause in ("where", "having", "expressions", "windows", "order", "group"):
+        nodes = select.args.get(clause)
+        for node in nodes if isinstance(nodes, list) else [nodes]:
+            if node is None:
+                continue
+            for column in node.find_all(exp.Column):
+                if (column.table or column.find_ancestor(exp.Select) is not select
+                        or (clause in ("order", "group") and not _embedded(column, node))):
+                    continue
+                yield clause, column
 
 
 def _row_sensitive(agg: exp.AggFunc) -> bool:
@@ -308,6 +394,73 @@ def _equality_targets(condition: exp.Expression) -> list[exp.Column]:
         if isinstance(column, exp.Column) and column.table and not _mentions(condition.expressions[0], column.table):
             return [column]
     return []
+
+
+def _aligned_dates(condition: exp.Expression, tracked: Collection[tuple[str, str]]
+                   ) -> tuple[tuple[str, str], tuple[str, str]] | None:
+    """「日期字段 = 日期字段」：剥掉括号、别名、TRIM、任何类型转换后，两侧都是被看的（别名, 日期字段）时返回这两个"""
+    condition = condition.unnest()
+    if not isinstance(condition, exp.EQ):
+        return None
+    sides = []
+    for side in (condition.this, condition.expression):
+        while isinstance(side, (exp.Alias, exp.Paren, exp.Trim, exp.Cast)):      # TryCast 是 Cast 的子类
+            side = side.this
+        sides.append(side)
+    left, right = sides
+    if isinstance(left, exp.Column) and isinstance(right, exp.Column):
+        pair = ((left.table, left.name), (right.table, right.name))
+        if pair[0] in tracked and pair[1] in tracked:
+            return pair
+    return None
+
+
+def _is_null_test(condition: exp.Expression) -> bool:
+    """条件是不是 IS NULL、IS NOT NULL：它们没有限定具体是哪天"""
+    node = condition.unnest()
+    if isinstance(node, exp.Not):
+        node = node.this.unnest()
+    return isinstance(node, exp.Is) and isinstance(node.expression, exp.Null)
+
+
+def _is_date_extreme(column: exp.Column, select: exp.Select) -> bool:
+    """日期字段是不是用在 MIN(日期)、MAX(日期)、COUNT(DISTINCT 日期) 里，或者是 SELECT DISTINCT 的一个输出"""
+    parent = column.parent
+    if isinstance(parent, exp.Distinct):
+        parent = parent.parent
+        if isinstance(parent, exp.Count):
+            return True
+    if isinstance(parent, (exp.Min, exp.Max)):
+        return True
+    distinct = select.args.get("distinct")
+    if distinct is None or distinct.args.get("on"):
+        return False
+    projection = column
+    while projection.parent is not None and projection.parent is not select:
+        projection = projection.parent
+    return projection.parent is select and projection.arg_key == "expressions" and unwrap(projection) is column
+
+
+def _date_extremes_only(scope: Scope, alias: str, date_column: str) -> bool:
+    """这一层里别名 alias 的字段是不是只用来取日期的最早、最晚、去重值
+
+    MIN(日期)、MAX(日期)、DISTINCT 日期这几种写法的结果不会把多天的数据加在一起，不要求日期条件。
+    至少要有一处这样的用法；WHERE、关联条件、GROUP BY 里的过滤和分组不产生输出，不碍事；
+    ORDER BY 里只允许按日期字段排序；SELECT 列表、HAVING 里取了别的字段就不算。
+    """
+    select = scope.expression
+    found = False
+    for column in scope.find_all(exp.Column):
+        if column.table != alias:
+            continue
+        clause = _clause_of(column, select)
+        if clause in ("where", "joins", "group"):
+            continue
+        if column.name == date_column and _is_date_extreme(column, select):
+            found = True
+        elif not (clause == "order" and column.name == date_column and isinstance(column.parent, exp.Ordered)):
+            return False
+    return found
 
 
 # ── 校验器 ────────────────────────────────────────────────
@@ -392,7 +545,11 @@ class SqlValidator:
 
     @staticmethod
     def _check_parse(sql: str, run: _Run) -> exp.Expression | None:
-        """R1：能按 PostgreSQL 解析，且只有一条语句（空节点和分号节点不算）"""
+        """R1：能按 PostgreSQL 解析，且只有一条语句（空节点和分号节点不算）
+
+        括号上挂的 WITH、ORDER BY、LIMIT、OFFSET 顺手挪进括号里面（见 _hoist_wrapper_clauses），
+        括号里外各写一个的是 PostgreSQL 的语法错误。
+        """
         try:
             statements = parse_statements(sql)
         except Exception as error:  # noqa: BLE001 ParseError、TokenError 以及 sqlglot 内部异常都算解析失败
@@ -404,7 +561,11 @@ class SqlValidator:
         if len(statements) > 1:
             run.error("R1", f"只能有一条 SQL 语句，收到 {len(statements)} 条")
             return None
-        return statements[0]
+        statement = statements[0]
+        if clashes := _hoist_wrapper_clauses(statement):
+            run.error("R1", f"括号里面和外面各写了一个 {_join(clashes)}，PostgreSQL 不允许同一条查询有两个，请合并成一个")
+            return None
+        return statement
 
     @staticmethod
     def _check_query_only(statement: exp.Expression, run: _Run) -> bool:
@@ -562,6 +723,8 @@ class SqlValidator:
                 run.error("R4", f"别名 {alias} 没有定义（写作 {alias}.{name}）；"
                                 f"可用的别名：{_join(self._visible(scope, resolver))}（位置：{_scope_label(scope)}）")
             return
+        if is_table_function(source):          # 表函数的字段由函数产生：不查元数据，也不算用到的实体字段
+            return
         if isinstance(source, exp.Table):
             tid = table_id(source)
             known = self._column_sets.get(tid)
@@ -640,22 +803,17 @@ class SqlValidator:
         return set(resolver.output_names(scope) or ())
 
     def _check_alias_references(self, raw: exp.Expression, run: _Run) -> None:
-        """WHERE、HAVING 里引用了 SELECT 的输出别名
+        """在 PostgreSQL 看不到同层输出别名的位置引用了它：WHERE、HAVING、SELECT 列表、窗口，
+        以及 ORDER BY、GROUP BY 里嵌在表达式中的（别名单独出现、位置序号都可以）
 
         sqlglot 限定字段时会把这种引用悄悄换成别名对应的表达式，DuckDB 也能执行，但 PostgreSQL 会报字段不存在，
         所以要在没限定的树上单独查。先按名字粗筛，有嫌疑时才建作用域确认它不是某个来源的字段。
         """
         suspects: list[tuple[exp.Select, str, exp.Column]] = []
         for select in raw.find_all(exp.Select):
-            aliases = _explicit_aliases(select)
-            if not aliases:
-                continue
-            for clause in ("where", "having"):
-                node = select.args.get(clause)
-                for column in node.find_all(exp.Column) if node is not None else ():
-                    if (not column.table and column.name in aliases
-                            and column.find_ancestor(exp.Select) is select):
-                        suspects.append((select, clause, column))
+            if aliases := _explicit_aliases(select):
+                suspects.extend((select, clause, column) for clause, column in _alias_sites(select)
+                                if column.name in aliases)
         if not suspects:
             return
         root = build_scope(raw)
@@ -672,23 +830,67 @@ class SqlValidator:
     # ── R5 ──
 
     def _check_snapshot_dates(self, root: Scope, resolver: ScopeResolver, run: _Run) -> None:
-        """R5：每个查询层里指向快照表的别名，它的数据日期字段要出现在本层的 WHERE 或某个 JOIN 的条件里"""
+        """R5：每个查询层里指向快照表的别名，它的数据日期字段要在本层的 WHERE 或某个 JOIN 的条件里受到具体条件约束
+
+        只拿来取最早、最晚、去重日期的快照表不要求日期条件，见 _date_extremes_only。
+        """
         for scope in root.traverse():
-            if not isinstance(scope.expression, exp.Select):
+            select = scope.expression
+            if not isinstance(select, exp.Select):
                 continue
-            in_conditions = {(column.table, column.name) for column in scope.find_all(exp.Column)
-                             if column.table and _clause_of(column, scope.expression) in ("where", "joins")}
+            snapshots: dict[str, TableMeta] = {}
             for alias, source in resolver.sources(scope).items():
-                if not isinstance(source, exp.Table):
-                    continue
-                meta = self._tables.get(table_id(source))
-                if meta is None or meta.table_type != SNAPSHOT_TYPE or not meta.date_column:
-                    continue
-                if (alias, meta.date_column) in in_conditions:
+                meta = self._tables.get(table_id(source)) if isinstance(source, exp.Table) else None
+                if meta is not None and meta.table_type == SNAPSHOT_TYPE and meta.date_column:
+                    snapshots[alias] = meta
+            if not snapshots:
+                continue
+            dated = self._dated(select, {(alias, meta.date_column) for alias, meta in snapshots.items()})
+            for alias, meta in snapshots.items():
+                if (alias, meta.date_column) in dated or _date_extremes_only(scope, alias, meta.date_column):
                     continue
                 run.error("R5", f"快照表 {meta.table_id}（别名 {alias}）没有数据日期条件，会把多天的数据加在一起；"
                                 f"请在 WHERE 或关联条件里加上 {alias}.{meta.date_column} = {DATE_EXAMPLE}"
                                 f"（位置：{_scope_label(scope)}）")
+
+    @staticmethod
+    def _dated(select: exp.Select, tracked: set[tuple[str, str]]) -> set[tuple[str, str]]:
+        """本层 WHERE 和各个 JOIN 条件的 AND 子句里，受到具体日期条件约束的（别名, 日期字段）
+
+        两个快照表的日期字段互相写等值只是互相对齐，并不限定是哪天：把这样对齐的字段用并查集归成块，
+        块里至少有一个字段受具体条件约束，整块才算有日期条件。具体条件指等于字面量、函数、子查询的结果
+        或者别的字段，IN、BETWEEN、比较运算；IS [NOT] NULL 不算。
+
+        Args:
+            select: 查询层
+            tracked: 要看的（别名, 日期字段）
+
+        Returns:
+            有日期条件的（别名, 日期字段），是 tracked 的子集
+        """
+        parent = {node: node for node in tracked}
+
+        def find(node: tuple[str, str]) -> tuple[str, str]:
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        conditions = conjuncts(select.args.get("where"))
+        for join in select.args.get("joins") or []:
+            conditions += conjuncts(join.args.get("on"))
+        concrete: set[tuple[str, str]] = set()
+        for condition in conditions:
+            mentioned = {(column.table, column.name) for column in walk_in_scope(condition)
+                         if isinstance(column, exp.Column)} & tracked
+            if not mentioned:
+                continue
+            if aligned := _aligned_dates(condition, tracked):
+                parent[find(aligned[0])] = find(aligned[1])
+            elif not _is_null_test(condition):
+                concrete |= mentioned
+        constrained = {find(node) for node in concrete}
+        return {node for node in tracked if find(node) in constrained}
 
     # ── R6 ──
 
