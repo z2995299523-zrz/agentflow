@@ -175,8 +175,19 @@ def test_field_ref_id_and_text_formats(tiny_mart):
     columns = {c.column_name: c for c in mart.columns if c.table_id == "ods.acct"}
 
     assert field_ref_id("ods.acct", "bal") == "ods.acct.bal"
-    assert field_text(table, columns["bal"]) == "账户表 余额 原币"       # 表中文名 字段中文名 口径说明
-    assert field_text(table, columns["acct_no"]) == "账户表 账号"        # 没有口径说明就不留空位
+    assert field_text(table, columns["bal"]) == "账户表 余额"           # 表中文名 字段中文名；口径说明「原币」不放进去
+    assert field_text(table, columns["acct_no"]) == "账户表 账号"
+
+
+def test_field_text_leaves_out_the_caliber_note(tiny_mart):
+    """口径说明在真实库里多是加工过程的描述，混进向量文本会稀释相似度，所以只用表中文名和字段中文名"""
+    mart, _ = load_mart(tiny_mart)
+    table = next(t for t in mart.tables if t.table_id == "ods.acct")
+    bal = next(c for c in mart.columns if c.table_id == "ods.acct" and c.column_name == "bal")
+    process = bal.model_copy(update={"description": "【指标】折人民币余额；加工：SUM(CASE WHEN a.flag = '1' THEN a.bal END)"})
+
+    assert bal.description == "原币"
+    assert field_text(table, process) == field_text(table, bal) == "账户表 余额"      # 只有说明不同的两个字段，文本相同
 
 
 def test_example_text_joins_requirement_and_caliber():
@@ -200,6 +211,7 @@ def test_build_vectors_covers_every_field_in_mart_order(tiny_mart):
     assert field.kind == "field"
     assert field.ref_ids == [f"{c.table_id}.{c.column_name}" for c in mart.columns]
     assert field.texts == [field_text(tables[c.table_id], c) for c in mart.columns]
+    assert "原币" not in " ".join(field.texts)           # 口径说明不进向量文本
     assert field.matrix.shape == (9, 512) and field.matrix.dtype == np.float32
     assert np.array_equal(field.matrix, HashEmbedder().embed(field.texts))
     assert "example" not in bundle.sets                # 没有样例就不建样例集

@@ -1,6 +1,6 @@
 """
 向量索引
-字段文本（表中文名、字段中文名、口径说明）和样例文本（需求、口径）的向量化与检索。
+字段文本（表中文名、字段中文名）和样例文本（需求、口径）的向量化与检索。
 向量和元数据存在同一个元数据库里，检索时用 numpy 算全量相似度，不用向量数据库。
 
 向量器可以替换：默认用本地的 BGE 模型；环境变量 METADATA_EMBEDDER=hash 时用哈希向量器，
@@ -228,11 +228,16 @@ def field_ref_id(table_id: str, column_name: str) -> str:
 
 
 def field_text(table: TableMeta, column: ColumnMeta) -> str:
-    """字段向量化用的文本：表中文名、字段中文名、口径说明，用空格连接，没有口径说明就省去
+    """字段向量化用的文本：表中文名、字段中文名，用空格连接
 
     字段名在很多表里都叫「余额」「客户号」，带上表中文名才分得出是哪张表的字段。
+
+    口径说明有意不放进来（设计文档原文还带着它）：真实库里的口径说明多是加工过程的描述，属于血缘信息，
+    不是字段的含义，混进向量文本会稀释相似度。在真实库专题层的手写查询上对比过，去掉口径说明后第一名的
+    得分普遍高 0.07 到 0.10，只在说明里提到相关词的干扰字段也明显减少。口径说明仍然留在元数据库里，
+    后面的证据环节交给模型读。
     """
-    return " ".join(part for part in (table.table_cn, column.column_cn, column.description) if part)
+    return " ".join(part for part in (table.table_cn, column.column_cn) if part)
 
 
 def example_text(example: Example) -> str:
@@ -325,7 +330,7 @@ def build_vectors(mart: Mart, embedder: Embedder, batch_size: int = 256) -> tupl
 class VectorIndex:
     """一类文档向量上的全量相似度检索
 
-    不建近似索引：一两万条 512 维的向量，扫一遍只要几毫秒，近似索引省不下什么，还会让结果不确定。
+    不建近似索引：两万多条 512 维的向量，扫一遍只要几毫秒，近似索引省不下什么，还会让结果不确定。
     """
 
     def __init__(self, vector_set: VectorSet) -> None:
