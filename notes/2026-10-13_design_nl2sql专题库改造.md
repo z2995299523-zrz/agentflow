@@ -249,7 +249,7 @@ SELECT ...
 
 ```
 读取四张清单 → 标准化(标识符小写、去空格) → 校验 → 解析加工脚本 → 回填加工表达式
-→ 推导关联关系 → 解析并校验样例 → 写入元数据库 → 建向量索引 → 输出导入报告
+→ 推导关联关系 → 解析并校验样例 → 算向量 → 写入元数据库（向量与其余内容在同一个文件里）→ 输出导入报告
 ```
 
 每次全量重建。先写临时文件，全部成功后再替换，所以失败时原有元数据库不受影响，重复执行结果相同。
@@ -302,7 +302,7 @@ SELECT ...
 
 ### 4.4 关联关系推导
 
-关联关系有四种来源，同一对表之间按下面的优先级保留一条，并记录来源，输出时会说明依据。
+关联关系有四种来源，按下面的优先级合并，并记录来源，输出时会说明依据。同一对表按「表对 + 字段映射」去重，同一种映射保留优先级最高的来源；一对表最多保留 3 种映射，最优的排第一（第二份计划实施时修订：原文是每对表只留一条，但同一对表确实可能有几种都对的关联方式，例如机构维表与机构信息表之间按上级机构号和按机构号两种）。
 
 | 优先级 | 来源 | 说明 |
 |--------|------|------|
@@ -317,7 +317,9 @@ SELECT ...
 
 没有表达式可用时（脚本未能解析），目标字段与源字段同名且只有一个来源的，也按直取处理。
 
-**对应关系的判定。** 关联键覆盖了某一侧表的全部粒度字段，则该侧唯一。右侧唯一为 `N:1`，两侧都唯一为 `1:1`，左侧唯一为 `1:N`，都不唯一为 `N:N`。
+**对应关系的判定。** 关联键覆盖了某一侧表的全部粒度字段，则该侧唯一。右侧唯一为 `N:1`，两侧都唯一为 `1:1`，左侧唯一为 `1:N`，都不唯一为 `N:N`。某一侧的表没有粒度字段时判断不了，记为「未知」。推导结果统一写成 `N:1` 方向。
+
+**规模控制。** 不加限制时，同名粒度键会在真实库上推出上万对关联，所以实施时加了几道闸：粒度字段全是 `id`、`record_id` 这类行编号常用名的表不参与同名粒度键；同名粒度键只允许同层或下游表关联上游表；一张表被超过 150 张表关联时跳过；键域超过 50 个字段、单次传递超过 400 对时不传递；传递出的 `N:N` 丢掉。被挡掉的数量都写进导入报告。
 
 ### 4.5 元数据库表结构
 
@@ -327,23 +329,26 @@ SQLite 文件 `build/metadata.db`，可以直接用 SQL 查看。
 |----|----------|
 | `meta_table` | table_id、layer、schema_name、table_name、table_cn、table_type、grain_columns、date_column、description |
 | `meta_column` | table_id、column_name、ordinal、column_cn、data_type、is_pk、description、enum_values |
-| `meta_lineage` | target_table、target_column、source_table、source_column、transform、script_name、is_passthrough、source_external |
+| `meta_lineage` | target_table、target_column、source_table、source_column、transform、script_name、source_external、is_passthrough、origin（清单或脚本补上） |
 | `meta_relation` | left_table、left_columns、right_table、right_columns、cardinality、origin |
-| `meta_script` | script_name、stmt_index、target_table、sql_text、filters、joins、parsed |
-| `meta_example` | example_id、requirement、caliber_note、sql_text、tables、source_file |
+| `meta_script` | script_name、stmt_index、target_table、sql_text、select_sql、parsed、filters、joins |
+| `meta_script_column` | script_name、stmt_index、target_table、target_column、expression、sources、kind（直取、加工、空值、常量、加工时间、追溯不到） |
+| `meta_example` | example_id、requirement、caliber_note、sql_text、tables、source_file、line_no |
+| `meta_vector` | kind（字段或样例）、ref_id、text、vector（float32） |
+| `meta_info` | key、value（向量器名称、维度） |
 
 只有导入器写库，其它模块通过 `MetadataStore` 只读访问。
 
 ### 4.6 向量索引
 
-沿用现有的本地 BGE 模型和 Chroma，两个集合：
+沿用现有的本地 BGE 模型。向量不放 Chroma，而是作为一张表写进元数据库，查询时整体载入内存，用 numpy 算全量相似度（第二份计划实施时修订）：真实库约 2.3 万个字段，一次全量计算只要几毫秒；向量和元数据在同一个临时文件里写好再替换，导入失败不会留下半截索引；读取时不占文件，重新导入不会被正在运行的界面挡住。两类文档：
 
 | 集合 | 每条文档的文本 | 用途 |
 |------|----------------|------|
-| 字段 | 表中文名 + 字段中文名 + 口径说明 | 召回候选字段，再按表归组得到候选表 |
+| 字段 | 表中文名 + 字段中文名 | 召回候选字段，再按表归组得到候选表 |
 | 样例 | 需求 + 口径 | 召回相似样例 |
 
-字段文档的文本里已经带了表中文名，所以不再单独为表建集合。
+字段文档的文本里已经带了表中文名，所以不再单独为表建一类。口径说明不放进字段文本（实施时修订）：真实库的口径说明多是加工过程的描述，混进去会稀释相似度，实测去掉后排第一的命中得分普遍高 0.07 到 0.10。口径说明仍留在元数据库里，由证据环节交给模型读。查询时会比对向量器名称，与建库时不一致就只走关键字路。
 
 向量化通过一个可替换的接口提供。单元测试使用假的向量器，不加载 BGE 模型。
 
@@ -543,7 +548,11 @@ ORDER BY cur_bal DESC;
 
 R5 只针对快照表。全量表只有当前状态，不要求日期条件。R7 需要粒度字段，没有填粒度字段的表无法判断，这条规则对它不生效。
 
-R3 不通过时跳过 R4。错误信息里附上可用的表名或字段名，方便模型修正。校验报告同时给出 SQL 实际使用的表和字段，评估时用来计算选表准确率和字段准确率。
+R3 不通过时跳过 R4。错误信息里附上可用的表名或字段名，方便模型修正。
+
+实施时补充的判定：R5 把「日期字段 = 日期字段」归成一组，组里至少要有一个具体的日期条件，两张快照表只互相对齐日期仍算缺；快照表在一层里只取日期的最大值、最小值或去重值（「取最新日期」）时豁免。R4 也检查在 SELECT 列表、窗口、表达式里引用同一层输出别名的写法：PostgreSQL 会报错，DuckDB 却能执行，评估时发现不了。已知局限（函数副作用、NATURAL JOIN、少见伪列等）见静态校验的笔记。
+
+校验报告同时给出 SQL 实际使用的表和字段，评估时用来计算选表准确率和字段准确率。
 
 R2 取代现有的关键词黑名单。现有做法按空格分词找 `DELETE` 之类的词，换行或注释就能绕过；按语法树判断语句类型既绕不过，也不会误伤含关键词的字段名。
 
