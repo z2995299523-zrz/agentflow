@@ -1,0 +1,436 @@
+"""LangGraph 编排：七个节点、三条回路、失败的各条路径、对照实验的三组、逐步进度
+
+用假模型（ScriptedLLM）和模拟专题库的元数据：回复的条数就是模型被调用的次数，调多了、调少了测试都会发现。
+"""
+from datetime import date
+
+import pytest
+
+from nl2sql import workflow
+from nl2sql.executor import DuckDBExecutor, ExecResult
+from nl2sql.llm import ScriptedLLM
+from nl2sql.schemas import (
+    STEPS,
+    Clarify,
+    ClarifyOption,
+    Metric,
+    ParsedRequest,
+    PlanField,
+    PlanTable,
+    QueryPlan,
+    QueryRequest,
+    QueryResult,
+    TimeSpec,
+    TraceStep,
+)
+from nl2sql.workflow import Pipeline, PipelineDeps
+
+LOAN = "ads.corp_cust_loan_bal_d"              # 对公客户贷款余额日汇总：B01 的标准用表
+REQUIREMENT = "查询 2026-09-30 全行对公贷款余额"
+GOOD_SQL = f"SELECT SUM(loan_bal_rmb) AS loan_bal_rmb FROM {LOAN} WHERE data_dt = DATE '2026-09-30'"
+BAD_SQL = f"SELECT SUM(loan_bal_rmb) AS loan_bal_rmb FROM {LOAN}"        # 快照表没有数据日期条件：R5
+QUESTION = "查 2026 年 9 月末全行对公贷款余额"
+TODAY = date(2026, 10, 13)
+
+
+def request(**changes) -> QueryRequest:
+    """B01 的首轮请求；changes 覆盖其中的字段"""
+    return QueryRequest(question=QUESTION, today=TODAY, **changes)
+
+
+def parsed_json(**changes) -> str:
+    """① 的合格回复（JSON 文本）"""
+    parsed = ParsedRequest(is_query=True, requirement=REQUIREMENT, metrics=[Metric(name="对公贷款余额")],
+                           time=TimeSpec(kind="point", dates=["2026-09-30"], note="9 月末 → 2026-09-30"))
+    return parsed.model_copy(update=changes).model_dump_json()
+
+
+def plan_json(**changes) -> str:
+    """④ 的合格回复（JSON 文本）：用 B01 的标准用表"""
+    plan = QueryPlan(
+        decision="ok", tables=[PlanTable(table=LOAN, reason="时点余额已在客户汇总表里")],
+        fields=[PlanField(table=LOAN, column="loan_bal_rmb", usage="metric", reason="贷款余额"),
+                PlanField(table=LOAN, column="data_dt", usage="filter", reason="快照表的数据日期")],
+        filters=[f"{LOAN}.data_dt = DATE '2026-09-30'"], caliber="loan_bal_rmb 是全部对公贷款的余额",
+        table_basis="只到全行，不需要关联维表", assumptions=["余额按人民币折算"])
+    return plan.model_copy(update=changes).model_dump_json()
+
+
+def upstream_json(*missing: str) -> str:
+    """④ 说缺东西、要上溯的回复"""
+    return QueryPlan(decision="need_upstream", missing=list(missing), reason="候选表里没有这个字段").model_dump_json()
+
+
+def clarify_json() -> str:
+    """④ 反问的回复"""
+    clarify = Clarify(question="贷款余额要不要含票据贴现？", options=[
+        ClarifyOption(label="含票据贴现", meaning="用全口径余额"), ClarifyOption(label="不含票据贴现", meaning="用贷款余额")])
+    return QueryPlan(decision="need_clarify", clarify=clarify).model_dump_json()
+
+
+def sql_reply(sql: str) -> str:
+    """⑤ 的回复：放在 sql 代码块里"""
+    return f"```sql\n{sql}\n```"
+
+
+class SpyRetriever:
+    """包住真的召回，记下每次调用的参数和结果"""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.calls: list[dict] = []
+
+    def recall(self, query, scope_level=0, base_tables=(), *, all_layers=False):
+        result = self._inner.recall(query, scope_level, base_tables, all_layers=all_layers)
+        self.calls.append({"query": query, "scope_level": scope_level, "base_tables": list(base_tables),
+                           "all_layers": all_layers, "result": result})
+        return result
+
+
+@pytest.fixture
+def make(mock_store, mock_graph, mock_retriever, mock_validator):
+    """造流水线：make(replies, executor=None) → (流水线, 假模型, 召回的记录)"""
+
+    def build(replies, executor=None):
+        llm = ScriptedLLM(replies)
+        spy = SpyRetriever(mock_retriever)
+        deps = PipelineDeps(store=mock_store, graph=mock_graph, retriever=spy, validator=mock_validator, llm=llm)
+        if executor is not None:
+            deps.executor = executor
+        return Pipeline(deps), llm, spy
+
+    return build
+
+
+@pytest.fixture
+def evidence_spy(monkeypatch):
+    """包住 build_evidence，记下每次的参数和证据"""
+    seen: list[dict] = []
+    original = workflow.build_evidence
+
+    def spy(*args, **kwargs):
+        evidence = original(*args, **kwargs)
+        seen.append({"kwargs": kwargs, "evidence": evidence})
+        return evidence
+
+    monkeypatch.setattr(workflow, "build_evidence", spy)
+    return seen
+
+
+def labels(result: QueryResult) -> list[str]:
+    return [step.label for step in result.trace]
+
+
+# ── 正常路径 ──────────────────────────────────────
+
+def test_normal_path_runs_the_seven_steps_in_order(make):
+    pipeline, llm, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.failed_step == "" and result.message == ""
+    assert [step.step for step in result.trace] == list(STEPS)
+    assert all(step.summary for step in result.trace)
+    assert result.llm_calls == 3 and llm.remaining == 0
+    assert [call["json_mode"] for call in llm.calls] == [True, True, False]       # ① ④ 用 JSON 模式，⑤ 不用
+    assert result.requirement == REQUIREMENT
+    assert LOAN in result.candidate_tables                                         # 标准用表进了候选
+    assert result.validation.ok and result.first_pass_ok is True and result.repair_rounds == 0
+    assert result.sql.startswith("SELECT") and "\n" in result.sql                   # 排过版
+    assert result.assumptions == ["余额按人民币折算"]
+    assert result.exec_result is None                                               # 执行层是 none，不执行
+    assert "messages" not in result.public()["calls"][0]                           # 给界面和接口的版本没有提示词
+
+
+def test_duckdb_executor_runs_the_sql_and_the_summary_has_no_data(make, mock_db):
+    pipeline, _, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)], executor=DuckDBExecutor(mock_db))
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.exec_result.executed and result.exec_result.row_count > 0
+    summary = result.trace[-1].summary
+    assert f"已执行，返回 {result.exec_result.row_count} 行" in summary
+    assert str(result.exec_result.rows[0][0]) not in summary                        # 轨迹里只有元数据，没有数据
+
+
+# ── 反问、上溯、做不到 ─────────────────────────────
+
+def test_clarify_stops_before_generating_sql(make):
+    pipeline, llm, _ = make([parsed_json(), clarify_json()])
+
+    result = pipeline.run(request())
+
+    assert result.status == "need_clarify" and result.sql == ""
+    assert [option.label for option in result.clarify.options] == ["含票据贴现", "不含票据贴现"]
+    assert result.requirement == REQUIREMENT                    # 调用方把它作为下一轮的 prev_requirement
+    assert result.llm_calls == 2 and llm.remaining == 0         # 没有调用 ⑤
+    assert [step.step for step in result.trace] == ["parse", "recall", "evidence", "plan", "output"]
+
+
+def test_upstream_one_level_then_ok(make):
+    pipeline, llm, spy = make([parsed_json(), upstream_json("还款方式"), plan_json(), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.scope_level == 1 and result.llm_calls == 4
+    assert [call["scope_level"] for call in spy.calls] == [0, 1]
+    first, second = spy.calls
+    assert "还款方式" in second["query"].metrics and "还款方式" not in first["query"].metrics
+    assert second["base_tables"] == [table.table_id for table in first["result"].tables]    # 以第一次的候选为起点
+    assert "② 候选召回（上溯第 1 层）" in labels(result) and "④ 选表定口径（上溯第 1 层）" in labels(result)
+    assert labels(result)[:4] == ["① 需求解析", "② 候选召回", "③ 血缘展开", "④ 选表定口径"]    # 第 0 层的标签不带后缀
+
+
+def test_upstream_to_the_top_still_missing_fails(make):
+    pipeline, llm, spy = make([parsed_json(), upstream_json("还款方式"), upstream_json("还款方式"),
+                               upstream_json("还款方式")])
+
+    result = pipeline.run(request())
+
+    assert result.status == "failed" and result.failed_step == "plan"
+    assert "上溯 2 层仍找不到" in result.message and "还款方式" in result.message
+    assert [call["scope_level"] for call in spy.calls] == [0, 1, 2]
+    assert result.scope_level == 2 and result.llm_calls == 4 and result.sql == ""
+
+
+def test_cannot_answer_fails_with_the_reason(make):
+    reason = "元数据里没有还款计划，做不到"
+    pipeline, llm, _ = make([parsed_json(), QueryPlan(decision="cannot_answer", reason=reason).model_dump_json()])
+
+    result = pipeline.run(request())
+
+    assert result.status == "failed" and result.failed_step == "plan" and result.message == reason
+    assert result.llm_calls == 2 and llm.remaining == 0
+
+
+def test_no_candidate_table_fails_at_recall(make):
+    parsed = parsed_json(requirement="qwertyuiop", metrics=[Metric(name="qwertyuiop")])
+    pipeline, llm, _ = make([parsed])
+
+    result = pipeline.run(request())
+
+    assert result.status == "failed" and result.failed_step == "recall"
+    assert "元数据里没有找到" in result.message and "qwertyuiop" in result.message
+    assert result.llm_calls == 1 and result.candidate_tables == []
+    assert [step.step for step in result.trace] == ["parse", "recall", "output"]
+
+
+# ── 修正回路 ──────────────────────────────────────
+
+def test_repair_twice_and_still_failing_is_unvalidated(make):
+    pipeline, llm, _ = make([parsed_json(), plan_json(), sql_reply(BAD_SQL), sql_reply(BAD_SQL), sql_reply(BAD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "unvalidated" and result.repair_rounds == 2 and result.first_pass_ok is False
+    assert result.llm_calls == 5 and llm.remaining == 0
+    assert not result.validation.ok and result.validation.errors[0].startswith("R5：")
+    assert result.sql                                            # 仍然给出 SQL，由人判断
+    assert "⑤ 生成 SQL（第 2 次）" in labels(result) and "⑥ 静态校验（第 3 次）" in labels(result)
+    second = llm.calls[3]["messages"]                            # 修正那次发给模型的消息：上一次的 SQL 和错误
+    assert BAD_SQL in second[-1]["content"] and "R5" in second[-1]["content"]
+    assert "第 2 次：修正 R5" in [step.summary for step in result.trace if step.step == "generate"][1]
+
+
+def test_one_repair_is_enough(make):
+    pipeline, _, _ = make([parsed_json(), plan_json(), sql_reply(BAD_SQL), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.repair_rounds == 1 and result.first_pass_ok is False
+    assert result.validation.ok and result.llm_calls == 4
+
+
+def test_validation_compares_the_sql_with_the_plans_tables_and_metric_columns(make):
+    fields = [PlanField(table=LOAN, column="npl_bal_rmb", usage="metric"),         # SQL 没用到：该警告
+              PlanField(table=LOAN, column="cust_no", usage="filter"),             # SQL 没用到，但过滤字段不在期望里
+              PlanField(table=LOAN, column="data_dt", usage="filter")]
+    pipeline, _, _ = make([parsed_json(), plan_json(fields=fields), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok"                                 # R8 只是警告，不触发修正
+    assert len(result.validation.warnings) == 1 and result.validation.warnings[0].startswith("R8：")
+    assert "npl_bal_rmb" in result.validation.warnings[0] and "cust_no" not in result.validation.warnings[0]
+    assert [step.summary for step in result.trace if step.step == "validate"] == ["通过，警告 1 条"]
+
+
+# ── 失败 ──────────────────────────────────────────
+
+def test_requirement_unparseable_twice_fails_at_parse(make):
+    pipeline, llm, _ = make(["这不是 JSON", "还是不是 JSON"])
+
+    result = pipeline.run(request())
+
+    assert result.status == "failed" and result.failed_step == "parse" and "输出两次都不合格" in result.message
+    assert result.llm_calls == 2 and result.requirement == ""
+    assert [step.step for step in result.trace] == ["parse", "output"]
+
+
+def test_model_error_names_the_step_that_failed(make):
+    pipeline, _, _ = make([parsed_json(), RuntimeError("连接中断")])
+
+    result = pipeline.run(request())
+
+    assert result.status == "failed" and result.failed_step == "plan"
+    assert "模型调用失败" in result.message and "连接中断" in result.message
+    assert result.calls[-1].ok is False and result.requirement == REQUIREMENT      # 失败前的结果还在
+
+
+def test_not_a_query_fails_with_the_models_reply(make):
+    reply = "我是专题库查数工具，请告诉我要查什么指标"
+    pipeline, llm, _ = make([ParsedRequest(is_query=False, reply=reply).model_dump_json()])
+
+    result = pipeline.run(request())
+
+    assert result.status == "failed" and result.failed_step == "parse" and result.message == reply
+    assert result.llm_calls == 1 and result.requirement == ""        # 不是需求，调用方不该把它当作上一轮需求
+
+
+# ── 追问与反问的回答 ──────────────────────────────
+
+def test_follow_up_sends_the_previous_requirement_to_the_parser(make):
+    pipeline, llm, _ = make([parsed_json(requirement=REQUIREMENT + "，按机构分组"), plan_json(), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request(prev_requirement=REQUIREMENT))
+
+    assert REQUIREMENT in llm.calls[0]["messages"][-1]["content"]
+    assert result.status == "ok" and result.requirement == REQUIREMENT + "，按机构分组"
+
+
+def test_answering_a_clarify_cannot_trigger_another_one(make):
+    prev = Clarify(question="贷款余额要不要含票据贴现？", options=[ClarifyOption(label="含票据贴现"),
+                                                             ClarifyOption(label="不含票据贴现")])
+    pipeline, llm, _ = make([parsed_json(), clarify_json(), clarify_json()])
+
+    result = pipeline.run(request(prev_clarify=prev))
+
+    assert "贷款余额要不要含票据贴现" in llm.calls[0]["messages"][-1]["content"]      # 解析时知道上一轮问了什么
+    assert result.status == "failed" and result.failed_step == "plan" and "输出两次都不合格" in result.message
+    assert "不能再反问" in llm.calls[2]["messages"][-1]["content"]                  # 重试时告诉模型为什么不行
+    assert result.llm_calls == 3 and result.clarify is None
+
+
+# ── 对照实验的三组 ─────────────────────────────────
+
+def test_group_a_ranks_all_layers_without_lineage_or_upstream(make, evidence_spy, mock_graph):
+    replies = [parsed_json(), upstream_json("还款方式"), plan_json(), sql_reply(GOOD_SQL)]
+    pipeline, llm, spy = make(replies + replies)               # 跑两遍：结构图只建一次
+    group_a = request(use_lineage=False, use_examples=False)
+
+    result = pipeline.run(group_a)
+
+    assert result.status == "ok" and result.scope_level == 0
+    assert result.llm_calls == 4                                # ④ 想上溯被驳回，重试后给出方案
+    assert "不能上溯" in llm.calls[2]["messages"][-1]["content"]
+    assert len(spy.calls) == 1 and spy.calls[0]["all_layers"] is True and spy.calls[0]["scope_level"] == 0
+    assert spy.calls[0]["result"].examples                      # 召回本来有样例，不用样例时被去掉了
+    assert any(table.reason == "example" for table in spy.calls[0]["result"].tables)
+    evidence = evidence_spy[0]["evidence"]
+    assert all(table.reason != "example" for table in evidence.tables)              # 样例带进来的表也去掉了
+    assert (evidence.use_lineage, evidence.all_layers) == (False, True)
+    assert evidence.lineage == [] and evidence.comparisons == [] and evidence.upstream_options == []
+    assert evidence.examples == []
+    structure = pipeline.deps.structure_graph                   # 关联路径来自只按表结构推导的图
+    assert structure is not None and evidence_spy[0]["kwargs"]["join_graph"] is structure
+    assert structure.relations_between("ods.org_info", "ods.org_info") == []
+    assert mock_graph.relations_between("ods.org_info", "ods.org_info")        # 完整的图里有这条脚本推出的自关联
+
+    assert pipeline.run(group_a).status == "ok"
+    assert pipeline.deps.structure_graph is structure           # 建好留着，没有重建
+
+
+@pytest.mark.parametrize("use_examples", [False, True])
+def test_groups_b_and_c_both_use_lineage_but_only_c_uses_examples(make, evidence_spy, use_examples):
+    pipeline, _, spy = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request(use_lineage=True, use_examples=use_examples))
+
+    assert result.status == "ok"
+    assert spy.calls[0]["all_layers"] is False and spy.calls[0]["result"].examples
+    assert any(table.reason == "example" for table in spy.calls[0]["result"].tables)
+    evidence = evidence_spy[0]["evidence"]
+    assert any(table.reason == "example" for table in evidence.tables) is use_examples     # 样例带进来的表跟着样例走
+    assert evidence.use_lineage and evidence.lineage and evidence.upstream_options
+    assert bool(evidence.examples) is use_examples
+    assert pipeline.deps.structure_graph is None                # B、C 组用不到结构图，不建
+
+
+# ── 没料到的错误、逐步进度 ─────────────────────────
+
+def test_unexpected_errors_become_a_failed_result_instead_of_being_raised(make, monkeypatch):
+    def boom(*args, **kwargs):
+        raise ValueError("证据组装炸了")
+
+    monkeypatch.setattr(workflow, "build_evidence", boom)
+    pipeline, _, _ = make([parsed_json()])
+
+    result = pipeline.run(request())
+
+    assert result.status == "failed" and result.failed_step == "internal"
+    assert result.message == "内部错误：ValueError: 证据组装炸了"
+    assert result.llm_calls == 1 and result.requirement == REQUIREMENT      # 已经发生的调用和结果都保留
+    assert [step.step for step in result.trace] == ["parse", "recall", "evidence", "output"]
+    assert result.trace[2].summary.startswith("失败：内部错误")
+
+
+def test_output_step_failure_still_gives_a_result(make, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("排版炸了")
+
+    monkeypatch.setattr(workflow, "format_sql", boom)
+    pipeline, _, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "failed" and result.failed_step == "internal" and "排版炸了" in result.message
+    assert result.sql == "" and result.trace[-1].step == "output"
+
+
+def test_executor_that_raises_becomes_an_execution_error(make):
+    class Broken:
+        name = "broken"
+
+        def execute(self, sql, max_rows=200, timeout_s=30):
+            raise OSError("连不上库")
+
+    pipeline, _, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)], executor=Broken())
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.exec_result.executed is False
+    assert "连不上库" in result.exec_result.error and result.trace[-1].summary == "状态 ok；执行失败"
+
+
+def test_executor_gets_the_row_limit(make):
+    seen = {}
+
+    class Recording:
+        name = "recording"
+
+        def execute(self, sql, max_rows=None, timeout_s=None):
+            seen.update(sql=sql, max_rows=max_rows)
+            return ExecResult(executed=True, columns=["a"], rows=[(1,)], row_count=1, truncated=True)
+
+    pipeline, _, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)], executor=Recording())
+
+    result = pipeline.run(request())
+
+    assert seen["max_rows"] == 200 and seen["sql"] == result.sql          # 执行的就是展示给用户的 SQL
+    assert result.exec_result.truncated and result.trace[-1].summary == "状态 ok；已执行，返回 1 行（结果被截断）"
+
+
+def test_stream_gives_each_step_as_it_finishes_then_the_result(make):
+    pipeline, llm, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)])
+
+    stream = pipeline.stream(request())
+    first = next(stream)
+    assert isinstance(first, TraceStep) and first.step == "parse"
+    assert len(llm.calls) == 1                                   # 第一步走完就给出，后面的步骤还没开始
+    rest = list(stream)
+
+    assert all(isinstance(item, TraceStep) for item in rest[:-1])
+    assert [first.step, *[item.step for item in rest[:-1]]] == list(STEPS)
+    result = rest[-1]
+    assert isinstance(result, QueryResult) and result.status == "ok"
+    assert result.trace == [first, *rest[:-1]]
