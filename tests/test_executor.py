@@ -323,3 +323,56 @@ def test_a_timeout_in_one_thread_does_not_disturb_the_others(small_db):
 
     assert all(result.executed and result.rows == [(3,)] for result in quick)
     assert slow and slow[0].error == "执行超过 1 秒，已中断"
+
+
+# ── 打断不生效、没有结果集：用假连接走到这两条分支 ──────────
+
+def test_interrupt_that_does_not_take_effect_is_reported_as_such(small_db, monkeypatch):
+    release = threading.Event()
+
+    class StuckConnection:
+        """卡住不退出的连接：interrupt() 没有效果"""
+
+        def execute(self, statement):
+            release.wait(10)
+            raise RuntimeError("太晚了")
+
+        def interrupt(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nl2sql.executor.duckdb.connect", lambda *args, **kwargs: StuckConnection())
+    monkeypatch.setattr("nl2sql.executor.INTERRUPT_GRACE_S", 0.2)
+
+    result = DuckDBExecutor(small_db).execute("SELECT 1", timeout_s=0.2)
+    release.set()
+
+    assert not result.executed
+    assert result.error == "执行超过 0.2 秒，中断未生效"
+
+
+def test_statement_without_a_result_set_returns_no_rows_and_reads_nothing(small_db, monkeypatch):
+    class NoResultConnection:
+        description = None
+
+        def execute(self, statement):
+            return self
+
+        def fetchmany(self, size):
+            raise AssertionError("没有结果集，不该去读")
+
+        fetchall = fetchmany
+
+        def interrupt(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nl2sql.executor.duckdb.connect", lambda *args, **kwargs: NoResultConnection())
+
+    result = DuckDBExecutor(small_db).execute("SELECT 1")
+
+    assert result.executed and (result.columns, result.rows, result.row_count) == ([], [], 0)
