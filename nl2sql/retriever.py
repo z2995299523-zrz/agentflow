@@ -19,6 +19,8 @@
 通用字段（表的数据日期、行编号一类的通用键名、同一层里半数以上的表都有的样板字段）只在检索词本身提到它们的名字时才计分：
 真实库上检索词恰好是表名的一部分时，表名会给这张表的每个字段都加分，它们就会占满命中字段的前几位。
 加工脚本里恒为空、取加工时间的字段不参与召回。
+加工脚本里多条语句写同一个字段时，只有每一条都是恒为空、取加工时间才排除：只要有一条是真正的加工，字段就还能用。
+对照实验的 A 组（仅模型结构）没有上溯机制：all_layers 时全部层级的表一起排名，范围就是全部表。
 向量器与建库时用的不是同一个、库里没有字段向量、没有传向量器时，只走关键字路，原因写进 notes：
 同为 512 维的两种向量器混用不会报错，只会悄悄返回没有意义的结果。
 """
@@ -236,14 +238,20 @@ class Retriever:
                 if count >= max(BOILERPLATE_MIN_TABLES, BOILERPLATE_SHARE * tables_in_layer[key[0]])}
 
     def _add_table(self, table_id: str) -> None:
-        """登记一张表和它的字段：排除加工脚本里恒为空、取加工时间的字段，建倒排索引"""
+        """登记一张表和它的字段：排除加工脚本里恒为空、取加工时间的字段，建倒排索引
+
+        多条语句写同一个字段时，每一条的类别都在排除之列才排除；先按字段归好类，不必对每个字段重新扫一遍脚本字段。
+        """
         table = self._tables[table_id]
         for feature in _features(f"{table.table_cn} {table.table_name}"):
             self._table_postings[feature].append(table_id)
+        written: dict[str, list[str]] = defaultdict(list)           # 字段 → 写它的各条语句里的表达式类别
+        for script_column in self._store.script_columns(table_id):
+            written[script_column.target_column].append(script_column.kind)
         indices: list[int] = []
         for column in self._store.columns(table_id):
-            script_column = self._store.script_column(table_id, column.column_name)
-            if script_column is not None and script_column.kind in EXCLUDED_KINDS:
+            kinds = written.get(column.column_name)
+            if kinds and all(kind in EXCLUDED_KINDS for kind in kinds):
                 continue
             name = column.column_name.lower()
             generic = (name in GENERIC_KEY_NAMES or column.column_name == table.date_column
@@ -320,26 +328,35 @@ class Retriever:
 
     # ── 召回 ──
 
-    def recall(self, query: RecallQuery, scope_level: int = 0,
-               base_tables: Sequence[str] = ()) -> RecallResult:
+    def recall(self, query: RecallQuery, scope_level: int = 0, base_tables: Sequence[str] = (), *,
+               all_layers: bool = False) -> RecallResult:
         """召回候选表和相似样例
 
         候选表分三类，按 recall、upstream、example 的顺序排列：recall 是范围内（第 0 层）得分最高的前 MAX_TABLES 张；
         upstream 是上溯加入的表，只留有命中字段的前 MAX_UPSTREAM_TABLES 张，都没命中时取最近的前 MAX_UPSTREAM_TABLES 张；
         example 是相似样例用到的、前两类里还没有的表。后两类不占名额。
 
+        all_layers 是对照实验 A 组用的：排名池是全部层级的全部表，没有上溯，所以没有 upstream 一类，
+        scope_size 是全部表数，scope_level 只能是 0。
+
         Args:
             query: 完整需求和拆出来的指标、维度、过滤
             scope_level: 上溯层数，0、1 或 2
             base_tables: 上溯的起点，scope_level 大于 0 时必须给出
+            all_layers: 全部表一起排名，不上溯
 
         Returns:
             召回结果，说明里记着走了哪几路
 
         Raises:
-            ValueError: scope_level 大于等于 1 而 base_tables 为空
+            ValueError: scope_level 大于等于 1 而 base_tables 为空；all_layers 时 scope_level 不是 0
         """
-        scope, upstream = self.scope_tables(scope_level, base_tables)
+        if all_layers:
+            if scope_level != 0:
+                raise ValueError(f"all_layers 时全部表一起排名，没有上溯，scope_level 只能是 0，收到 {scope_level}")
+            scope, upstream = sorted(self._tables), []
+        else:
+            scope, upstream = self.scope_tables(scope_level, base_tables)
         terms = _prepare_terms(query)
         notes = [self._vector_note] if self._vector_note else []
         if not terms:
@@ -349,7 +366,7 @@ class Retriever:
         upstream_scored, upstream_matched = self._score_tables(terms, vectors, upstream)
         kept = self._keep_upstream(upstream, upstream_scored)
         taken = set(kept)       # 上游表单独排名；没留下的维表仍在第 0 层里，回到池子里和专题层的表一起排
-        pool = [table_id for table_id in self._level0 if table_id not in taken]
+        pool = [table_id for table_id in (scope if all_layers else self._level0) if table_id not in taken]
         scored, matched = self._score_tables(terms, vectors, pool)
         notes += [f"检索词「{term.text}」没有命中任何字段"
                   for position, term in enumerate(terms) if position not in matched | upstream_matched]

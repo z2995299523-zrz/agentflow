@@ -17,6 +17,10 @@
 对应关系按粒度判定；推导结果统一定向成 N:1（1:N 翻过来写），1:1、N:N、未知把下游层的表放左边。
 遇到字段清单里没有的字段（脚本补出来的血缘边来源字段缺在清单里）、不在表清单里的外部表，都不出错：
 它们可以在键域里连接别的字段，但出不了候选，也进不了关联
+
+另有 structural_relations：只用表结构能推出的关联，即手工填写的加上同名粒度键，规则、上限和合并方式与上面完全一致，
+不看脚本、不看血缘。对照实验的 A 组（仅模型结构）用它求关联路径。不能直接从元数据库里挑出 manual 和 grain_key 两种来源：
+同一种映射只留优先级最高的来源，表结构上推得出的关联可能已经被脚本、血缘传递认领，库里记的就不是 grain_key 了
 """
 from collections import Counter, defaultdict
 from collections.abc import Iterator
@@ -329,13 +333,21 @@ class _Deriver:
 
     def run(self) -> tuple[list[Relation], ReportSection]:
         """依次产生四种来源的关联并合并，返回（关联关系, 报告节）"""
-        manual = [r for r in self.mart.relations if r.origin == "manual"]
+        manual = self._manual()
         mappings = self._script_mappings()
         scripted = self._script_relations(mappings)
         lineage = self._lineage_relations(mappings)
         grain = self._grain_relations()
         relations = self._merge([*manual, *scripted, *lineage, *grain])
         return relations, self._report(relations)
+
+    def structural(self) -> list[Relation]:
+        """只用表结构：手工和同名粒度键两种来源，合并、定向、排序同 run"""
+        return self._merge([*self._manual(), *self._grain_relations()])
+
+    def _manual(self) -> list[Relation]:
+        """手工填写的关联；输入里来源不是 manual 的是上一次推导的结果，不带进来"""
+        return [r for r in self.mart.relations if r.origin == "manual"]
 
     # ── 通用 ──
 
@@ -556,3 +568,21 @@ def derive_relations(mart: Mart) -> tuple[list[Relation], ReportSection]:
         (已定向、去重、排序的关联关系, 报告节)
     """
     return _Deriver(mart).run()
+
+
+def structural_relations(mart: Mart) -> list[Relation]:
+    """只用表结构能推出的关联关系：手工填写的，加上同名粒度键
+
+    规则、上限（通用键名、层级、被关联次数、每对表的映射数）和合并、定向、排序都与 derive_relations 相同，
+    不看加工脚本、不看血缘，输入里上一次推导出的非手工关联也不带进来。结果等于对只留下表、字段、手工关联的同一份资料
+    做一次完整推导。
+
+    Args:
+        mart: 一套资料，只用到其中的表、字段和手工关联
+
+    Returns:
+        已定向、去重、排序的关联关系，来源只有 manual 和 grain_key
+    """
+    bare = Mart(tables=mart.tables, columns=mart.columns,
+                relations=[r for r in mart.relations if r.origin == "manual"])
+    return _Deriver(bare).structural()

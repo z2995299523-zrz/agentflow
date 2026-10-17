@@ -418,3 +418,62 @@ def test_gold_tables_of_the_mock_questions_reach_the_candidates(mock_retriever):
         if absent:
             missed[question.id] = sorted(absent)
     assert len(questions) - len(missed) >= MIN_RECALLED_QUESTIONS, missed
+
+
+# ── 全部层级一起排名（对照实验 A 组：没有上溯） ──────────────────────────────
+
+def test_all_layers_ranks_every_table_in_one_pool_and_never_climbs():
+    query = RecallQuery("存款金额汇总统计", ["存款金额"])
+    retriever = make_retriever(ten_table_mart(), with_embedder=False)       # 10 张专题层表、1 张整合层表、2 张贴源层表
+
+    layered = retriever.recall(query)
+    flat = retriever.recall(query, all_layers=True)
+
+    assert (layered.scope_level, layered.scope_size) == (0, 10)
+    assert (flat.scope_level, flat.scope_size) == (0, 13)                   # 排名池是全部表
+    assert {item.table_id: item.reason for item in layered.tables if item.table_id in ("dwd.src", "ods.raw")} == {}
+    ranked = {item.table_id: item.reason for item in flat.tables}
+    assert ranked["dwd.src"] == ranked["ods.raw"] == "recall"               # 整合层、贴源层的表和专题层的表一起争名次
+    assert {item.reason for item in flat.tables} <= {"recall", "example"}   # 没有上溯加入的表
+    assert sum(item.reason == "recall" for item in flat.tables) == MAX_TABLES
+    scores = [item.score for item in flat.tables if item.reason == "recall"]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_all_layers_covers_the_whole_mock_mart_and_leaves_the_default_unchanged(mock_retriever, mock_parts):
+    store, _ = mock_parts
+    query = RecallQuery("折人民币余额", ["折人民币余额"], ["币种代码"])
+
+    flat = mock_retriever.recall(query, all_layers=True)
+    default = mock_retriever.recall(query)
+
+    assert flat.scope_size == len(store.tables()) == 14
+    assert default.scope_size == 5
+    assert any(item.reason == "recall" and item.table_id.startswith(("dwd.", "ods.")) for item in flat.tables)
+    assert not any(item.reason == "recall" and item.table_id.startswith(("dwd.", "ods.")) for item in default.tables)
+    assert asdict(mock_retriever.recall(query, all_layers=False)) == asdict(default)       # 默认的行为一点没变
+    assert asdict(mock_retriever.recall(query, all_layers=True)) == asdict(flat)
+
+
+def test_all_layers_cannot_be_combined_with_an_upstream_level(mock_retriever):
+    query = RecallQuery("x", ["存款余额"])
+
+    for level in (1, 2):
+        with pytest.raises(ValueError, match="all_layers"):
+            mock_retriever.recall(query, level, ["ads.org_corp_dep_bal_d"], all_layers=True)
+
+
+# ── 多条语句写同一个字段 ──────────────────────────────────────
+
+def test_a_field_written_by_several_statements_is_excluded_only_when_every_one_is_null_or_etl_time():
+    names = ["all_null", "null_then_real", "real_then_null", "null_and_time", "plain", "unscripted"]
+    tables = [("ads.bal", "余额汇总", [(name, f"存款余额{number}") for number, name in enumerate(names, 1)])]
+    kinds = {"all_null": ["null", "null"], "null_then_real": ["null", "derived"], "real_then_null": ["derived", "null"],
+             "null_and_time": ["null", "etl_time"], "plain": ["derived"]}
+    script_columns = [ScriptColumn(script_name=f"s{number}.sql", stmt_index=1, target_table="ads.bal",
+                                   target_column=column, expression="x", kind=kind)
+                      for column, column_kinds in kinds.items() for number, kind in enumerate(column_kinds, 1)]
+
+    result = make_retriever(make_mart(tables, script_columns=script_columns)).recall(RecallQuery("x", ["存款余额"]))
+
+    assert hit_names(result) == {"null_then_real", "real_then_null", "plain", "unscripted"}      # 第一条是空值也不能排除

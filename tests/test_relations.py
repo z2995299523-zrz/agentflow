@@ -32,6 +32,7 @@ from metadata.relations import (
     derive_relations,
     key_domains,
     relation_rank,
+    structural_relations,
 )
 from metadata.script_parser import SCRIPTS_DIR_NAME, merge_lineage, parse_scripts
 from nl2sql.validator import SqlValidator
@@ -879,3 +880,136 @@ def test_gold_sql_has_no_errors_and_no_warnings_with_derived_relations(validator
 
 def test_gold_sql_count():
     assert len(GOLD) == 35
+
+
+# ── 只用表结构的关联（对照实验 A 组的关联路径） ──────────────
+
+def bare(mart: Mart) -> Mart:
+    """只留表、字段和手工关联：去掉血缘、加工脚本，以及上一次推导的结果"""
+    return mart.model_copy(update={"lineage": [], "scripts": [], "script_columns": [],
+                                   "relations": [r for r in mart.relations if r.origin == "manual"]})
+
+
+def test_structural_relations_of_the_mock_keep_only_manual_and_same_name_grain_keys(mock_inputs, mock_derived):
+    full, _ = mock_derived
+
+    structural = structural_relations(mock_inputs)
+
+    assert origins(structural) == {"manual": 1, "grain_key": 36}
+    assert all(r in structural for r in full if r.origin == "grain_key")      # 完整推导里的同名粒度键，这里一条不少
+
+    def mapping(r: Relation) -> frozenset:
+        return frozenset(tuple(sorted(((r.left_table, a), (r.right_table, b)))) for a, b in zip(r.left_columns, r.right_columns))
+
+    claimed = {mapping(r): r.origin for r in full}
+    extra = [r for r in structural if r.origin == "grain_key" and r not in full]
+    assert len(extra) == 18
+    assert {claimed[mapping(r)] for r in extra} == {"script", "lineage"}      # 这 18 种映射，完整推导里记在脚本和血缘传递名下
+
+
+def test_structural_relations_know_what_the_full_derivation_attributes_to_lineage(mock_inputs, mock_derived):
+    """客户汇总表到对公客户维表按客户号关联：完整推导里这条映射先被血缘传递认领，库里记的是 lineage；
+    只看表结构时它是同名粒度键，对应关系 N:1。所以对照实验 A 组的关联路径要重新推导，不能从库里按来源筛"""
+    full, _ = mock_derived
+
+    structural = structural_relations(mock_inputs)
+
+    assert [(r.origin, r.left_columns, r.right_columns, r.cardinality) for r in find(full, ADS_DEP, CUST)] == [
+        ("lineage", ["cust_no"], ["cust_no"], "N:1")]
+    assert [(r.origin, r.left_columns, r.right_columns, r.cardinality) for r in find(structural, ADS_DEP, CUST)] == [
+        ("grain_key", ["cust_no"], ["cust_no"], "N:1")]
+
+
+def test_structural_relations_cannot_see_what_only_the_scripts_say(mock_inputs, mock_derived):
+    """机构信息表按上级机构号关联自己、关联机构维表：只有加工脚本里写过，表结构上看不出来"""
+    full, _ = mock_derived
+
+    structural = structural_relations(mock_inputs)
+
+    assert find(full, ORG_INFO, ORG_INFO, "script") and find(full, ORG_INFO, ORG, "lineage")
+    assert find(structural, ORG_INFO, ORG_INFO) == []
+    assert [(r.origin, r.left_table, r.left_columns) for r in between(structural, ORG_INFO, ORG)] == [
+        ("grain_key", ORG, ["org_no"])]
+    assert all(r.right_columns != ["org_no"] or r.left_columns != ["up_org_no"] for r in structural)
+
+
+def test_structural_relations_are_a_full_derivation_of_the_bare_structure(mock_inputs):
+    assert structural_relations(mock_inputs) == derive_relations(bare(mock_inputs))[0]
+
+
+def test_structural_relations_ignore_lineage_scripts_and_stale_derived_relations():
+    given = manual("ods.b", ["b_id"], "ods.a", ["fk"], "1:N", "手工写的")
+    stale = Relation(left_table="ods.a", left_columns=["x"], right_table="ods.b", right_columns=["y"],
+                     cardinality="N:1", origin="script", note="上一次推导的结果")
+    tables = [("ods.a", ["a_id"], ["a_id", "fk", "x"]), ("ods.b", ["b_id"], ["b_id", "y"]),
+              ("dim.t", ["code"], ["code"]), ("dwd.f", [], ["code"])]
+
+    mart = make_mart(tables, taken=[("dwd.f.code", "dim.t.code")], relations=[given, stale],
+                     joins=[("load.sql", [("ods.a.x", "ods.b.y")])])
+    structural = structural_relations(mart)
+
+    assert [(r.origin, r.left_table, r.right_table) for r in structural] == [
+        ("manual", "ods.b", "ods.a"), ("grain_key", "dwd.f", "dim.t")]
+    assert structural[0] == given                                   # 手工的原样保留，方向和对应关系都不改
+    assert structural == structural_relations(make_mart(tables, relations=[given]))      # 脚本和血缘不影响结果
+
+
+def grain_rule_marts() -> dict[str, Mart]:
+    """同名粒度键的各条规则（与上面各个小资料测试里的写法一致），加上手工关联不受每对上限约束"""
+    columns = ["a", "b", "c", "d"]
+    return {
+        "cardinality": make_mart([("dim.t", ["code"], ["code", "name"]), ("dwd.f1", ["f1_id"], ["f1_id", "code"]),
+                                  ("dwd.f2", [], ["code"]), ("ads.f3", ["code"], ["code", "amt"])]),
+        "every grain column": make_mart([("dim.t", ["k1", "k2"], ["k1", "k2"]), ("dwd.full", [], ["k1", "k2"]),
+                                         ("dwd.half", [], ["k1"])]),
+        "generic key names": make_mart([("dim.t", ["id"], ["id"]), ("dwd.a", [], ["id"]), ("dwd.b", [], ["id"]),
+                                        ("dim.u", ["uuid"], ["uuid"]), ("dwd.c", [], ["uuid"])]),
+        "one generic column": make_mart([("dim.t", ["id", "data_dt"], ["id", "data_dt"]),
+                                         ("dwd.a", [], ["id", "data_dt"]), ("dwd.b", [], ["id"])]),
+        "upstream does not join downstream": make_mart([("ads.t", ["code"], ["code"]),
+                                                        ("ods.s", ["s_id"], ["s_id", "code"]),
+                                                        ("dwd.m", ["m_id"], ["m_id", "code"])]),
+        "same layer and downstream to upstream": make_mart([("dwd.t", ["code"], ["code"]),
+                                                            ("dwd.same", ["s"], ["s", "code"]),
+                                                            ("ads.down", ["d"], ["d", "code"]),
+                                                            ("ods.up", ["u"], ["u", "code"])]),
+        "manual relations are not cut": make_mart(
+            [("ods.p", [], columns), ("ods.q", [], columns)],
+            relations=[manual("ods.p", [name], "ods.q", [name], "N:N") for name in columns]),
+    }
+
+
+@pytest.mark.parametrize("name", list(grain_rule_marts()))
+def test_structural_relations_follow_the_same_grain_key_rules_as_the_full_derivation(name):
+    mart = grain_rule_marts()[name]
+
+    structural = structural_relations(mart)
+
+    assert structural == derive_relations(mart)[0]                  # 这些资料没有脚本和血缘，两者应当一模一样
+    assert bool(structural) == (name not in ("generic key names", "upstream does not join downstream"))
+
+
+def test_structural_relations_obey_the_grain_key_fan_in_limit(monkeypatch):
+    mart = make_mart([("dim.t", ["code"], ["code"]), *[(f"dwd.f{i}", [], ["code"]) for i in range(1, 4)]])
+
+    normal = structural_relations(mart)
+    monkeypatch.setattr(relations_module, "MAX_GRAIN_FANIN", 2)
+    limited = structural_relations(mart)
+
+    assert origins(normal) == {"grain_key": 3}
+    assert limited == []
+
+
+def test_structural_relations_never_cut_manual_ones_by_the_pair_cap():
+    columns = ["a", "b", "c", "d"]
+    given = [manual("ods.p", [name], "ods.q", [name], "N:N") for name in columns]
+    mart = make_mart([("ods.p", ["k"], ["k", *columns]), ("ods.q", ["k"], ["k", *columns])], relations=given)
+
+    structural = structural_relations(mart)
+
+    assert structural == given                                      # 按 k 的同名粒度键也推得出，但每对上限随手工条数放宽，它排在后面被挤掉
+    assert structural == derive_relations(mart)[0]
+
+
+def test_structural_relations_of_an_empty_mart_is_empty():
+    assert structural_relations(Mart()) == []
