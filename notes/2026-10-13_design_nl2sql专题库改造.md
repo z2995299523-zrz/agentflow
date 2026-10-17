@@ -332,7 +332,7 @@ SQLite 文件 `build/metadata.db`，可以直接用 SQL 查看。
 | `meta_lineage` | target_table、target_column、source_table、source_column、transform、script_name、source_external、is_passthrough、origin（清单或脚本补上） |
 | `meta_relation` | left_table、left_columns、right_table、right_columns、cardinality、origin |
 | `meta_script` | script_name、stmt_index、target_table、sql_text、select_sql、parsed、filters、joins |
-| `meta_script_column` | script_name、stmt_index、target_table、target_column、expression、sources、kind（直取、加工、空值、常量、加工时间、追溯不到） |
+| `meta_script_column` | script_name、stmt_index、target_table、target_column、expression、sources、kind（直取、加工、空值、常量、加工时间、追溯不到）、scopes（追溯时经过的查询层，血缘图按它只取相关查询层的加工条件） |
 | `meta_example` | example_id、requirement、caliber_note、sql_text、tables、source_file、line_no |
 | `meta_vector` | kind（字段或样例）、ref_id、text、vector（float32） |
 | `meta_info` | key、value（向量器名称、维度） |

@@ -76,7 +76,7 @@ def main():
     quick = "--quick" in sys.argv
 
     suites = [
-        ("NL2SQL 单元测试 (821项)", ["python", "-m", "pytest", "tests", "-q", "--tb=short"], 600),
+        ("NL2SQL 单元测试 (836项)", ["python", "-m", "pytest", "tests", "-q", "--tb=short"], 600),
         ("SQL 模块 (18项)", ["python", "test_sql.py"], 300),
         ("RAG 模块 (5项)", ["python", "test_rag.py"], 300),
         ("FC 工具 (9项)", ["python", "test_sql_tools.py"], 180),

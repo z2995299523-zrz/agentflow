@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 待做（第三份计划）：三个模型步骤与证据组装、LangGraph 编排、评估、新界面与接口、下线旧模块
 
 ```bash
-python -m pytest tests -q                 # NL2SQL 单元测试，不调模型、不加载 BGE（conftest 设了 METADATA_EMBEDDER=hash），821 项
+python -m pytest tests -q                 # NL2SQL 单元测试，不调模型、不加载 BGE（conftest 设了 METADATA_EMBEDDER=hash），836 项
 python -m metadata.importer               # 导入 MART_DIR 指向的资料：校验、解析脚本、补血缘、推导关联、收样例、算向量，生成元数据库和导入报告
 python -m metadata.importer 目录 --no-index   # 不算向量，几秒导完；第一次加载 BGE 在机械盘上冷启动可能要几分钟
 python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel 模板（目标已存在时不覆盖，要覆盖加 --force）
