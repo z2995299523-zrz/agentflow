@@ -10,13 +10,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 旧版本保留在标签 `v1-agentflow`。改造完成之前，本文件后面对旧模块的说明仍然有效，旧模块不要改动。
 
 - 设计文档：`notes/2026-10-13_design_nl2sql专题库改造.md`
-- 已完成：元数据层 `metadata/`、真实资料转换器、模拟专题库 `data/mock_mart/`、方言转换与执行层 `nl2sql/`、评估题库 `eval/nl2sql_questions.yaml`
+- 已完成（第一份计划）：元数据层 `metadata/`、真实资料转换器、模拟专题库 `data/mock_mart/`、方言转换与执行层 `nl2sql/`、评估题库 `eval/nl2sql_questions.yaml`
+- 已完成（第二份计划）：SQL 作用域解析 `metadata/sqlscope.py`、加工脚本解析与补血缘 `metadata/script_parser.py`、关联推导 `metadata/relations.py`、血缘图 `lineage/graph.py`、向量索引 `metadata/index.py`（向量存在元数据库里）、样例库 `metadata/examples.py` 与 `data/mock_mart/examples/`、静态校验 `nl2sql/validator.py`、候选召回 `nl2sql/retriever.py`
 - 真实专题库：资料、转换器、转换结果都在 `data/real_mart/`，这个目录不入库。真实的表名、模式名、路径不得写进任何会提交的文件
-- 待做：血缘图、候选召回、样例库、静态校验、查询流水线、评估、新界面
+- 待做（第三份计划）：三个模型步骤与证据组装、LangGraph 编排、评估、新界面与接口、下线旧模块
 
 ```bash
-python -m pytest tests -q                 # NL2SQL 单元测试，不调模型，229 项
-python -m metadata.importer               # 导入 MART_DIR 指向的资料，生成元数据库和导入报告
+python -m pytest tests -q                 # NL2SQL 单元测试，不调模型、不加载 BGE（conftest 设了 METADATA_EMBEDDER=hash），821 项
+python -m metadata.importer               # 导入 MART_DIR 指向的资料：校验、解析脚本、补血缘、推导关联、收样例、算向量，生成元数据库和导入报告
+python -m metadata.importer 目录 --no-index   # 不算向量，几秒导完；第一次加载 BGE 在机械盘上冷启动可能要几分钟
 python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel 模板（目标已存在时不覆盖，要覆盖加 --force）
 python -m data.mock_mart.build_mock       # 重新生成模拟专题库（库文件在固态盘上约 15 秒，在机械盘上约 1.5 分钟）
 python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
