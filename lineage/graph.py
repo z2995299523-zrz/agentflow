@@ -7,7 +7,11 @@
 字段链路广度优先，每条边只报一次、每个字段只展开一次，所以成环也不会死循环，顺序由血缘清单的顺序决定。
 上游表、下游表按表一级求闭包，边有两个来源：血缘边（源表 → 目标表），以及「目标表的脚本语句里引用到的实体表 → 目标表」：
 维表往往只出现在关联里，不是任何字段的血缘来源，只看血缘边会漏掉它们。
-遇到字段清单里没有的字段（脚本补出来的血缘边来源字段缺在清单里）不会出错；不在表清单里的外部表不进表一级的结果。
+遇到字段清单里没有的字段（脚本补出来的血缘边来源字段缺在清单里）不会出错，Hop.source_known 为 False 标出它们；
+不在表清单里的外部表不进表一级的结果。
+
+每一跳带的过滤条件和关联条件只取目标字段在脚本里经过的查询层（最外层、CTE、子查询）的，别的 CTE 的条件与这个字段无关。
+脚本字段没有记录经过的查询层时（旧资料、追溯不到），退回这条语句的全部条件。
 """
 from collections import defaultdict, deque
 from collections.abc import Collection
@@ -15,6 +19,7 @@ from dataclasses import dataclass
 
 from metadata.models import FieldRef, LineageEdge, Relation, ScriptFilter, ScriptJoin, ScriptStatement, TableMeta
 from metadata.relations import relation_rank
+from metadata.script_parser import MAIN_SCOPE
 from metadata.sqlscope import parse_statements, physical_tables, table_id
 from metadata.store import MetadataStore
 
@@ -36,8 +41,11 @@ class Hop:
     origin: str                              # 血缘来源：list 或 script
     script_name: str
     source_external: bool
-    filters: tuple[ScriptFilter, ...]        # 这一跳目标表的加工过滤条件
-    joins: tuple[ScriptJoin, ...]            # 这一跳目标表的加工关联条件
+    filters: tuple[ScriptFilter, ...]        # 目标字段经过的查询层的加工过滤条件，含最外层
+    joins: tuple[ScriptJoin, ...]            # 目标字段经过的查询层的加工关联条件，含最外层
+    # 源字段在字段清单里。脚本补出来的边，来源字段可能不在清单里，外部表的字段一律不在；
+    # 为 False 的字段交给模型，静态校验会报「没有这个字段」，所以引用它们之前要先看这个标记
+    source_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -97,10 +105,21 @@ class LineageGraph:
             self._incoming[(edge.target_table, edge.target_column)].append(edge)
             self._outgoing[(edge.source_table, edge.source_column)].append(edge)
 
+        self._known_fields: set[tuple[str, str]] = {
+            (column.table_id, column.column_name) for table_id in self._tables for column in store.columns(table_id)}
+
         self._statements: dict[str, list[ScriptStatement]] = defaultdict(list)
         for statement in store.scripts():
             self._statements[statement.target_table].append(statement)
-        self._conditions: dict[tuple[str, str], tuple[tuple[ScriptFilter, ...], tuple[ScriptJoin, ...]]] = {}
+        # (脚本名, 语句序号, 目标字段) → 这个字段经过的查询层加上最外层；没有记录经过哪些查询层的字段不登记
+        self._column_scopes: dict[tuple[str, int, str], frozenset[str]] = {}
+        for table in self._statements:
+            for script_column in store.script_columns(table):
+                if script_column.scopes:
+                    self._column_scopes[(script_column.script_name, script_column.stmt_index,
+                                         script_column.target_column)] = frozenset(script_column.scopes) | {MAIN_SCOPE}
+        self._conditions: dict[tuple[str, str, str],
+                               tuple[tuple[ScriptFilter, ...], tuple[ScriptJoin, ...]]] = {}
         self._expressions: dict[tuple[str, str], str] = {}
 
         self._table_up: dict[str, set[str]] = defaultdict(set)
@@ -151,14 +170,24 @@ class LineageGraph:
 
     # ── 字段链路 ──
 
-    def _conditions_of(self, table: str, script_name: str) -> tuple[tuple[ScriptFilter, ...], tuple[ScriptJoin, ...]]:
-        """一张目标表的加工条件：优先取边上写明的脚本里的语句，对不上脚本名时取这张表的全部语句"""
-        key = (table, script_name)
+    def _conditions_of(self, table: str, script_name: str,
+                       column: str) -> tuple[tuple[ScriptFilter, ...], tuple[ScriptJoin, ...]]:
+        """一个目标字段的加工条件：优先取边上写明的脚本里的语句，对不上脚本名时取这张表的全部语句
+
+        语句里记着这个字段经过哪些查询层的，只取这些查询层和最外层的条件，别的 CTE、子查询的条件与这个字段无关；
+        没有记的（旧资料、追溯不到），取这条语句的全部条件。
+        """
+        key = (table, script_name, column)
         if key not in self._conditions:
             statements = self._statements.get(table, [])
             chosen = [s for s in statements if script_name and s.script_name == script_name] or statements
-            self._conditions[key] = (tuple(f for s in chosen for f in s.filters),
-                                     tuple(j for s in chosen for j in s.joins))
+            filters: list[ScriptFilter] = []
+            joins: list[ScriptJoin] = []
+            for statement in chosen:
+                scopes = self._column_scopes.get((statement.script_name, statement.stmt_index, column))
+                filters += [f for f in statement.filters if scopes is None or f.scope in scopes]
+                joins += [j for j in statement.joins if scopes is None or j.scope in scopes]
+            self._conditions[key] = (tuple(filters), tuple(joins))
         return self._conditions[key]
 
     def _expression_of(self, table: str, column: str) -> str:
@@ -170,8 +199,8 @@ class LineageGraph:
         return self._expressions[key]
 
     def _hop(self, depth: int, edge: LineageEdge) -> Hop:
-        """由一条血缘边生成一跳，带上目标表的加工条件"""
-        filters, joins = self._conditions_of(edge.target_table, edge.script_name)
+        """由一条血缘边生成一跳，带上目标字段的加工条件，并标出源字段在不在字段清单里"""
+        filters, joins = self._conditions_of(edge.target_table, edge.script_name, edge.target_column)
         return Hop(
             depth=depth,
             target=FieldRef(table=edge.target_table, column=edge.target_column),
@@ -180,6 +209,8 @@ class LineageGraph:
             script_expression=self._expression_of(edge.target_table, edge.target_column),
             is_passthrough=edge.is_passthrough, origin=edge.origin, script_name=edge.script_name,
             source_external=edge.source_external, filters=filters, joins=joins,
+            source_known=(not edge.source_external
+                          and (edge.source_table, edge.source_column) in self._known_fields),
         )
 
     def _walk(self, start: tuple[str, str], depth: int, forward: bool) -> list[Hop]:
@@ -204,7 +235,8 @@ class LineageGraph:
     def upstream(self, table: str, column: str, depth: int = 3) -> list[Hop]:
         """字段的上游链路，广度优先，深度可限，有环时不重复走
 
-        每一跳带着目标表的加工过滤条件和关联条件，上溯到更低的层查数时要把它们一并带上，数才对得上。
+        每一跳带着目标字段经过的查询层的加工过滤条件和关联条件，上溯到更低的层查数时要把它们一并带上，数才对得上。
+        Hop.source_known 为 False 的来源字段不在字段清单里，不能写进给模型的 SQL。
         字段没有血缘、不在清单里时返回空列表。
 
         Args:
@@ -243,7 +275,8 @@ class LineageGraph:
         """两个字段的同源差异
 
         共同上游：两个字段各自的来源（含字段自己）的交集，所以一个字段是另一个的上游时，它自己也算共同的。
-        同源但加工或过滤不同（differs）：有共同上游，并且两条链路上每一跳的来源、表达式、过滤条件、关联条件不完全一致。
+        同源但加工或过滤不同（differs）：有共同上游，并且两条链路上每一跳的来源、表达式、过滤条件、关联条件不完全一致；
+        过滤和关联只算各自字段经过的查询层的，所以只差在别的 CTE 里的过滤，不算口径不同。
 
         Args:
             a: 字段 a

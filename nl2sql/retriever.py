@@ -7,7 +7,9 @@
     0  专题层全部表，加整合层的维表
     1  再加入候选事实表的上游表中属于整合层的
     2  再加入属于贴源层的
-上溯时加入的上游表无条件成为候选，不占名额；它们的命中字段在这些表自己的范围里单独找，不与专题层的表争名次。
+上溯加入的上游表不占 MAX_TABLES 的名额，命中字段在这些表自己的范围里单独找，不与专题层的表争名次；
+但数量有上限：只留有命中字段的，按表得分最多 MAX_UPSTREAM_TABLES 张。一张也没命中时无从比较，取最近的前 MAX_UPSTREAM_TABLES 张，
+免得上溯一张表也不给。没留下的维表回到第 0 层，和专题层的表一起排名。
 
 打分：
     关键字路  汉字二元组和英文单词的覆盖率：字段中文名占 0.7，表中文名占 0.3，检索词是字段中文名的子串再加 0.2
@@ -34,6 +36,7 @@ from metadata.relations import GENERIC_KEY_NAMES
 from metadata.store import MetadataStore
 
 MAX_TABLES = 8
+MAX_UPSTREAM_TABLES = 8                       # 上溯加入的上游表最多留几张，真实库上第 2 层的上游闭包有几十张
 MAX_EXAMPLES = 3
 PER_TERM_K = 30
 RRF_K = 60
@@ -279,7 +282,7 @@ class Retriever:
     # ── 范围 ──
 
     def scope_tables(self, level: int, base_tables: Sequence[str] = ()) -> tuple[list[str], list[str]]:
-        """返回 (范围内的表, 无条件加入的上游表)
+        """返回 (范围内的表, 上溯加入的上游表)
 
         第 0 层是专题层全部表加整合层的维表。第 1、2 层在此之上，对 base_tables 里不是维表的每张表，
         加入它的上游表闭包里属于整合层（第 2 层再加贴源层）的表。后者是返回值的第二项，
@@ -290,7 +293,8 @@ class Retriever:
             base_tables: 上溯的起点，通常是上一轮召回的候选表
 
         Returns:
-            (范围内的表, 无条件加入的上游表)。上游表近的在前、不重复；范围内的表先是第 0 层（按表标识排序），再是其余的上游表
+            (范围内的表, 上游表)。上游表是完整的闭包，近的在前、不重复，recall 再从中按命中字段留下最多 MAX_UPSTREAM_TABLES 张；
+            范围内的表先是第 0 层（按表标识排序），再是其余的上游表
 
         Raises:
             ValueError: level 不是 0、1、2，或 level 大于 0 而 base_tables 为空
@@ -321,7 +325,8 @@ class Retriever:
         """召回候选表和相似样例
 
         候选表分三类，按 recall、upstream、example 的顺序排列：recall 是范围内（第 0 层）得分最高的前 MAX_TABLES 张；
-        upstream 是上溯加入的表；example 是相似样例用到的、前两类里还没有的表。后两类不占名额。
+        upstream 是上溯加入的表，只留有命中字段的前 MAX_UPSTREAM_TABLES 张，都没命中时取最近的前 MAX_UPSTREAM_TABLES 张；
+        example 是相似样例用到的、前两类里还没有的表。后两类不占名额。
 
         Args:
             query: 完整需求和拆出来的指标、维度、过滤
@@ -341,18 +346,18 @@ class Retriever:
             notes.append("没有检索词，候选表只来自上溯和相似样例")
 
         vectors, requirement_vector = self._embed(terms, query.requirement)
-        forced = set(upstream)
-        pool = [table_id for table_id in self._level0 if table_id not in forced]
-        scored, matched = self._score_tables(terms, vectors, pool)
         upstream_scored, upstream_matched = self._score_tables(terms, vectors, upstream)
+        kept = self._keep_upstream(upstream, upstream_scored)
+        taken = set(kept)       # 上游表单独排名；没留下的维表仍在第 0 层里，回到池子里和专题层的表一起排
+        pool = [table_id for table_id in self._level0 if table_id not in taken]
+        scored, matched = self._score_tables(terms, vectors, pool)
         notes += [f"检索词「{term.text}」没有命中任何字段"
                   for position, term in enumerate(terms) if position not in matched | upstream_matched]
 
         ranked = sorted((table_id for table_id, item in scored.items() if item.score > 0),
                         key=lambda table_id: self._order_key(table_id, scored.get(table_id)))
         tables = [self._candidate(table_id, REASON_RECALL, scored) for table_id in ranked[:MAX_TABLES]]
-        tables += [self._candidate(table_id, REASON_UPSTREAM, upstream_scored)
-                   for table_id in sorted(upstream, key=lambda t: self._order_key(t, upstream_scored.get(t)))]
+        tables += [self._candidate(table_id, REASON_UPSTREAM, upstream_scored) for table_id in kept]
 
         examples = self._similar_examples(query.requirement, requirement_vector)
         if self._examples and self._vector_note is None and self._example_index is None:
@@ -365,6 +370,17 @@ class Retriever:
                     tables.append(self._candidate(table_id, REASON_EXAMPLE, {**upstream_scored, **scored}))
         return RecallResult(scope_level=scope_level, scope_size=len(scope), tables=tables, examples=examples,
                             notes=notes)
+
+    def _keep_upstream(self, upstream: list[str], scored: dict[str, _TableScore]) -> list[str]:
+        """上溯加入的表里留下的，已排好先后
+
+        有命中字段的按表得分排（先后规则同 _order_key），最多 MAX_UPSTREAM_TABLES 张，没有命中字段的不要。
+        一张也没命中时无从比较（没有检索词、检索词都对不上），取闭包里最近的前 MAX_UPSTREAM_TABLES 张，
+        upstream 里近的在前、起点表的先后由调用方决定，所以结果是确定的。
+        """
+        hit = sorted((table_id for table_id in upstream if table_id in scored),
+                     key=lambda table_id: self._order_key(table_id, scored[table_id]))
+        return hit[:MAX_UPSTREAM_TABLES] if hit else upstream[:MAX_UPSTREAM_TABLES]
 
     def _embed(self, terms: list[_Term], requirement: str) -> tuple[np.ndarray | None, np.ndarray | None]:
         """一次算出全部检索词和需求文本的向量；向量路用不了时都是 None"""

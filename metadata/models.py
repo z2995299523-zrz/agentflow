@@ -130,6 +130,9 @@ class ScriptColumn(BaseModel):
     expression: str                  # CTE、子查询、临时表展开后的表达式，实体表写全名，最长 1500 字符
     sources: list[FieldRef] = Field(default_factory=list)   # 追溯到的实体表字段
     kind: str                        # 表达式类别，取值见 COLUMN_KINDS
+    # 追溯这个字段时经过的查询层名，写法与 ScriptFilter.scope、ScriptJoin.scope 一致（main、CTE 名、子查询编号）。
+    # 空表示不知道（旧数据，或者追溯不到），按这条语句的全部条件处理
+    scopes: list[str] = Field(default_factory=list)
 
 
 class Example(BaseModel):

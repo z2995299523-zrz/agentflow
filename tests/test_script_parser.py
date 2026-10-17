@@ -296,6 +296,60 @@ def test_union_branches_are_named_after_their_query(catalog):
     assert dep["cust_no"].expression == "UNION(dwd.corp_dep_acct_d.cust_no, dwd.corp_loan_duebill_d.cust_no)"
 
 
+def test_columns_record_the_query_layers_they_pass_through(catalog):
+    """scopes 的名字与 ScriptFilter.scope、ScriptJoin.scope 一致；只在 JOIN 里出现、没被追溯到的 CTE 不算"""
+    statements, columns, issues, _ = parse("""
+        INSERT INTO ads.corp_cust_dep_bal_d (cust_no, dep_bal_rmb, margin_bal_rmb, dep_bal_tot_rmb, org_no)
+        WITH u AS (SELECT a.cust_no AS k, a.bal_rmb AS v FROM dwd.corp_dep_acct_d a WHERE a.is_margin = '0'
+                   UNION ALL
+                   SELECT l.cust_no, l.bal_rmb FROM dwd.corp_loan_duebill_d l WHERE l.is_npl = '1'),
+             side AS (SELECT c.cust_no FROM dim.corp_cust c WHERE c.scale_cd = '1')
+        SELECT u.k,
+               x.tot,
+               (SELECT MAX(o.org_lvl) FROM dim.org o WHERE o.org_no = u.k),
+               1,
+               u.v
+        FROM u
+        JOIN (SELECT a.cust_no, SUM(a.bal_rmb) AS tot FROM dwd.corp_dep_acct_d a GROUP BY a.cust_no) x
+          ON x.cust_no = u.k
+        JOIN side ON side.cust_no = u.k;
+    """, catalog)
+    dep = columns_of(columns, "ads.corp_cust_dep_bal_d")
+
+    assert issues == []
+    assert {"u#1", "u#2", "side"} <= {f.scope for f in statements[0].filters}      # 这些名字也是条件里的查询层名
+    assert not any("side" in column.scopes for column in dep.values())
+    assert dep["cust_no"].scopes == ["main", "u", "u#1", "u#2"]                    # 穿过 UNION 的两个分支，不含 side
+    assert dep["org_no"].scopes == ["main", "u", "u#1", "u#2"]
+    assert dep["dep_bal_rmb"].scopes == ["main", "subquery2"]                      # 派生表
+    assert dep["margin_bal_rmb"].scopes == ["main", "u", "u#1", "u#2", "subquery1"]   # 标量子查询，它引用了 u.k
+    assert dep["dep_bal_tot_rmb"].scopes == ["main"]                               # 常量不经过别的查询层
+
+
+def test_column_that_cannot_be_traced_records_no_scopes(catalog):
+    """追溯不到的字段不知道经过了哪些查询层：留空，血缘图据此退回这条语句的全部条件"""
+    _, columns, issues, _ = parse("""
+        INSERT INTO ads.corp_cust_dep_bal_d (cust_no, org_no)
+        WITH c AS (SELECT a.cust_no FROM dwd.corp_dep_acct_d a WHERE a.bal_rmb > 0)
+        SELECT c.cust_no, g.n FROM c JOIN generate_series(1, 3) AS g(n) ON TRUE;
+    """, catalog)
+    dep = columns_of(columns, "ads.corp_cust_dep_bal_d")
+
+    assert issues == []
+    assert (dep["cust_no"].kind, dep["cust_no"].scopes) == ("passthrough", ["main", "c"])
+    assert (dep["org_no"].kind, dep["org_no"].scopes) == ("unresolved", [])
+
+
+def test_mock_scripts_record_the_scopes_of_every_column(parsed):
+    dep = columns_of(parsed.columns, "ads.corp_cust_dep_bal_d")
+
+    assert dep["dep_bal_rmb"].scopes == ["main", "cur"]
+    assert dep["ytd_avg_bal_rmb"].scopes == ["main", "ytd"]
+    assert dep["mtd_avg_bal_rmb"].scopes == ["main", "mtd"]
+    assert columns_of(parsed.columns, "ads.corp_cust_loan_bal_d")["loan_bal_rmb"].scopes == ["main", "tmp_corp_loan"]
+    assert all(c.scopes[0] == "main" for c in parsed.columns)                       # 每个字段至少经过最外层
+
+
 def test_where_equality_recorded_as_implicit_join_not_as_filter(catalog):
     statements, _, issues, _ = parse("""
         INSERT INTO ads.corp_cust_dep_bal_d (data_dt, cust_no, org_no)

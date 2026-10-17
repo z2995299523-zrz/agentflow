@@ -400,6 +400,37 @@ def test_cte_chain_traced_to_entity_fields(catalog):
     assert resolver.resolve_output(root, "ytd_avg_bal_rmb") == Resolution("derived", margin_and_balance)
 
 
+def test_trace_scopes_lists_the_query_layers_a_column_passes_through(catalog):
+    resolver, root, _ = mock_insert("21_ads_corp_cust_dep_bal_d.sql", catalog)
+
+    def traced(name: str) -> list[str]:
+        """经过的查询层，最外层写 main，CTE 写它的名字"""
+        return ["main" if scope is root else scope.expression.parent.alias
+                for scope in resolver.trace_scopes(root, name)]
+
+    assert traced("cust_no") == traced("dep_bal_rmb") == ["main", "cur"]
+    assert traced("ytd_avg_bal_rmb") == ["main", "ytd"]                  # 只在 JOIN 里出现的 cur、mtd 不算
+    assert traced("mtd_avg_bal_rmb") == ["main", "mtd"]
+    assert resolver.trace_scopes(root, "no_such_output") == [root]       # 没有这个输出字段：只有它自己
+
+
+def test_trace_scopes_follow_union_branches_and_derived_tables(catalog):
+    sql = """
+        WITH u AS (SELECT a.cust_no AS k FROM dwd.corp_dep_acct_d a
+                   UNION ALL SELECT l.cust_no FROM dwd.corp_loan_duebill_d l),
+             wide AS (SELECT u.k, 1 AS one FROM u)
+        SELECT u.k AS k, x.k AS k2, w.one AS one
+        FROM u
+        JOIN (SELECT wide.* FROM wide) x ON TRUE
+        JOIN wide w ON TRUE
+    """
+    resolver, root = analyze(sql, catalog)
+
+    # k：最外层、u、u 的两个分支；k2：最外层、派生表 x、wide、u、u 的两个分支；one：最外层、wide（常量，不再往下）
+    assert [len(resolver.trace_scopes(root, name)) for name in ("k", "k2", "one")] == [4, 6, 2]
+    assert all(resolver.trace_scopes(root, name)[0] is root for name in ("k", "k2", "one"))
+
+
 def test_derived_table_is_traced(catalog):
     sql = """
         SELECT x.cust_no AS cust_no, x.tot AS tot

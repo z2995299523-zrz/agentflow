@@ -9,7 +9,8 @@
 2. 只处理 INSERT … SELECT 和 CREATE TABLE … AS SELECT；TRUNCATE、DELETE、DROP、COMMIT、DO 块等不涉及加工逻辑，忽略
 3. 临时表（TEMPORARY 的、或者目标表不在表清单里的建表语句）不单独成条：改写成 CTE 注入引用它的语句，
    建表语句的原文拼在那条语句的原文前面
-4. 每条语句按查询层限定字段，把投影按位置对应到目标字段，逐个追溯到实体表字段，并记下各查询层的过滤条件和关联。
+4. 每条语句按查询层限定字段，把投影按位置对应到目标字段，逐个追溯到实体表字段，并记下各查询层的过滤条件和关联，
+   以及每个目标字段追溯时经过了哪几个查询层（血缘图据此只给每个字段带它经过的查询层的条件）。
    带引号的大写名字（"NAME"）先转小写，与元数据的名字一致；原文不动
 
 规则：
@@ -486,13 +487,17 @@ def _joined_table(resolver: ScopeResolver, scope: Scope, alias: str, names: dict
     return alias
 
 
-def _filters_and_joins(resolver: ScopeResolver, root: Scope) -> tuple[list[ScriptFilter], list[ScriptJoin]]:
+def _filters_and_joins(resolver: ScopeResolver, scopes: list[Scope],
+                       names: dict[int, str]) -> tuple[list[ScriptFilter], list[ScriptJoin]]:
     """各查询层的过滤条件（WHERE、HAVING 按 AND 拆开）和关联，条件里的字段都展开成实体表写法
 
     WHERE 里两侧别名不同的等值已经作为 IMPLICIT 关联记下，不再算过滤条件。
+
+    Args:
+        resolver: 这条语句的作用域解析器
+        scopes: _ordered_scopes 给出的全部查询层
+        names: _scope_names 给出的查询层名字
     """
-    scopes = _ordered_scopes(root)
-    names = _scope_names(scopes, root)
     filters: list[ScriptFilter] = []
     joins: list[ScriptJoin] = []
     for scope in scopes:
@@ -514,6 +519,13 @@ def _filters_and_joins(resolver: ScopeResolver, root: Scope) -> tuple[list[Scrip
                        condition=resolver.render(scope, join.condition), keys=join.keys)
             for join in scope_joins)
     return filters, joins
+
+
+def _traced_scope_names(resolver: ScopeResolver, root: Scope, column: str, scopes: list[Scope],
+                        names: dict[int, str]) -> list[str]:
+    """追溯一个目标字段时经过的查询层的名字，最外层在前，其余按在语句里出现的位置；同名的只留一个"""
+    traced = {id(scope) for scope in resolver.trace_scopes(root, column)}
+    return list(dict.fromkeys(names[id(scope)] for scope in scopes if id(scope) in traced))
 
 
 def _ref_key(ref: FieldRef) -> tuple[str, str]:
@@ -654,17 +666,22 @@ class _FileParser:
                                   f"{self._where(index)}写入 {target}：{error}，这条语句的字段表达式跳过"))
         root = build_scope(analyzed)
         resolver = ScopeResolver(root, catalog=self.catalog)
-        filters, joins = _filters_and_joins(resolver, root)
+        scopes = _ordered_scopes(root)
+        scope_names = _scope_names(scopes, root)
+        filters, joins = _filters_and_joins(resolver, scopes, scope_names)
         statement = ScriptStatement(script_name=self.script_name, stmt_index=index, target_table=target,
                                     sql_text=sql_text, select_sql=select_sql, parsed=True,
                                     filters=filters, joins=joins)
         columns = []
         for name in names or []:
             resolution = resolver.resolve_output(root, name)
+            # 追溯不到的字段不知道经过了哪些查询层，留空，用到时按这条语句的全部条件处理
+            traced = ([] if resolution.kind == "unresolved"
+                      else _traced_scope_names(resolver, root, name, scopes, scope_names))
             columns.append(ScriptColumn(
                 script_name=self.script_name, stmt_index=index, target_table=target, target_column=name,
                 expression=resolver.render_output(root, name),
-                sources=sorted(resolution.sources, key=_ref_key), kind=resolution.kind))
+                sources=sorted(resolution.sources, key=_ref_key), kind=resolution.kind, scopes=traced))
         return statement, columns, problems
 
     def _target_names(self, target: str, qualified: exp.Expression, listed: list[str] | None,

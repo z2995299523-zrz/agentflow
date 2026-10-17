@@ -807,6 +807,71 @@ class ScopeResolver:
                     references.extend((leaf, column) for column in leaf.columns if not column.is_star)
         return references
 
+    def trace_scopes(self, scope: Scope, name: str) -> list[Scope]:
+        """追溯一个查询层的输出字段时经过的查询层，按第一次经过的先后，每层只列一次
+
+        包括：这一层自己、UNION 的各个分支、字段穿过的 CTE 和派生表、投影里标量子查询的各层。
+        字段指向实体表就到此为止。只在 FROM、JOIN 里出现、却没有被追溯到的来源不算；
+        WHERE 里的子查询也不算，它的条件已经写在所在查询层的过滤条件里。
+        深度上限和遇到环的处理与 resolve_output 一致。
+
+        Args:
+            scope: 查询层，通常是根作用域
+            name: 输出字段名
+
+        Returns:
+            经过的查询层，第一个是 scope 自己
+        """
+        visited: dict[int, Scope] = {}
+        self._trace_output(scope, name, 0, visited, set())
+        return list(visited.values())
+
+    def _trace_output(self, scope: Scope, name: str, depth: int, visited: dict[int, Scope],
+                      seen: set[tuple[int, str]]) -> None:
+        """沿 _compute_output 走过的路，记下经过的查询层；seen 防止同一个输出重复走和成环"""
+        key = (id(scope), name)
+        if key in seen or depth > self.max_depth:
+            return
+        seen.add(key)
+        visited.setdefault(id(scope), scope)
+        expression = scope.expression
+        if isinstance(expression, exp.SetOperation):
+            names = self.output_names(scope)
+            if names is None or name not in names:
+                return
+            index = names.index(name)
+            for leaf in _leaf_scopes(scope):
+                visited.setdefault(id(leaf), leaf)
+                projection = _select_at(leaf.expression, index)
+                if projection is not None:
+                    self._trace_expression(leaf, projection, depth, visited, seen)
+        elif isinstance(expression, exp.Select):
+            projection = self._projection(scope, name)
+            if projection is not None:
+                self._trace_expression(scope, projection, depth, visited, seen)
+                return
+            source = self._star_source(scope, name)
+            if isinstance(source, Scope):
+                self._trace_output(source, name, depth + 1, visited, seen)
+
+    def _trace_expression(self, scope: Scope, expr: exp.Expression, depth: int, visited: dict[int, Scope],
+                          seen: set[tuple[int, str]]) -> None:
+        """沿 _expression 走过的路：剥壳后是字段就追溯它，否则追溯其中各字段（含标量子查询里的）"""
+        core = unwrap(expr)
+        if isinstance(core, exp.Column) and not core.is_star:
+            self._trace_column(scope, core, depth, visited, seen)
+            return
+        for owner, column in self._value_columns(scope, core):
+            visited.setdefault(id(owner), owner)
+            self._trace_column(owner, column, depth, visited, seen)
+
+    def _trace_column(self, scope: Scope, column: exp.Column, depth: int, visited: dict[int, Scope],
+                      seen: set[tuple[int, str]]) -> None:
+        """字段指向 CTE、派生表就到那一层继续；指向实体表、伪列或者找不到，到此为止"""
+        located = self._locate(scope, column)
+        if isinstance(located, Scope):
+            self._trace_output(located, column.name, depth + 1, visited, seen)
+
     # ── 展开表达式文本 ──
 
     def render(self, scope: Scope, expr: exp.Expression) -> str:

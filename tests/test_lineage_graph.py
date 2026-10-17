@@ -16,6 +16,7 @@ from metadata.models import (
     ScriptStatement,
     TableMeta,
 )
+from metadata.script_parser import parse_script_text
 from metadata.store import MetadataStore
 
 DEP_D = "dwd.corp_dep_acct_d"
@@ -95,11 +96,10 @@ def test_upstream_hops_carry_the_target_tables_filters_and_joins(graph):
     expression = "SUM(CASE WHEN dwd.corp_dep_acct_d.is_margin = '0' THEN dwd.corp_dep_acct_d.bal_rmb ELSE 0 END)"
     assert first.script_expression == expression
     assert first.transform == expression                      # 清单里没写加工逻辑，导入时用脚本表达式回填了
-    assert len(first.filters) == 3                            # cur、ytd、mtd 各一条 WHERE
-    assert ScriptFilter(scope="cur", clause="WHERE",
-                        condition="dwd.corp_dep_acct_d.data_dt = CAST('${data_dt}' AS DATE)") in first.filters
-    assert [j.table for j in first.joins] == ["ytd", "mtd", CUST]
-    assert hops[1].filters == first.filters and hops[1].joins == first.joins        # 同一张目标表，条件相同
+    assert first.filters == (ScriptFilter(scope="cur", clause="WHERE",             # 这个字段只经过 cur，ytd、mtd 的过滤与它无关
+                                          condition="dwd.corp_dep_acct_d.data_dt = CAST('${data_dt}' AS DATE)"),)
+    assert [j.table for j in first.joins] == ["ytd", "mtd", CUST]                  # 最外层的两处关联，加上 cur 里的
+    assert hops[1].filters == first.filters and hops[1].joins == first.joins        # 同一个目标字段，条件相同
 
 
 def test_upstream_hop_for_a_direct_take_is_marked_passthrough(graph):
@@ -209,6 +209,108 @@ def test_hop_script_expression_comes_from_the_script_column():
     assert (hop.transform, hop.script_expression) == ("文字说明", "SUM(ods.a.v)")
 
 
+# ── 每一跳的加工条件按字段经过的查询层过滤 ──────────────────
+
+SRC_TABLES = [("ods.src", [], ["k", "v", "dt", "flag"])]
+
+
+def scripted_store(targets: dict[str, list[str]], scripts: dict[str, str]) -> MetadataStore:
+    """用真实的脚本解析器解析手写脚本，再配上手写的血缘边（除了 k，每个目标字段都取自 ods.src.v），造一个小元数据库
+
+    Args:
+        targets: 目标表 → 字段名
+        scripts: 脚本名 → 脚本全文，与 targets 按顺序一一对应
+    """
+    tables = SRC_TABLES + [(table, [], columns) for table, columns in targets.items()]
+    catalog = make_store(tables)
+    statements, columns, issues = [], [], []
+    for name, text in scripts.items():
+        parsed = parse_script_text(text, name, catalog)
+        statements += parsed[0]
+        columns += parsed[1]
+        issues += parsed[2]
+    assert issues == []
+    edges = [edge(f"{table}.{column}", "ods.src.v", script=name)
+             for name, (table, names) in zip(scripts, targets.items()) for column in names if column != "k"]
+    return make_store(tables, edges=edges, scripts=statements, script_columns=columns)
+
+
+YTD_AND_MTD = """
+    INSERT INTO ads.t (k, ytd_v, mtd_v)
+    WITH ytd AS (SELECT s.k, SUM(s.v) AS v FROM ods.src s WHERE s.dt >= '2026-01-01' GROUP BY s.k),
+         mtd AS (SELECT s.k, SUM(s.v) AS v FROM ods.src s WHERE s.dt >= '2026-06-01' GROUP BY s.k)
+    SELECT ytd.k, ytd.v, mtd.v FROM ytd JOIN mtd ON ytd.k = mtd.k
+"""
+
+
+def test_hop_carries_only_the_conditions_of_the_query_layers_the_field_passes_through():
+    graph = LineageGraph(scripted_store({"ads.t": ["k", "ytd_v", "mtd_v"]}, {"load_t.sql": YTD_AND_MTD}))
+
+    (ytd,), (mtd,) = graph.upstream("ads.t", "ytd_v"), graph.upstream("ads.t", "mtd_v")
+
+    assert [f.condition for f in ytd.filters] == ["ods.src.dt >= '2026-01-01'"]       # 不带 mtd 里的
+    assert [f.condition for f in mtd.filters] == ["ods.src.dt >= '2026-06-01'"]
+    assert [(j.scope, j.table) for j in ytd.joins] == [("main", "mtd")]               # 最外层的关联总是带着
+    assert ytd.joins == mtd.joins
+
+
+def test_compare_tells_apart_fields_that_differ_only_by_the_filter_in_their_own_cte():
+    """两个字段的脚本表达式相同、来源相同，只有各自 CTE 里的时间窗口不同：以前两跳都带着全部窗口，判成同口径"""
+    graph = LineageGraph(scripted_store({"ads.t": ["k", "ytd_v", "mtd_v"]}, {"load_t.sql": YTD_AND_MTD}))
+
+    diff = graph.compare(ref("ads.t.ytd_v"), ref("ads.t.mtd_v"))
+
+    assert diff.common == (ref("ods.src.v"),)
+    assert [h.script_expression for h in diff.path_a] == [h.script_expression for h in diff.path_b]
+    assert diff.differs
+
+
+def test_compare_ignores_filters_of_query_layers_the_fields_do_not_pass_through():
+    """t1.w 单独经过 y，y 里的过滤只属于 w；t1.v 和 t2.v 的加工完全一样，不能因为 t1 的脚本里还有一个 y 就判成不同"""
+    t1 = """
+        INSERT INTO ads.t1 (k, v, w)
+        WITH x AS (SELECT s.k, SUM(s.v) AS v FROM ods.src s WHERE s.dt = '2026-06-30' GROUP BY s.k),
+             y AS (SELECT MAX(s.v) AS m FROM ods.src s WHERE s.flag = '1')
+        SELECT x.k, x.v, (SELECT y.m FROM y) FROM x
+    """
+    t2 = """
+        INSERT INTO ads.t2 (k, v)
+        WITH x AS (SELECT s.k, SUM(s.v) AS v FROM ods.src s WHERE s.dt = '2026-06-30' GROUP BY s.k)
+        SELECT x.k, x.v FROM x
+    """
+    graph = LineageGraph(scripted_store({"ads.t1": ["k", "v", "w"], "ads.t2": ["k", "v"]},
+                                        {"load_t1.sql": t1, "load_t2.sql": t2}))
+
+    same = graph.compare(ref("ads.t1.v"), ref("ads.t2.v"))
+
+    assert same.common == (ref("ods.src.v"),) and not same.differs
+    assert [f.scope for f in graph.upstream("ads.t1", "v")[0].filters] == ["x"]
+    assert [f.scope for f in graph.upstream("ads.t1", "w")[0].filters] == ["y"]    # w 经过标量子查询里的 y，不经过 x
+
+
+def test_hop_without_recorded_scopes_falls_back_to_all_the_conditions_of_the_statement():
+    """旧资料里的脚本字段没有记录经过的查询层：和以前一样，带这条语句的全部条件"""
+    store = scripted_store({"ads.t": ["k", "ytd_v", "mtd_v"]}, {"load_t.sql": YTD_AND_MTD})
+    old_columns = [c.model_copy(update={"scopes": []}) for c in store.script_columns("ads.t")]
+    old = make_store([*SRC_TABLES, ("ads.t", [], ["k", "ytd_v", "mtd_v"])], edges=store.lineage_edges(),
+                     scripts=store.scripts(), script_columns=old_columns)
+    graph = LineageGraph(old)
+
+    (ytd,), (mtd,) = graph.upstream("ads.t", "ytd_v"), graph.upstream("ads.t", "mtd_v")
+
+    assert [f.scope for f in ytd.filters] == ["ytd", "mtd"] and ytd.filters == mtd.filters
+    assert not graph.compare(ref("ads.t.ytd_v"), ref("ads.t.mtd_v")).differs      # 以前的行为：判不出来
+
+
+def test_hop_conditions_of_the_mock_mart_follow_the_scopes(graph):
+    """年初累计只带年初那个 CTE 的时间窗口，不带 cur、mtd 的，也不带 cur 里关联客户维表的那处"""
+    ytd, mtd = graph.upstream(ADS_DEP, "ytd_avg_bal_rmb", depth=1), graph.upstream(ADS_DEP, "mtd_avg_bal_rmb", depth=1)
+
+    assert {f.scope for h in ytd for f in h.filters} == {"ytd"} and "'YEAR'" in ytd[0].filters[0].condition
+    assert {f.scope for h in mtd for f in h.filters} == {"mtd"} and "'MONTH'" in mtd[0].filters[0].condition
+    assert [j.table for j in ytd[0].joins] == ["ytd", "mtd"]
+
+
 def test_fields_missing_from_the_field_list_do_not_break_the_graph():
     """脚本补出来的血缘边，来源字段可能不在字段清单里"""
     store = make_store([("ods.s", [], ["k"]), ("dwd.t", [], ["k", "x"])],
@@ -221,6 +323,24 @@ def test_fields_missing_from_the_field_list_do_not_break_the_graph():
     assert up.source == ref("ods.s.gone") and down.target == ref("dwd.t.x")
     assert graph.upstream_tables("dwd.t") == ["ods.s"]
     assert graph.downstream_tables("ods.s") == ["dwd.t"]
+
+
+def test_hop_marks_a_source_field_that_is_not_in_the_field_list():
+    """来源字段不在字段清单里的边，交给模型会被静态校验报「没有这个字段」，所以每一跳都要标出来"""
+    store = make_store([("ods.s", [], ["k", "kept"]), ("dwd.t", [], ["k", "x", "y", "z", "w"])], edges=[
+        edge("dwd.t.k", "ods.s.k", origin="script"),                         # 来源字段在清单里
+        edge("dwd.t.x", "ods.s.gone", origin="script", passthrough=True),    # 来源表在表清单里，字段不在清单里
+        edge("dwd.t.y", "ext.src.y", external=True),                         # 外部表
+        edge("dwd.t.z", "no.such_table.z"),                                  # 来源表根本不在表清单里
+        edge("dwd.t.w", "ods.s.kept", external=True)])                       # 标成外部的，哪怕字段恰好同名也不算
+    graph = LineageGraph(store)
+
+    known = {column: graph.upstream("dwd.t", column)[0].source_known for column in "kxyzw"}
+
+    assert known == {"k": True, "x": False, "y": False, "z": False, "w": False}
+    assert graph.downstream("ods.s", "gone")[0].source_known is False          # 下游方向同样标
+    assert graph.downstream("ods.s", "k")[0].source_known is True
+    assert graph.downstream("ext.src", "y")[0].source_known is False
 
 
 # ── 下游链路 ──────────────────────────────────────────────

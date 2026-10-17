@@ -19,7 +19,14 @@ from metadata.importer import enrich_mart, load_mart
 from metadata.index import HashEmbedder, build_vectors
 from metadata.models import ColumnMeta, Example, LineageEdge, Mart, ScriptColumn, TableMeta
 from metadata.store import MetadataStore
-from nl2sql.retriever import MAX_EXAMPLES, MAX_HITS_PER_TABLE, MAX_TABLES, RecallQuery, Retriever
+from nl2sql.retriever import (
+    MAX_EXAMPLES,
+    MAX_HITS_PER_TABLE,
+    MAX_TABLES,
+    MAX_UPSTREAM_TABLES,
+    RecallQuery,
+    Retriever,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 MOCK_MART_DIR = ROOT / "data" / "mock_mart"
@@ -175,6 +182,77 @@ def test_at_most_eight_tables_and_upstream_and_example_tables_take_no_slot():
     assert [(item.table_id, item.score) for item in result.tables[:MAX_TABLES]] == [
         (item.table_id, item.score) for item in level0.tables if item.reason == "recall"]
     assert result.scope_size == 11 and result.scope_level == 1
+
+
+def upstream_mart(strong: int, weak: int, unrelated: int) -> Mart:
+    """专题层 ads.t01 直接依赖整合层的 strong + weak + unrelated 张表：
+    s 开头的字段名与「存款金额」完全一致，w 开头的只对上「存款」，n 开头的完全对不上"""
+    tables = [("ads.t01", "存款汇总", [("amt", "存款金额")])]
+    edges = []
+    for prefix, count, name in (("s", strong, "存款金额"), ("w", weak, "存款"), ("n", unrelated, "机构编号")):
+        for number in range(1, count + 1):
+            tables.append((f"dwd.{prefix}{number:02d}", "明细", [("amt", name)]))
+            edges.append(LineageEdge(target_table="ads.t01", target_column="amt",
+                                     source_table=f"dwd.{prefix}{number:02d}", source_column="amt"))
+    return make_mart(tables, edges)
+
+
+def upstream_tables(result) -> list[str]:
+    """召回结果里上溯加入的表"""
+    return [item.table_id for item in result.tables if item.reason == "upstream"]
+
+
+def test_upstream_tables_are_capped_and_only_those_with_hits_are_kept():
+    query = RecallQuery("x", ["存款金额"])
+    many = make_retriever(upstream_mart(strong=5, weak=6, unrelated=3), with_embedder=False).recall(query, 1, ["ads.t01"])
+    few = make_retriever(upstream_mart(strong=2, weak=1, unrelated=6), with_embedder=False).recall(query, 1, ["ads.t01"])
+
+    # 11 张有命中字段：按得分取前 8，得分相同的字段名一致，按名次先后；对不上的一张不要
+    assert upstream_tables(many) == [f"dwd.s0{i}" for i in range(1, 6)] + [f"dwd.w0{i}" for i in range(1, 4)]
+    assert len(upstream_tables(many)) == MAX_UPSTREAM_TABLES
+    scores = [item.score for item in many.tables if item.reason == "upstream"]
+    assert scores == sorted(scores, reverse=True) and all(item.hits for item in many.tables)
+    assert [item.table_id for item in many.tables if item.reason == "recall"] == ["ads.t01"]     # 上游表不占专题层的名额
+    # 只有 3 张有命中字段：就只留这 3 张，不拿没命中的凑数
+    assert upstream_tables(few) == ["dwd.s01", "dwd.s02", "dwd.w01"]
+    assert many.scope_size == 1 + 14                      # 范围里仍是整个闭包，名额只管最后留下几张候选
+
+
+def test_nothing_matching_upstream_keeps_the_nearest_eight_instead_of_none():
+    """没有一张上游表命中时无从比较，取闭包里最近的 8 张：z1 是直接上游，a1..a9 隔了一层，字母顺序在 z1 前面"""
+    tables = [("ads.t01", "存款汇总", [("amt", "存款金额")]), ("dwd.z1", "明细", [("amt", "机构编号")])]
+    edges = [LineageEdge(target_table="ads.t01", target_column="amt", source_table="dwd.z1", source_column="amt")]
+    for number in range(1, 10):
+        tables.append((f"dwd.a{number}", "明细", [("amt", "机构编号")]))
+        edges.append(LineageEdge(target_table="dwd.z1", target_column="amt",
+                                 source_table=f"dwd.a{number}", source_column="amt"))
+    retriever = make_retriever(make_mart(tables, edges), with_embedder=False)
+
+    result = retriever.recall(RecallQuery("x", ["存款金额"]), 1, ["ads.t01"])
+    no_terms = retriever.recall(RecallQuery("x", []), 2, ["ads.t01"])
+
+    expected = ["dwd.z1"] + [f"dwd.a{i}" for i in range(1, 8)]
+    assert upstream_tables(result) == upstream_tables(no_terms) == expected
+    assert all(item.hits == [] for item in result.tables if item.reason == "upstream")
+    assert upstream_tables(retriever.recall(RecallQuery("x", ["存款金额"]), 1, ["ads.t01"])) == expected   # 重复调用结果一样
+
+
+def test_a_dimension_table_that_misses_the_upstream_cut_goes_back_to_the_ordinary_pool():
+    """维表本来就在第 0 层：作为上游表被淘汰以后，仍然像第 0 层那样参与专题层的排名，不会因为上溯反而丢掉"""
+    tables = [("ads.t01", "存款汇总", [("amt", "存款金额")]), ("dim.d1", "客户维表", [("nm", "存款金额项目")])]
+    edges = [LineageEdge(target_table="ads.t01", target_column="amt", source_table="dim.d1", source_column="nm")]
+    for number in range(1, 10):
+        tables.append((f"dwd.s0{number}", "明细", [("amt", "存款金额")]))
+        edges.append(LineageEdge(target_table="ads.t01", target_column="amt",
+                                 source_table=f"dwd.s0{number}", source_column="amt"))
+    retriever = make_retriever(make_mart(tables, edges), with_embedder=False)
+
+    result = retriever.recall(RecallQuery("x", ["存款金额"]), 1, ["ads.t01"])
+    reasons = {item.table_id: item.reason for item in result.tables}
+
+    assert upstream_tables(result) == [f"dwd.s0{i}" for i in range(1, 9)]       # 维表的字段名更长，排在 9 张之后
+    assert "dwd.s09" not in reasons                                              # 非维表被淘汰就不再出现
+    assert reasons["dim.d1"] == "recall" and reasons["ads.t01"] == "recall"
 
 
 # ── 关键字路 ──────────────────────────────────────

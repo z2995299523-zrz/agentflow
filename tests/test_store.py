@@ -71,7 +71,8 @@ def make_mart() -> Mart:
         script_columns=[
             ScriptColumn(script_name="load_cust_bal.sql", stmt_index=2, target_table="ads.cust_bal",
                          target_column="bal", expression="SUM(ods.acct.bal)",
-                         sources=[FieldRef(table="ods.acct", column="bal")], kind="derived"),
+                         sources=[FieldRef(table="ods.acct", column="bal")], kind="derived",
+                         scopes=["main", "agg"]),
         ],
         examples=[
             Example(example_id="ex.sql#1", requirement="查各客户余额", caliber_note="原币",
@@ -176,6 +177,25 @@ def test_old_database_without_new_tables_tells_how_to_fix(tmp_path):
 
     with pytest.raises(RuntimeError, match="重新运行 python -m metadata.importer"):
         MetadataStore(db_path)
+
+
+def test_script_column_scopes_round_trip_and_old_databases_read_as_unknown(tmp_path):
+    write_store(tmp_path / "m.db", make_mart())
+    assert MetadataStore(tmp_path / "m.db").script_column("ads.cust_bal", "bal").scopes == ["main", "agg"]
+    assert ScriptColumn(script_name="a.sql", stmt_index=1, target_table="t", target_column="c", expression="x",
+                        kind="derived").scopes == []                       # 老资料没有这个字段，当作不知道
+
+    with closing(sqlite3.connect(tmp_path / "m.db")) as conn:             # 加 scopes 列之前导出的库：没有这一列
+        conn.executescript("""
+            CREATE TABLE old_script_column AS
+                SELECT script_name, stmt_index, target_table, target_column, expression, sources, kind
+                FROM meta_script_column;
+            DROP TABLE meta_script_column;
+            ALTER TABLE old_script_column RENAME TO meta_script_column;
+        """)
+    (column,) = MetadataStore(tmp_path / "m.db").script_columns("ads.cust_bal")
+
+    assert column.scopes == [] and column.expression == "SUM(ods.acct.bal)"
 
 
 def test_columns_of_unlisted_table_do_not_break_the_store():

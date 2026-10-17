@@ -90,6 +90,7 @@ CREATE TABLE meta_script_column (
     expression    TEXT NOT NULL,
     sources       TEXT NOT NULL DEFAULT '[]',
     kind          TEXT NOT NULL,
+    scopes        TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (script_name, stmt_index, target_column)
 );
 CREATE TABLE meta_example (
@@ -211,9 +212,10 @@ def write_store(db_path: Path, mart: Mart, vectors: VectorBundle | None = None) 
                  for s in mart.scripts],
             )
             conn.executemany(
-                "INSERT INTO meta_script_column VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO meta_script_column VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [(c.script_name, c.stmt_index, c.target_table, c.target_column, c.expression,
-                  _json([s.model_dump() for s in c.sources]), c.kind) for c in mart.script_columns],
+                  _json([s.model_dump() for s in c.sources]), c.kind, _json(c.scopes))
+                 for c in mart.script_columns],
             )
             conn.executemany(
                 "INSERT INTO meta_example VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -301,6 +303,8 @@ def _read_store(db_path: Path) -> tuple[Mart, VectorBundle | None]:
                         expression=row["expression"],
                         sources=[FieldRef(**item) for item in json.loads(row["sources"])],
                         kind=row["kind"],
+                        # 加这一列之前导出的库没有它：当作不知道经过了哪些查询层
+                        scopes=json.loads(row["scopes"]) if "scopes" in row.keys() else [],
                     )
                     for row in conn.execute("SELECT * FROM meta_script_column ORDER BY rowid")
                 ],
