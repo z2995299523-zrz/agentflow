@@ -1,282 +1,221 @@
 """
-AgentFlow API — FastAPI 统一接口
-提供 RAG 知识库问答 + Text-to-SQL 数据分析的 REST API
+专题库 NL2SQL 接口（FastAPI）
+- POST /nl2sql/query      自然语言查数。流水线无状态：追问、反问的上下文由调用方放在请求里
+- GET  /metadata/tables   按层级列出表
+- GET  /metadata/lineage  一个字段的上游、下游链路
+- GET  /health            资料目录、各类元数据的数量、执行层、模型名；元数据库没导入时提示先导入
+
+流水线和元数据一律通过 nl2sql.service 模块取（get_pipeline_dep、get_metadata_dep 两个依赖函数），
+测试里用 app.dependency_overrides 换成假流水线和测试用的元数据。
+元数据库没导入、没配模型 Key 时，接口回 503，信息里写明原因和处理办法，不返回堆栈。
 """
-import os
-import uuid
-from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Optional
+from typing import Any, Literal
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
 
-from config import UPLOAD_DIR, CHROMA_PERSIST_DIR
-from rag.loader import load_single_file, split_documents
-from rag.vectorstore import create_vectorstore, load_vectorstore, get_document_count
-from rag.chain import ask, ask_with_detail
-from sql.agent import SQLQueryAgent
-from sql.visualizer import QueryVisualizer
+import config
+from lineage.graph import LineageGraph
+from metadata.models import LAYERS
+from metadata.store import MetadataStore
+from nl2sql import service
+from nl2sql.schemas import Clarify, QueryRequest
+from nl2sql.workflow import Pipeline
 
-
-# ─── 应用初始化 ──────────────────────────────────
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """启动预热：加载 BGE 模型 + SQL Agent，注入到 graph 节点"""
-    print("⏳ 预热 BGE 模型...")
-    app.state.vectorstore = load_vectorstore()
-    print("✅ BGE 模型就绪")
-
-    print("⏳ 预热 SQL Agent...")
-    app.state.sql_agent = SQLQueryAgent()
-    print("✅ SQL Agent 就绪")
-
-    # 注入到 graph 节点
-    from graph.nodes import init_vectorstore, init_sql_agent
-    init_vectorstore(app.state.vectorstore)
-    init_sql_agent(app.state.sql_agent)
-
-    yield
+MAX_LINEAGE_DEPTH = 10
+UNAVAILABLE_ERRORS = (FileNotFoundError, RuntimeError, ValueError, OSError)     # 取不到流水线、元数据时可能抛的错
 
 app = FastAPI(
-    title="AgentFlow API",
-    description="企业级 AI 智能助手 — RAG + Text-to-SQL",
-    version="2.0.0",
-    lifespan=lifespan,
+    title="专题库 NL2SQL",
+    description="基于专题库模型结构与血缘的自然语言转 SQL：查数、元数据浏览、健康检查",
+    version="3.0.0",
 )
 
-# 确保上传目录存在
-Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
-# 懒加载单例（lifespan 预热时会填充，routes 读取）
-_sql_agent: Optional[SQLQueryAgent] = None
+# ── 取不到服务时的统一回应 ──────────────────────────
 
+class ServiceUnavailable(Exception):
+    """服务暂时用不了：元数据库没导入、没配模型 Key 等。接口回 503，信息里带处理办法"""
 
-def get_sql_agent() -> SQLQueryAgent:
-    """获取 SQL Agent 单例（优先用 lifespan 预热的实例，fallback 懒加载）"""
-    global _sql_agent
-    if _sql_agent is None:
-        _sql_agent = SQLQueryAgent()
-    return _sql_agent
-
-
-# ─── 请求/响应模型 ───────────────────────────────
-
-class QueryRequest(BaseModel):
-    question: str = Field(..., description="自然语言问题", min_length=1)
+    def __init__(self, message: str, status: str = "error") -> None:
+        """
+        Args:
+            message: 原因和处理办法
+            status: no_metadata（元数据库没导入）或 error（其它）
+        """
+        super().__init__(message)
+        self.message = message
+        self.status = status
 
 
-class RAGQueryResponse(BaseModel):
-    answer: str
-    sources: list[str]
-    context_details: Optional[list[dict]] = None
+def _unavailable(error: Exception) -> ServiceUnavailable:
+    """把取流水线、元数据时抛的错转成 ServiceUnavailable；元数据库不存在记为 no_metadata
+
+    UNAVAILABLE_ERRORS 里的错误信息本来就是写给用户看的，原样用；其它错误带上类型名。
+    """
+    status = "no_metadata" if isinstance(error, FileNotFoundError) else "error"
+    detail = str(error)
+    if detail and isinstance(error, UNAVAILABLE_ERRORS):
+        return ServiceUnavailable(detail, status)
+    return ServiceUnavailable(f"{type(error).__name__}: {detail}".rstrip(": "), status)
 
 
-class SQLQueryResponse(BaseModel):
-    question: str
-    sql: str
-    answer: str
-    success: bool
-    error: Optional[str] = None
+@app.exception_handler(ServiceUnavailable)
+async def handle_unavailable(request: Request, error: ServiceUnavailable) -> JSONResponse:
+    """服务不可用：503，detail 是原因和处理办法"""
+    return JSONResponse(status_code=503, content={"detail": error.message, "status": error.status})
 
 
-class VisualizeResponse(BaseModel):
-    question: str
-    sql: str
-    answer: str
-    chart_base64: str
-    chart_type: str
-    title: str
-    success: bool
-    error: Optional[str] = None
-
-
-class DocumentInfo(BaseModel):
-    filename: str
-    chunks: int
-
-
-# ─── RAG 路由 ────────────────────────────────────
-
-@app.post("/rag/upload")
-async def upload_document(file: UploadFile = File(...)):
-    """上传文档到知识库（支持 PDF/Word/TXT/Markdown）"""
-    # 校验文件类型
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in (".pdf", ".docx", ".txt", ".md"):
-        raise HTTPException(400, f"不支持的文件类型: {ext}，支持 PDF/Word/TXT/Markdown")
-
-    # 保存文件
-    safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename}"
-    filepath = Path(UPLOAD_DIR) / safe_name
-    content = await file.read()
-    filepath.write_bytes(content)
-
+def get_pipeline_dep() -> Pipeline:
+    """依赖：查询流水线（nl2sql.service.get_pipeline）。取不到时回 503"""
     try:
-        # 加载文档
-        docs = load_single_file(str(filepath))
-        if not docs:
-            os.remove(filepath)
-            raise HTTPException(400, "文档内容为空")
-
-        # 分块
-        chunks = split_documents(docs)
-
-        # 创建/更新向量库（追加模式）
-        create_vectorstore(chunks, persist_dir=CHROMA_PERSIST_DIR)
-
-        return {
-            "success": True,
-            "filename": file.filename,
-            "chunks": len(chunks),
-            "message": f"已上传 {file.filename}，分割为 {len(chunks)} 个文本块"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        if filepath.exists():
-            os.remove(filepath)
-        raise HTTPException(500, f"文档处理失败: {str(e)}")
+        return service.get_pipeline()
+    except UNAVAILABLE_ERRORS as error:
+        raise _unavailable(error) from error
 
 
-@app.post("/rag/query", response_model=RAGQueryResponse)
-async def query_rag(request: QueryRequest):
-    """知识库问答（带来源引用）"""
+def get_metadata_dep() -> tuple[MetadataStore, LineageGraph]:
+    """依赖：元数据和血缘图（nl2sql.service.get_metadata），不需要模型配置。取不到时回 503"""
     try:
-        result = ask_with_detail(request.question)
-        if not result.get("answer"):
-            raise HTTPException(404, "未找到相关内容，请先上传文档")
-        return RAGQueryResponse(**result)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"查询失败: {str(e)}")
+        return service.get_metadata()
+    except UNAVAILABLE_ERRORS as error:
+        raise _unavailable(error) from error
 
 
-@app.get("/rag/documents", response_model=list[DocumentInfo])
-async def list_documents():
-    """列出知识库中的文档及其文本块数量"""
+# ── 查数 ──────────────────────────────────────────
+
+class QueryBody(BaseModel):
+    """查数请求。追问、反问的上下文由调用方带来：把上一轮结果里的 requirement、clarify 原样放回来"""
+
+    question: str = Field(description="本轮输入", min_length=1, max_length=2000)
+    prev_requirement: str = Field("", description="上一轮的完整需求（上一轮结果里的 requirement）；追问时带上", max_length=4000)
+    prev_clarify: Clarify | None = Field(None, description="上一轮提出的反问；有值表示本轮的 question 是对它的回答")
+
+    @field_validator("question")
+    @classmethod
+    def question_not_blank(cls, value: str) -> str:
+        """本轮输入去掉首尾空白后不能是空的"""
+        value = value.strip()
+        if not value:
+            raise ValueError("question 不能是空白")
+        return value
+
+
+@app.post("/nl2sql/query", summary="自然语言查数")
+def query(body: QueryBody, pipeline: Pipeline = Depends(get_pipeline_dep)) -> dict[str, Any]:
+    """跑一轮查询，返回 QueryResult（不含提示词和模型原始回复）
+
+    status 是 ok、unvalidated（SQL 有校验错误，需人工检查）、need_clarify（要回答 clarify 里的问题）或 failed。
+    今天按系统日期，请求体里不收。
+    """
+    request = QueryRequest(question=body.question, prev_requirement=body.prev_requirement,
+                           prev_clarify=body.prev_clarify)
+    return pipeline.run(request).public()
+
+
+# ── 元数据 ────────────────────────────────────────
+
+class TableInfo(BaseModel):
+    """表清单里的一项"""
+
+    table_id: str
+    table_cn: str
+    layer: str
+    table_type: str
+    grain_columns: list[str]
+    date_column: str | None
+    column_count: int
+
+
+class HopInfo(BaseModel):
+    """血缘的一跳：target 由 source 加工而来"""
+
+    depth: int
+    target: str
+    source: str
+    transform: str
+    script_expression: str
+    is_passthrough: bool
+    origin: str
+    script_name: str
+    source_external: bool
+    source_known: bool
+    filters: list[str]
+    joins: list[str]
+
+
+class LineageInfo(BaseModel):
+    """一个字段的上下游链路"""
+
+    field: str
+    upstream: list[HopInfo]
+    downstream: list[HopInfo]
+
+
+@app.get("/metadata/tables", response_model=list[TableInfo], summary="按层级列出表")
+def metadata_tables(
+    layer: str | None = Query(None, description=f"层级，可选：{'、'.join(LAYERS)}；不写就列出全部表"),
+    metadata: tuple[MetadataStore, LineageGraph] = Depends(get_metadata_dep),
+) -> list[TableInfo]:
+    """列出表：表标识、中文名、层级、类型、粒度字段、数据日期字段、字段数"""
+    if layer is not None and layer not in LAYERS:
+        raise HTTPException(400, f"层级「{layer}」不对，可选：{'、'.join(LAYERS)}")
+    store, _ = metadata
+    return [TableInfo(table_id=table.table_id, table_cn=table.table_cn, layer=table.layer, table_type=table.table_type,
+                      grain_columns=table.grain_columns, date_column=table.date_column,
+                      column_count=len(store.columns(table.table_id)))
+            for table in store.tables(layer)]
+
+
+@app.get("/metadata/lineage", response_model=LineageInfo, summary="一个字段的上游、下游链路")
+def metadata_lineage(
+    table: str = Query(description="表标识：模式.表"),
+    column: str = Query(description="字段名"),
+    depth: int = Query(3, ge=1, le=MAX_LINEAGE_DEPTH, description="最多走几跳"),
+    metadata: tuple[MetadataStore, LineageGraph] = Depends(get_metadata_dep),
+) -> dict[str, Any]:
+    """字段的上游（由哪些字段加工而来）和下游（加工出了哪些字段），每一跳带加工表达式、过滤条件、关联条件"""
+    store, graph = metadata
     try:
-        # 扫描上传目录
-        upload_dir = Path(UPLOAD_DIR)
-        files = []
-        if upload_dir.exists():
-            for f in upload_dir.iterdir():
-                if f.is_file():
-                    # 去掉随机前缀还原原始文件名
-                    display_name = f.name.split("_", 1)[-1] if "_" in f.name else f.name
-                    files.append({"filename": display_name, "chunks": 0})
-
-        # 追加向量库统计
-        try:
-            count = get_document_count()
-        except Exception:
-            count = 0
-
-        return [
-            DocumentInfo(filename=f["filename"], chunks=count // max(len(files), 1))
-            for f in files
-        ] if files else []
-    except Exception as e:
-        raise HTTPException(500, f"获取文档列表失败: {str(e)}")
+        return service.describe_lineage(store, graph, table, column, depth)
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
 
 
-@app.delete("/rag/documents/{filename}")
-async def delete_document(filename: str):
-    """删除指定文档（需重建向量库以完全清除）"""
+# ── 健康检查 ──────────────────────────────────────
+
+class HealthInfo(BaseModel):
+    """服务状态"""
+
+    status: Literal["ok", "no_metadata", "error"]
+    mart_dir: str
+    counts: dict[str, int]
+    executor: str
+    model: str
+    hint: str = ""
+
+
+def _model_info() -> tuple[str, str]:
+    """(模型名, 提示)：没配模型 Key 时提示查数接口暂时不能用，元数据接口不受影响"""
     try:
-        filepath = Path(UPLOAD_DIR) / filename
-        if filepath.exists():
-            os.remove(filepath)
-            return {"success": True, "message": f"已删除 {filename}"}
-        raise HTTPException(404, f"文件不存在: {filename}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"删除失败: {str(e)}")
+        return config.get_llm_kwargs()["model"], ""
+    except ValueError as error:
+        return config.LLM_MODEL, f"查数接口暂时不能用：{error}"
 
 
-# ─── SQL 路由 ────────────────────────────────────
+@app.get("/health", response_model=HealthInfo, summary="健康检查")
+def health(request: Request) -> HealthInfo:
+    """服务状态：资料目录、各类元数据的数量、执行层、模型名
 
-@app.post("/sql/query", response_model=SQLQueryResponse)
-async def query_sql(request: QueryRequest):
-    """自然语言查询数据库（Text-to-SQL）"""
+    status 为 ok；no_metadata 表示元数据库还没导入，hint 里是导入命令；error 表示元数据读不出来。
+    """
+    model, model_hint = _model_info()
+    base = {"mart_dir": str(config.MART_DIR), "executor": config.EXECUTOR, "model": model}
+    provider = request.app.dependency_overrides.get(get_metadata_dep, get_metadata_dep)     # 测试里换掉的依赖也要认
     try:
-        agent = get_sql_agent()
-        result = agent.query(request.question)
-        if not result["success"]:
-            raise HTTPException(400, result.get("error", "查询失败"))
-        return SQLQueryResponse(**result)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"查询失败: {str(e)}")
-
-
-@app.post("/sql/visualize", response_model=VisualizeResponse)
-async def visualize_sql(request: QueryRequest):
-    """查询数据库并自动生成图表（Base64 PNG）"""
-    try:
-        agent = get_sql_agent()
-
-        # 第一步：Text-to-SQL
-        result = agent.query(request.question)
-        if not result["success"]:
-            raise HTTPException(400, result.get("error", "查询失败"))
-        if not result["sql"]:
-            raise HTTPException(400, "未能生成 SQL 查询语句")
-
-        # 第二步：执行 SQL 获取数据
-        import pandas as pd
-        from config import get_db_uri
-        from sql.agent import SafeSQLDatabase
-
-        db = SafeSQLDatabase.from_uri(get_db_uri())
-        # Pandas 3.0 的 read_sql_query 对 SQLAlchemy 2.0 Engine/Connection 不兼容
-        # 改用 exec_driver_sql 直接执行 SQL 获取结果
-        with db._engine.connect() as conn:
-            result_proxy = conn.exec_driver_sql(result["sql"])
-            rows = result_proxy.fetchall()
-            cols = result_proxy.keys()
-            df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
-
-        if df.empty:
-            raise HTTPException(404, "查询结果为空，无法生成图表")
-
-        # 第三步：自动选择图表类型并生成
-        chart = QueryVisualizer.visualize(df)
-        if not chart["success"]:
-            raise HTTPException(500, chart.get("error", "图表生成失败"))
-
-        return VisualizeResponse(
-            question=request.question,
-            sql=result["sql"],
-            answer=result["answer"],
-            chart_base64=chart["image_base64"],
-            chart_type=chart["chart_type"],
-            title=chart["title"],
-            success=True,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"可视化失败: {str(e)}")
-
-
-@app.get("/sql/schema")
-async def get_schema():
-    """获取数据库表结构信息"""
-    try:
-        agent = get_sql_agent()
-        schema = agent.get_schema()
-        return {"success": True, "schema": schema}
-    except Exception as e:
-        raise HTTPException(500, f"获取表结构失败: {str(e)}")
-
-
-# ─── 健康检查 ────────────────────────────────────
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "AgentFlow API"}
+        store, _ = provider()
+    except Exception as error:  # noqa: BLE001 健康检查要如实报告，不能自己先崩
+        problem = error if isinstance(error, ServiceUnavailable) else _unavailable(error)
+        return HealthInfo(status=problem.status, counts={}, hint=problem.message, **base)
+    return HealthInfo(status="ok", counts=store.counts(), hint=model_hint, **base)
