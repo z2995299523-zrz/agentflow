@@ -16,6 +16,7 @@ from nl2sql.schemas import (
     EvidenceColumn,
     EvidenceTable,
     FieldComparison,
+    FieldLineage,
     FilterItem,
     JoinHint,
     JoinHop,
@@ -610,11 +611,11 @@ def heavy_evidence(mock_store) -> Evidence:
 NOTES = ["去掉非命中字段的码值", "第 9 张以后的表只列命中字段和粒度字段", "每跳的条件截到 120 字", "样例 SQL 截到 1500 字"]
 
 
-def shrunk_texts(evidence: Evidence, monkeypatch) -> list[str]:
-    """依次把上限压到刚好装不下上一级的文本，得到不收缩和收缩 1 至 4 级的五份文本"""
+def shrunk_texts(evidence: Evidence, monkeypatch, levels: int = 4) -> list[str]:
+    """依次把上限压到刚好装不下上一级的文本，得到不收缩和收缩 1 至 levels 级的文本"""
     monkeypatch.setattr(prompts, "EVIDENCE_CHAR_LIMIT", 10 ** 9)
     texts = [render_evidence(evidence)]
-    for _ in range(4):
+    for _ in range(levels):
         monkeypatch.setattr(prompts, "EVIDENCE_CHAR_LIMIT", len(texts[-1]) - 1)
         texts.append(render_evidence(evidence))
     return texts
@@ -711,6 +712,112 @@ def test_a_really_big_evidence_is_shrunk_under_the_real_limit(mock_store, monkey
 
     assert len(unshrunk) > prompts.EVIDENCE_CHAR_LIMIT                     # 不收缩的话超过 4 万字
     assert len(text) < len(unshrunk) and NOTES[0] in section(text, "## 说明")
+
+
+# ── 第 5 至 9 级：真实库的表字段多、加工脚本长，前四级装不下时接着收缩 ──────────
+
+LONG_FIELD = f"{CUST_BAL}.dep_bal_tot_rmb"
+
+
+def heaviest_evidence(mock_store) -> Evidence:
+    """在 heavy_evidence 上再加：非关键字段的口径说明、长表达式、一个八跳的长链路、一条经过中间表的关联"""
+    evidence = heavy_evidence(mock_store)
+    for table in evidence.tables:
+        for column in table.columns:
+            column.description = column.description or "口径说明" * 10
+    first = evidence.lineage[0].steps[0]
+    evidence.lineage[0].steps[0] = first.model_copy(update={"expression": "COALESCE(" + "x + " * 80 + "0)"})
+    evidence.lineage.append(FieldLineage(field=LONG_FIELD, term="对公存款余额", steps=[
+        LineageStep(depth=min(number, 3), target=f"{DWD_ACCT}.f{number}", sources=[f"{DWD_ACCT}.g{number}"],
+                    expression="CASE WHEN " + "a = 1 AND " * 12 + "1 = 1 THEN 1 END",
+                    filters=[f"WHERE {DWD_ACCT}.data_dt = CAST('${{data_dt}}' AS DATE)"], script_name="x.sql")
+        for number in range(1, 9)]))
+    evidence.joins.append(JoinHint(left_table=CUST_BAL, right_table=DIM_ORG, fan_out=False, hops=[
+        JoinHop(left_table=CUST_BAL, left_columns=["org_no"], right_table=ORG_BAL, right_columns=["org_no"],
+                cardinality="N:N", origin="grain_key"),
+        JoinHop(left_table=ORG_BAL, left_columns=["org_no"], right_table=DIM_ORG, right_columns=["org_no"],
+                cardinality="N:1", origin="grain_key")]))
+    return evidence
+
+
+def lineage_of(text: str, field: str) -> str:
+    """加工链路一节里一个字段的那一段"""
+    lineage = section(text, "## 指标字段的加工链路")
+    start = lineage.index(f"### {field}（")
+    end = lineage.find("\n### ", start + 1)
+    return lineage[start:end] if end != -1 else lineage[start:]
+
+
+def test_levels_five_to_nine_each_make_the_text_shorter_and_leave_a_note(mock_store, monkeypatch):
+    texts = shrunk_texts(heaviest_evidence(mock_store), monkeypatch, levels=len(prompts.SHRINK_ACTIONS))
+
+    assert len(prompts.SHRINK_ACTIONS) == 9
+    assert all(len(longer) > len(shorter) for longer, shorter in zip(texts, texts[1:]))
+    for level, text in enumerate(texts):
+        notes = section(text, "## 说明")
+        assert [action in notes for action in prompts.SHRINK_ACTIONS] == [index < level for index in range(9)]
+
+
+def test_level_five_keeps_descriptions_of_key_columns_only(mock_store, monkeypatch):
+    texts = shrunk_texts(heaviest_evidence(mock_store), monkeypatch, levels=5)
+    before, after = table_block(texts[4], ORG_BAL), table_block(texts[5], ORG_BAL)
+
+    def line(block, name):
+        return next(row for row in block.splitlines() if row.startswith(f"- {name} "))
+
+    assert "口径：" in line(before, "margin_bal_rmb") and "口径：" not in line(after, "margin_bal_rmb")
+    assert "口径：" in line(after, "dep_bal_rmb")                     # 命中
+    assert "口径：" in line(after, "org_no") and "口径：" in line(after, "data_dt")   # 粒度、数据日期
+
+
+def test_level_six_clips_expressions_to_200_and_conditions_to_60_characters(mock_store, monkeypatch):
+    texts = shrunk_texts(heaviest_evidence(mock_store), monkeypatch, levels=6)
+    lineage = section(texts[6], "## 指标字段的加工链路")
+
+    expressions = [row.split("：", 1)[1] for row in lineage.splitlines() if row.strip().startswith("加工表达式：")]
+    conditions = [row.split("：", 1)[1] for row in lineage.splitlines()
+                  if row.strip().startswith(("过滤条件：", "关联条件："))]
+    assert max(len(text) for text in expressions) <= 200 and any(text.endswith("…") for text in expressions)
+    assert max(len(text) for text in conditions) <= 60
+    assert max(len(row) for row in section(texts[5], "## 指标字段的加工链路").splitlines()
+               if row.strip().startswith("加工表达式：")) > 200
+
+
+def test_level_seven_lists_only_key_columns_from_the_fourth_table_on(mock_store, monkeypatch):
+    evidence = heaviest_evidence(mock_store)
+    texts = shrunk_texts(evidence, monkeypatch, levels=7)
+    third, fourth = evidence.tables[2].table_id, evidence.tables[3].table_id
+
+    assert "另有 " not in table_block(texts[7], third)                  # 前三张照旧全列
+    kept = table_block(texts[7], fourth)
+    assert "- margin_bal_rmb " not in kept and "- dep_bal_rmb " in kept and "另有 " in kept
+    assert "- margin_bal_rmb " in table_block(texts[6], fourth)
+
+
+def test_level_eight_limits_the_lineage_of_each_field_but_keeps_the_first_hop(mock_store, monkeypatch):
+    texts = shrunk_texts(heaviest_evidence(mock_store), monkeypatch, levels=8)
+    before, after = lineage_of(texts[7], LONG_FIELD), lineage_of(texts[8], LONG_FIELD)
+
+    assert before.count("跳：") == 8 and "后面的几跳没有列出" not in before
+    assert 1 <= after.count("跳：") < 8 and "后面的几跳没有列出" in after
+    hops = after.split("\n（链路较长")[0]
+    assert len(hops) - len(hops.split("\n", 1)[0]) <= prompts.LINEAGE_FIELD_CHARS + 1
+
+
+def test_level_eight_still_writes_a_first_hop_longer_than_the_budget(mock_store, monkeypatch):
+    evidence = heaviest_evidence(mock_store)
+    monkeypatch.setattr(prompts, "LINEAGE_FIELD_CHARS", 10)
+    texts = shrunk_texts(evidence, monkeypatch, levels=8)
+
+    assert lineage_of(texts[8], LONG_FIELD).count("跳：") == 1
+
+
+def test_level_nine_lists_only_direct_joins(mock_store, monkeypatch):
+    texts = shrunk_texts(heaviest_evidence(mock_store), monkeypatch, levels=9)
+
+    assert "经过 " in section(texts[8], "## 关联路径")
+    joins = section(texts[9], "## 关联路径")
+    assert "经过 " not in joins and f"- {ORG_BAL} → {DIM_ORG}：" in joins
 
 
 # ── render_tables ─────────────────────────────

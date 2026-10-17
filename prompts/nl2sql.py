@@ -31,11 +31,21 @@ EVIDENCE_CHAR_LIMIT = 40000                   # 证据文本超过这个字数�
 FULL_TABLES = 8                               # 收缩第 2 级：第几张表以后只列关键字段
 SHRINK_CONDITION_CHARS = 120                  # 收缩第 3 级：每跳的每条条件最多留多少字
 SHRINK_EXAMPLE_SQL_CHARS = 1500               # 收缩第 4 级：每条样例 SQL 最多留多少字
-SHRINK_ACTIONS = (                            # 四级收缩，每级在「说明」里记一句
+# 真实库的表字段多、加工脚本长，前四级装不下时接着收缩（实测真实库 11 道题，前四级之后最长还有 9.4 万字）
+SHRINK_EXPRESSION_CHARS = 200                 # 收缩第 6 级：加工表达式最多留多少字
+SHRINK_CONDITION_CHARS_MIN = 60               # 收缩第 6 级：每跳的每条条件再截短到多少字
+KEY_TABLES = 3                                # 收缩第 7 级：第几张表以后只列关键字段
+LINEAGE_FIELD_CHARS = 1500                    # 收缩第 8 级：每个字段的加工链路最多写多少字（至少写第一跳）
+SHRINK_ACTIONS = (                            # 收缩的顺序，先轻后重，每级在「说明」里记一句
     "去掉非命中字段的码值",
     f"第 {FULL_TABLES + 1} 张以后的表只列命中字段和粒度字段",
     f"每跳的条件截到 {SHRINK_CONDITION_CHARS} 字",
     f"样例 SQL 截到 {SHRINK_EXAMPLE_SQL_CHARS} 字",
+    "命中、粒度、数据日期、主键以外的字段不写口径说明",
+    f"加工表达式截到 {SHRINK_EXPRESSION_CHARS} 字、每跳的条件截到 {SHRINK_CONDITION_CHARS_MIN} 字",
+    f"第 {KEY_TABLES + 1} 张以后的表只列命中字段和粒度字段",
+    f"每个字段的加工链路最多写 {LINEAGE_FIELD_CHARS} 字",
+    "关联路径只列直连，不列经过中间表的",
 )
 
 RETRY_PROMPT = """你上一次的输出有下面这些问题：
@@ -564,7 +574,14 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def _column_line(column: EvidenceColumn, table: EvidenceTable, *, drop_enum: bool) -> str:
+def _is_key_column(column: EvidenceColumn, table: EvidenceTable) -> bool:
+    """关键字段：命中的、粒度、数据日期、主键"""
+    return (bool(column.hit_terms) or column.is_pk or column.name in table.grain_columns
+            or column.name == table.date_column)
+
+
+def _column_line(column: EvidenceColumn, table: EvidenceTable, *, drop_enum: bool,
+                 drop_description: bool = False) -> str:
     """一个字段一行：名称、中文名、类型、标记、口径说明、码值"""
     marks = ""
     if column.name in table.grain_columns:
@@ -581,20 +598,22 @@ def _column_line(column: EvidenceColumn, table: EvidenceTable, *, drop_enum: boo
         parts.append(column.data_type)
     if marks:
         parts.append(marks)
-    if column.description:
+    if column.description and not drop_description:
         parts.append(f"口径：{_one_line(column.description)}")
     if column.enum_values and not drop_enum:
         parts.append(f"码值：{_one_line(column.enum_values)}")
     return " ".join(parts)
 
 
-def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bool = False) -> str:
+def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bool = False,
+                 bare: bool = False) -> str:
     """一张表一段：标题、层级类型粒度、说明、字段清单
 
     Args:
         table: 证据里的表
         drop_enums: 去掉非命中字段的码值（收缩第 1 级）
-        key_only: 只列命中字段、粒度字段和数据日期字段（收缩第 2 级）
+        key_only: 只列命中字段、粒度字段和数据日期字段（收缩第 2、7 级）
+        bare: 关键字段以外的字段不写口径说明（收缩第 5 级）
     """
     grain = ", ".join(table.grain_columns) or "无"
     lines = [
@@ -610,28 +629,44 @@ def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bo
         if key_only and not (column.hit_terms or column.name in table.grain_columns or column.name == table.date_column):
             continue
         shown += 1
-        lines.append(_column_line(column, table, drop_enum=drop_enums and not column.hit_terms))
+        lines.append(_column_line(column, table, drop_enum=drop_enums and not column.hit_terms,
+                                  drop_description=bare and not _is_key_column(column, table)))
     if shown < len(table.columns):
         lines.append(f"- （另有 {len(table.columns) - shown} 个字段未列出）")
     return "\n".join(lines)
 
 
-def _render_lineage(items: list[FieldLineage], condition_chars: int | None) -> list[str]:
-    """指标字段的加工链路：每个字段一段，每跳写来源、表达式、过滤条件、关联条件、脚本"""
+def _render_lineage(items: list[FieldLineage], condition_chars: int | None, *, expression_chars: int | None = None,
+                    field_chars: int | None = None) -> list[str]:
+    """指标字段的加工链路：每个字段一段，每跳写来源、表达式、过滤条件、关联条件、脚本
+
+    Args:
+        items: 证据里的加工链路
+        condition_chars: 每条条件最多留多少字，None 不截
+        expression_chars: 加工表达式最多留多少字，None 不截
+        field_chars: 每个字段的链路最多写多少字，写满就停，但至少写第一跳；None 不限
+    """
     lines: list[str] = ["（每跳写成「目标字段 ← 来源字段」：目标字段由来源字段加工而来；跳数越大越靠近源头）"] if items else []
     for item in items:
         lines.append(f"### {item.field}（指标「{item.term}」）")
         if not item.steps:
             lines.append("（没有上游）")
+        cut, used = item.truncated, 0
         for step in item.steps:
-            lines += _lineage_step(step, condition_chars)
-        if item.truncated:
+            step_lines = _lineage_step(step, condition_chars, expression_chars)
+            size = sum(len(line) + 1 for line in step_lines)
+            if field_chars is not None and used and used + size > field_chars:
+                cut = True
+                break
+            lines += step_lines
+            used += size
+        if cut:
             lines.append("（链路较长，后面的几跳没有列出）")
         lines.append("")
     return lines[:-1] if lines else lines
 
 
-def _lineage_step(step: LineageStep, condition_chars: int | None) -> list[str]:
+def _lineage_step(step: LineageStep, condition_chars: int | None, expression_chars: int | None = None) -> list[str]:
     """加工链路里的一跳"""
     def limited(text: str) -> str:
         text = _one_line(text)
@@ -639,7 +674,10 @@ def _lineage_step(step: LineageStep, condition_chars: int | None) -> list[str]:
 
     lines = [f"第 {step.depth} 跳：{step.target} ← {'、'.join(step.sources)}"]
     if step.expression:
-        lines.append(f"  加工表达式：{_one_line(step.expression)}")
+        expression = _one_line(step.expression)
+        if expression_chars is not None:
+            expression = _clip(expression, expression_chars)
+        lines.append(f"  加工表达式：{expression}")
     lines += [f"  过滤条件：{limited(condition)}" for condition in step.filters]
     lines += [f"  关联条件：{limited(condition)}" for condition in step.joins]
     if step.unknown_sources:
@@ -710,19 +748,24 @@ def _section(header: str, body: list[str]) -> str:
 def _render(evidence: Evidence, level: int) -> str:
     """证据文本，收缩到第 level 级（0 是不收缩），收缩了什么写在「说明」里"""
     tables = []
+    full_tables = KEY_TABLES if level >= 7 else FULL_TABLES
     for index, table in enumerate(evidence.tables):
-        tables.append(_table_block(table, drop_enums=level >= 1, key_only=level >= 2 and index >= FULL_TABLES))
+        tables.append(_table_block(table, drop_enums=level >= 1, key_only=level >= 2 and index >= full_tables,
+                                   bare=level >= 5))
+    condition_chars = (SHRINK_CONDITION_CHARS_MIN if level >= 6 else SHRINK_CONDITION_CHARS if level >= 3 else None)
     sections = [_section("## 候选表", ["\n\n".join(tables)] if tables else [])]
     if evidence.use_lineage:
-        sections.append(_section("## 指标字段的加工链路",
-                                 _render_lineage(evidence.lineage, SHRINK_CONDITION_CHARS if level >= 3 else None)))
+        sections.append(_section("## 指标字段的加工链路", _render_lineage(
+            evidence.lineage, condition_chars, expression_chars=SHRINK_EXPRESSION_CHARS if level >= 6 else None,
+            field_chars=LINEAGE_FIELD_CHARS if level >= 8 else None)))
         sections.append(_section("## 同源字段对比", [_render_comparison(item) for item in evidence.comparisons]))
         sections.append(_section("## 表之间的上下游",
                                  [f"- {link.downstream} 由 {link.upstream} 加工而来" for link in evidence.table_links]))
         sections.append(_section("## 还可以上溯到的表",
                                  [f"- {option.table_id} {option.table_cn}（{option.layer}）"
                                   for option in evidence.upstream_options]))
-    sections.append(_section("## 关联路径", [line for hint in evidence.joins for line in _render_join(hint)]))
+    hints = [hint for hint in evidence.joins if level < 9 or len(hint.hops) == 1]
+    sections.append(_section("## 关联路径", [line for hint in hints for line in _render_join(hint)]))
     if evidence.use_examples:
         examples = _render_examples(evidence.examples, sql_chars=SHRINK_EXAMPLE_SQL_CHARS if level >= 4 else None)
         sections.append(_section("## 相似样例", [examples] if examples else []))
@@ -735,9 +778,9 @@ def render_evidence(evidence: Evidence) -> str:
     """把证据写成给模型看的文本
 
     分节：候选表；B、C 组的指标字段加工链路、同源字段对比、表之间的上下游、还可以上溯到的表；
-    关联路径；C 组的相似样例；最后是「说明」。超过 EVIDENCE_CHAR_LIMIT 时按固定顺序收缩，
-    每收缩一级在「说明」里记一句：去掉非命中字段的码值；第 9 张以后的表只列命中字段和粒度字段；
-    每跳的条件截到 120 字；样例 SQL 截到 1500 字。同样的证据必然得到同样的文本。
+    关联路径；C 组的相似样例；最后是「说明」。超过 EVIDENCE_CHAR_LIMIT 时按 SHRINK_ACTIONS 的顺序逐级收缩，
+    装下就停，每收缩一级在「说明」里记一句；九级都收完仍超过上限时就用第九级的文本。
+    同样的证据必然得到同样的文本。
 
     Args:
         evidence: ③ 的结果
