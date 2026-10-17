@@ -47,6 +47,7 @@ HF_MIRROR = "https://hf-mirror.com"    # huggingface.co 国内连不上，与 co
 NO_INDEX_HINT = "导入时加上 --no-index 可以跳过向量（召回将只能走关键字）"
 
 _BGE_LOCK = threading.Lock()
+_BGE_ENCODE_LOCK = threading.Lock()
 
 
 class Embedder(Protocol):
@@ -200,8 +201,10 @@ class BgeEmbedder:
             if self._model is None:
                 self._model = _load_bge_model()
             model = self._model
-        vectors = model.encode(list(texts), batch_size=BGE_ENCODE_BATCH, normalize_embeddings=True,
-                               convert_to_numpy=True, show_progress_bar=False)
+        # sentence-transformers 的 encode 不保证线程安全，评估多线程、接口并发时会同时调到，所以串行；检索词很短，不影响速度
+        with _BGE_ENCODE_LOCK:
+            vectors = model.encode(list(texts), batch_size=BGE_ENCODE_BATCH, normalize_embeddings=True,
+                                   convert_to_numpy=True, show_progress_bar=False)
         return np.ascontiguousarray(vectors, dtype=np.float32)
 
 

@@ -6,9 +6,10 @@
 # LLM & AI 框架
 # ============================================
 langchain>=0.2.0
-langchain-openai>=0.1.0
+langchain-openai>=1.1
 langchain-community>=0.2.0
-langgraph>=0.1.0
+# 查询流水线的编排按 LangGraph 1.x 的接口写
+langgraph>=1.1,<2
 openai>=1.30.0
 
 # ============================================
@@ -31,7 +32,9 @@ tiktoken>=0.7.0
 # ============================================
 # Web 框架
 # ============================================
-fastapi>=0.111.0
+# streamlit 1.57 要 starlette>=0.40，fastapi 0.115.0 把它锁在 0.39 以下；本机用 fastapi 0.124.4 + starlette 0.50.0
+fastapi>=0.124
+starlette>=0.49.1
 uvicorn[standard]>=0.29.0
 streamlit>=1.34.0
 

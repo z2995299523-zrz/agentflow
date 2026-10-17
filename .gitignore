@@ -40,3 +40,6 @@ data/sample.db
 # NL2SQL：专题库资料的生成物（元数据库、模拟库、导入报告）与真实资料
 data/*/build/
 data/real_mart/
+
+# NL2SQL 评估的逐题记录（报告入库，逐题记录不入库）
+eval/reports/runs/

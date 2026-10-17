@@ -209,6 +209,24 @@ def test_hop_script_expression_comes_from_the_script_column():
     assert (hop.transform, hop.script_expression) == ("文字说明", "SUM(ods.a.v)")
 
 
+def test_hop_script_expression_follows_the_script_of_the_edge():
+    # 两个脚本写同一个字段：每一跳的表达式取边上写明的那个脚本的，不是一律取第一条
+    columns = [ScriptColumn(script_name=name, stmt_index=1, target_table="ads.t", target_column="v",
+                            expression=f"SUM({source})", sources=[ref(source)], kind="derived")
+               for name, source in (("a.sql", "ods.a.v"), ("b.sql", "ods.b.v"))]
+    store = make_store([("ads.t", [], ["v"]), ("ods.a", [], ["v"]), ("ods.b", [], ["v"])],
+                       edges=[edge("ads.t.v", "ods.a.v", script="a.sql"), edge("ads.t.v", "ods.b.v", script="b.sql"),
+                              edge("ads.t.v", "ods.a.v", script="c.sql")],
+                       script_columns=columns)
+
+    hops = LineageGraph(store).upstream("ads.t", "v")
+
+    assert [(hop.script_name, hop.script_expression) for hop in hops] == [
+        ("a.sql", "SUM(ods.a.v)"), ("b.sql", "SUM(ods.b.v)"),
+        ("c.sql", "SUM(ods.a.v)"),          # 对不上脚本名时取第一条
+    ]
+
+
 # ── 每一跳的加工条件按字段经过的查询层过滤 ──────────────────
 
 SRC_TABLES = [("ods.src", [], ["k", "v", "dt", "flag"])]

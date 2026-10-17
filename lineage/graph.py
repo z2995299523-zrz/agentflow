@@ -120,7 +120,7 @@ class LineageGraph:
                                          script_column.target_column)] = frozenset(script_column.scopes) | {MAIN_SCOPE}
         self._conditions: dict[tuple[str, str, str],
                                tuple[tuple[ScriptFilter, ...], tuple[ScriptJoin, ...]]] = {}
-        self._expressions: dict[tuple[str, str], str] = {}
+        self._expressions: dict[tuple[str, str, str], str] = {}
 
         self._table_up: dict[str, set[str]] = defaultdict(set)
         self._table_down: dict[str, set[str]] = defaultdict(set)
@@ -190,11 +190,14 @@ class LineageGraph:
             self._conditions[key] = (tuple(filters), tuple(joins))
         return self._conditions[key]
 
-    def _expression_of(self, table: str, column: str) -> str:
-        """目标字段在加工脚本里展开后的表达式，没有时为空"""
-        key = (table, column)
+    def _expression_of(self, table: str, column: str, script_name: str = "") -> str:
+        """目标字段在加工脚本里展开后的表达式，没有时为空
+
+        多个脚本写同一个字段时，取血缘边上写明的那个脚本里的；对不上脚本名时取第一条。
+        """
+        key = (table, column, script_name)
         if key not in self._expressions:
-            script_column = self._store.script_column(table, column)
+            script_column = self._store.script_column(table, column, script_name)
             self._expressions[key] = script_column.expression if script_column is not None else ""
         return self._expressions[key]
 
@@ -206,7 +209,7 @@ class LineageGraph:
             target=FieldRef(table=edge.target_table, column=edge.target_column),
             source=FieldRef(table=edge.source_table, column=edge.source_column),
             transform=edge.transform,
-            script_expression=self._expression_of(edge.target_table, edge.target_column),
+            script_expression=self._expression_of(edge.target_table, edge.target_column, edge.script_name),
             is_passthrough=edge.is_passthrough, origin=edge.origin, script_name=edge.script_name,
             source_external=edge.source_external, filters=filters, joins=joins,
             source_known=(not edge.source_external

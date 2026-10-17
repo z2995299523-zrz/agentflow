@@ -97,6 +97,7 @@ def test_round_trip(tmp_path):
     assert store.script_columns("ads.cust_bal") == mart.script_columns
     assert store.script_column("ads.cust_bal", "bal").sources == [FieldRef(table="ods.acct", column="bal")]
     assert store.script_column("ads.cust_bal", "no_such") is None
+    assert store.script_columns_for("ads.cust_bal", "no_such") == []
     assert store.examples() == mart.examples
     assert store.counts() == {"表": 3, "字段": 4, "血缘": 2, "关联关系": 1, "加工语句": 1, "样例": 1,
                               "字段向量": 0}
@@ -297,3 +298,17 @@ def test_database_uses_large_pages_to_hold_vectors(tmp_path):
         page_size, = conn.execute("PRAGMA page_size").fetchone()
 
     assert page_size == 16384
+
+
+def test_script_column_prefers_the_given_script():
+    # 多条语句写同一个字段（第二份计划终审遗留）：给了脚本名优先取那个脚本的，script_columns_for 能拿到全部
+    mart = make_mart()
+    first = mart.script_columns[0]
+    second = first.model_copy(update={"script_name": "load_cust_bal_2.sql", "expression": "MAX(ods.acct.bal)"})
+    mart.script_columns.append(second)
+    store = MetadataStore.from_mart(mart)
+
+    assert store.script_column("ads.cust_bal", "bal") == first
+    assert store.script_column("ads.cust_bal", "bal", "load_cust_bal_2.sql") == second
+    assert store.script_column("ads.cust_bal", "bal", "no_such.sql") == first       # 对不上脚本名时取第一条
+    assert store.script_columns_for("ads.cust_bal", "bal") == [first, second]

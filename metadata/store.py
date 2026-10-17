@@ -436,12 +436,23 @@ class MetadataStore:
         """返回一张目标表在加工脚本里的逐字段表达式"""
         return list(self._script_columns.get(target_table, []))
 
-    def script_column(self, table_id: str, column_name: str) -> ScriptColumn | None:
-        """取一个目标字段在加工脚本里的表达式。有多条语句写同一个字段时取第一条，没有时返回 None"""
-        for script_column in self._script_columns.get(table_id, []):
-            if script_column.target_column == column_name:
-                return script_column
-        return None
+    def script_column(self, table_id: str, column_name: str, script_name: str = "") -> ScriptColumn | None:
+        """取一个目标字段在加工脚本里的表达式，没有时返回 None
+
+        有多条语句写同一个字段时：给了脚本名就优先取那个脚本里的第一条，否则取全部里的第一条。
+        要看全部写法用 script_columns_for。
+        """
+        found = self.script_columns_for(table_id, column_name)
+        if script_name:
+            for script_column in found:
+                if script_column.script_name == script_name:
+                    return script_column
+        return found[0] if found else None
+
+    def script_columns_for(self, table_id: str, column_name: str) -> list[ScriptColumn]:
+        """一个目标字段在加工脚本里的全部表达式，按脚本文件和语句顺序；没有时返回空列表"""
+        return [script_column for script_column in self._script_columns.get(table_id, [])
+                if script_column.target_column == column_name]
 
     def examples(self) -> list[Example]:
         """返回全部样例"""

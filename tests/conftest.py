@@ -42,6 +42,30 @@ def mock_store() -> MetadataStore:
 
 
 @pytest.fixture(scope="session")
+def mock_graph(mock_store: MetadataStore):
+    """模拟专题库的血缘图与关联图"""
+    from lineage.graph import LineageGraph
+
+    return LineageGraph(mock_store)
+
+
+@pytest.fixture(scope="session")
+def mock_retriever(mock_store: MetadataStore, mock_graph):
+    """模拟专题库的候选召回。mock_store 没有向量，不传向量器，只走关键字路"""
+    from nl2sql.retriever import Retriever
+
+    return Retriever(mock_store, mock_graph, None)
+
+
+@pytest.fixture(scope="session")
+def mock_validator(mock_store: MetadataStore):
+    """模拟专题库的静态校验器"""
+    from nl2sql.validator import SqlValidator
+
+    return SqlValidator(mock_store)
+
+
+@pytest.fixture(scope="session")
 def mock_db() -> Path:
     """完整的模拟专题库
 

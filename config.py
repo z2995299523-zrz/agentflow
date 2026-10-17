@@ -52,6 +52,12 @@ CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
 # ============================================
 # 专题库资料目录（四张清单、加工脚本、样例）。切换到真实资料只改这一项
 MART_DIR = os.getenv("MART_DIR", "./data/mock_mart")
+# 生成 SQL 的方言：postgres（GaussDB 与 PostgreSQL 共有的语法）
+SQL_DIALECT = os.getenv("SQL_DIALECT", "postgres")
+# 执行层：none 只生成不执行；duckdb 在模拟专题库上只读执行
+EXECUTOR = os.getenv("EXECUTOR", "none")
+# 查询流水线单次模型调用的超时，秒
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "120"))
 
 # ============================================
 # 服务配置
@@ -65,10 +71,13 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
 
 
-def get_llm_kwargs():
+def get_llm_kwargs(temperature: float | None = None):
     """
     获取 LLM 初始化参数
     日常开发默认用 DeepSeek（便宜），可通过 .env 切换 OpenAI
+
+    Args:
+        temperature: 温度。None 时用 0.7（旧模块的默认值）；查询流水线传 0
     """
     provider = LLM_PROVIDER
 
@@ -95,7 +104,7 @@ def get_llm_kwargs():
     kwargs = {
         "model": model,
         "api_key": api_key,
-        "temperature": 0.7,
+        "temperature": 0.7 if temperature is None else temperature,
     }
     if base_url:
         kwargs["base_url"] = base_url
