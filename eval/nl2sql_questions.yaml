@@ -12,9 +12,16 @@
 #   gold_tables   标准用表
 #   gold_columns  关键字段
 #   gold_sql      标准 SQL（追问题是第二轮的标准 SQL）
+#   alternatives  其它正确写法（可选）：sql 是另一种写法，columns 是这种写法的关键字段（写成 表.字段，空表示同 gold_columns）。
+#                 评估时选表、字段按标准答案和各条其它写法中的任一组算对；每条都要在模拟库上与标准 SQL 结果一致、
+#                 能通过静态校验，由 tests/test_questions.py 保证。
+#                 用机构汇总表（ads.org_corp_dep_bal_d）答的题，客户汇总表（ads.corp_cust_dep_bal_d）按机构 GROUP BY
+#                 也能得到同样的结果，所以这 10 道题都登记了客户汇总表的写法。
 #
 # 有涉及维度列的题目，题面里都写明了要列出哪些列，避免因为多列少列产生争议。
 # 比率类的题，题面要写明「用百分比表示并保留两位小数」：比对时数值按两位小数取整，小于 1 的比率会失去区分度。
+# 条件要在数据里真的起作用：错误写法（漏条件、换字段）的结果要和标准答案不同，由 tests/test_questions.py 里的区分度测试保证。
+# 已知的例外：U05 的 cust_type 条件在模拟数据里不起作用，见评估报告的局限。
 
 # ═══════════════ 基础时点余额：单表、口径明确 ═══════════════
 
@@ -50,6 +57,12 @@
     SELECT SUM(margin_bal_rmb) AS margin_bal_rmb
     FROM ads.org_corp_dep_bal_d
     WHERE data_dt = DATE '2026-09-30'
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.margin_bal_rmb]
+      sql: |
+        SELECT SUM(margin_bal_rmb) AS margin_bal_rmb
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt = DATE '2026-09-30'
 
 - id: B04
   category: 基础时点余额
@@ -86,6 +99,15 @@
     FROM ads.org_corp_dep_bal_d
     WHERE data_dt = DATE '2026-09-30'
       AND org_no = '1101'
+  alternatives:
+    # 机构汇总表的有余额客户数，就是客户汇总表里全口径存款余额大于零的客户在本机构内去重
+    - columns: [ads.corp_cust_dep_bal_d.cust_no, ads.corp_cust_dep_bal_d.org_no, ads.corp_cust_dep_bal_d.dep_bal_tot_rmb]
+      sql: |
+        SELECT COUNT(DISTINCT cust_no) AS dep_cust_cnt
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt = DATE '2026-09-30'
+          AND org_no = '1101'
+          AND dep_bal_tot_rmb > 0
 
 - id: B07
   category: 基础时点余额
@@ -121,6 +143,12 @@
     SELECT SUM(dep_bal_rmb) AS dep_bal_rmb
     FROM ads.org_corp_dep_bal_d
     WHERE data_dt = DATE '2026-09-30'
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb]
+      sql: |
+        SELECT SUM(dep_bal_rmb) AS dep_bal_rmb
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt = DATE '2026-09-30'
 
 - id: K02
   category: 口径区分
@@ -132,6 +160,12 @@
     SELECT SUM(dep_bal_tot_rmb) AS dep_bal_tot_rmb
     FROM ads.org_corp_dep_bal_d
     WHERE data_dt = DATE '2026-09-30'
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.dep_bal_tot_rmb]
+      sql: |
+        SELECT SUM(dep_bal_tot_rmb) AS dep_bal_tot_rmb
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt = DATE '2026-09-30'
 
 - id: K03
   category: 口径区分
@@ -143,6 +177,13 @@
     SELECT org_no, dep_bal_rmb, margin_bal_rmb
     FROM ads.org_corp_dep_bal_d
     WHERE data_dt = DATE '2026-09-30'
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb, ads.corp_cust_dep_bal_d.margin_bal_rmb, ads.corp_cust_dep_bal_d.org_no]
+      sql: |
+        SELECT org_no, SUM(dep_bal_rmb) AS dep_bal_rmb, SUM(margin_bal_rmb) AS margin_bal_rmb
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt = DATE '2026-09-30'
+        GROUP BY org_no
 
 - id: K04
   category: 口径区分
@@ -168,7 +209,11 @@
 
 - id: K06
   category: 口径区分
-  turns: ["查 2026 年 9 月末全行全口径存款余额大于零的对公客户数，同一客户在多个机构开户只算一次"]
+  # 门槛取 100 万元而不是零：模拟数据里没有余额不超过零的记录，「大于零」去不掉任何一条，
+  # 漏掉条件、换成不含保证金的字段都会得到同样的 120（正好是客户维表的行数）。
+  # 100 万元时标准答案 96，去掉条件 120、换不含保证金的字段 94、不按客户去重 102，彼此都不同。
+  # 「按每个开户机构的记录分别判断」写明余额是逐条记录比、不是先按客户汇总再比，免得两种读法都说得通。
+  turns: ["查 2026 年 9 月末全行全口径存款余额大于 100 万元的对公客户数，余额按客户在每个开户机构的记录分别判断，同一客户在多个机构开户只算一次"]
   expect: sql
   gold_tables: [ads.corp_cust_dep_bal_d]
   gold_columns: [ads.corp_cust_dep_bal_d.cust_no, ads.corp_cust_dep_bal_d.dep_bal_tot_rmb]
@@ -176,7 +221,7 @@
     SELECT COUNT(DISTINCT cust_no) AS cust_cnt
     FROM ads.corp_cust_dep_bal_d
     WHERE data_dt = DATE '2026-09-30'
-      AND dep_bal_tot_rmb > 0
+      AND dep_bal_tot_rmb > 1000000
 
 # ═══════════════ 维度关联：要关联维表，并注意粒度 ═══════════════
 
@@ -192,6 +237,14 @@
     JOIN dim.org o ON b.org_no = o.org_no
     WHERE b.data_dt = DATE '2026-09-30'
     GROUP BY o.lvl1_org_nm
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb, dim.org.lvl1_org_nm]
+      sql: |
+        SELECT o.lvl1_org_nm, SUM(b.dep_bal_rmb) AS dep_bal_rmb
+        FROM ads.corp_cust_dep_bal_d b
+        JOIN dim.org o ON b.org_no = o.org_no
+        WHERE b.data_dt = DATE '2026-09-30'
+        GROUP BY o.lvl1_org_nm
 
 - id: D02
   category: 维度关联
@@ -291,6 +344,13 @@
          - SUM(CASE WHEN data_dt = DATE '2025-12-31' THEN dep_bal_rmb ELSE 0 END) AS dep_bal_inc
     FROM ads.org_corp_dep_bal_d
     WHERE data_dt IN (DATE '2026-09-30', DATE '2025-12-31')
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb, ads.corp_cust_dep_bal_d.data_dt]
+      sql: |
+        SELECT SUM(CASE WHEN data_dt = DATE '2026-09-30' THEN dep_bal_rmb ELSE 0 END)
+             - SUM(CASE WHEN data_dt = DATE '2025-12-31' THEN dep_bal_rmb ELSE 0 END) AS dep_bal_inc
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt IN (DATE '2026-09-30', DATE '2025-12-31')
 
 - id: T03
   category: 时间口径
@@ -302,6 +362,13 @@
     SELECT org_no, ytd_avg_bal_rmb
     FROM ads.org_corp_dep_bal_d
     WHERE data_dt = DATE '2026-09-30'
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.ytd_avg_bal_rmb, ads.corp_cust_dep_bal_d.org_no]
+      sql: |
+        SELECT org_no, SUM(ytd_avg_bal_rmb) AS ytd_avg_bal_rmb
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt = DATE '2026-09-30'
+        GROUP BY org_no
 
 - id: T04
   category: 时间口径
@@ -437,6 +504,14 @@
     JOIN dim.org o ON b.org_no = o.org_no
     WHERE b.data_dt = DATE '2026-09-30'
     GROUP BY o.lvl1_org_nm
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.dep_bal_rmb, dim.org.lvl1_org_nm]
+      sql: |
+        SELECT o.lvl1_org_nm, SUM(b.dep_bal_rmb) AS dep_bal_rmb
+        FROM ads.corp_cust_dep_bal_d b
+        JOIN dim.org o ON b.org_no = o.org_no
+        WHERE b.data_dt = DATE '2026-09-30'
+        GROUP BY o.lvl1_org_nm
 
 - id: F02
   category: 追问
@@ -465,6 +540,13 @@
     SELECT org_no, dep_bal_tot_rmb
     FROM ads.org_corp_dep_bal_d
     WHERE data_dt = DATE '2026-09-30'
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.dep_bal_tot_rmb, ads.corp_cust_dep_bal_d.org_no]
+      sql: |
+        SELECT org_no, SUM(dep_bal_tot_rmb) AS dep_bal_tot_rmb
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt = DATE '2026-09-30'
+        GROUP BY org_no
 
 - id: F04
   category: 追问
