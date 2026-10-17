@@ -3,12 +3,28 @@
 把本轮输入（连同上一轮的完整需求、上一轮的反问）解析成结构化的需求：是不是查数需求、完整需求复述、
 指标（计数类带被计数的实体）、维度、过滤、排序与条数、时间（相对日期按「今天」换算）、口径线索、子问题、假设。
 """
-from collections.abc import Sequence
+import re
+from collections.abc import Iterable, Sequence
 from datetime import date
 
-from nl2sql.llm import LLMClient
+from nl2sql.llm import LLMClient, structured_call
 from nl2sql.retriever import RecallQuery
-from nl2sql.schemas import CallRecord, ParsedRequest, QueryRequest
+from nl2sql.schemas import CallRecord, ParsedRequest, QueryRequest, TimeSpec
+from prompts.nl2sql import parser_messages
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# 每种时间类型要几个日期，和写给模型看的说法
+_DATE_COUNTS = {"none": 0, "point": 1, "daily_avg": 1, "range": 2}
+_DATE_MEANINGS = {
+    "point": "时点日期",
+    "daily_avg": "日均的截止日期",
+    "range": "起、止两个日期 [起, 止]（含两端）",
+}
+_COMPARE_HINTS = {
+    "prev_year_end": "较年初要写当期所在年份的上一年 12 月 31 日",
+    "prev_month_end": "较上月末要写当期日期的上一个月的最后一天",
+    "other": "要写对比的日期",
+}
 
 
 def parse_request(llm: LLMClient, request: QueryRequest, today: date) -> tuple[ParsedRequest, list[CallRecord]]:
@@ -25,12 +41,72 @@ def parse_request(llm: LLMClient, request: QueryRequest, today: date) -> tuple[P
     Raises:
         StepError: 模型调用失败，或者两次输出都不合格
     """
-    raise NotImplementedError("由 W1-B 实现")
+    return structured_call(llm, "parse", parser_messages(request, today), ParsedRequest, check_parsed)
+
+
+def _valid_date(text: str) -> bool:
+    """是不是合法的 YYYY-MM-DD：格式严格（月、日两位），日期要真实存在"""
+    if _ISO_DATE.fullmatch(text) is None:
+        return False
+    try:
+        date(int(text[:4]), int(text[5:7]), int(text[8:]))
+    except ValueError:
+        return False
+    return True
+
+
+def _check_time(time: TimeSpec) -> list[str]:
+    """核对时间要素：日期格式、日期个数、区间的起止顺序、对比日期"""
+    problems = []
+    for label, values in (("time.dates", time.dates), ("time.compare_dates", time.compare_dates)):
+        for index, value in enumerate(values):
+            if not _valid_date(value):
+                problems.append(f"{label}[{index}] 的值「{value}」不是合法的 YYYY-MM-DD 日期，"
+                                "请按「今天」换算成具体日期，例如 2026-09-30")
+    expected = _DATE_COUNTS[time.kind]
+    if len(time.dates) != expected:
+        if time.kind == "none":
+            problems.append(f"time.kind 是 none（不限定日期）时 time.dates 必须为空，现在有 {len(time.dates)} 个；"
+                            "需求里有具体日期的话，请把 kind 改成 point（时点）或 range（区间）")
+        else:
+            problems.append(f"time.kind 是 {time.kind} 时 time.dates 必须正好 {expected} 个日期（{_DATE_MEANINGS[time.kind]}），"
+                            f"现在有 {len(time.dates)} 个；请按「今天」把相对日期换算成 YYYY-MM-DD")
+    elif time.kind == "range" and all(_valid_date(value) for value in time.dates) and time.dates[0] > time.dates[1]:
+        problems.append(f"time.dates 的起 {time.dates[0]} 晚于止 {time.dates[1]}，请调换顺序，写成 [起, 止]")
+    if time.compare != "none" and not time.compare_dates:
+        problems.append(f"time.compare 是 {time.compare} 时必须在 time.compare_dates 里写对比日期（{_COMPARE_HINTS[time.compare]}）；"
+                        "没有对比就把 compare 改成 none")
+    return problems
 
 
 def check_parsed(parsed: ParsedRequest) -> list[str]:
-    """核对解析结果，返回能直接告诉模型怎么改的问题；合格时返回空列表"""
-    raise NotImplementedError("由 W1-B 实现")
+    """核对解析结果，返回能直接告诉模型怎么改的问题；合格时返回空列表
+
+    是查数需求时：完整需求非空，至少一个指标，日期合法、个数与时间类型相符，有对比时对比日期非空。
+    不是查数需求时：回复非空。
+    """
+    if not parsed.is_query:
+        if parsed.reply.strip():
+            return []
+        return ["is_query 是 false 时必须在 reply 里写给用户的回复，说明这个工具能做什么、请用户怎么提问"]
+    problems = []
+    if not parsed.requirement.strip():
+        problems.append("requirement 是空的，请用一句自包含的话复述完整需求"
+                        "（日期写成具体日期，口径限定词和要列出的列都保留）")
+    if not any(metric.name.strip() for metric in parsed.metrics):
+        problems.append("metrics 里没有指标，至少要写一个指标（业务叫法，如「对公贷款余额」；明细查询写最主要的度量字段）；"
+                        "如果用户连要查什么指标都没说，请把 is_query 改成 false，在 reply 里请用户补充")
+    return problems + _check_time(parsed.time)
+
+
+def _dedupe(terms: Iterable[str]) -> list[str]:
+    """去首尾空白、去掉空串、保序去重"""
+    seen: dict[str, None] = {}
+    for term in terms:
+        text = term.strip()
+        if text:
+            seen.setdefault(text)
+    return list(seen)
 
 
 def to_recall_query(parsed: ParsedRequest, extra_terms: Sequence[str] = ()) -> RecallQuery:
@@ -46,4 +122,6 @@ def to_recall_query(parsed: ParsedRequest, extra_terms: Sequence[str] = ()) -> R
     Returns:
         召回的输入
     """
-    raise NotImplementedError("由 W1-B 实现")
+    metrics = _dedupe([m.name for m in parsed.metrics] + [m.entity for m in parsed.metrics] + list(extra_terms))
+    return RecallQuery(requirement=parsed.requirement, metrics=metrics, dimensions=_dedupe(parsed.dimensions),
+                       filters=_dedupe(item.field for item in parsed.filters))
