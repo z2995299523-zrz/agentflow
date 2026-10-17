@@ -1,0 +1,159 @@
+# 模拟专题库 35 道出 SQL 的题的召回检索词（手写）
+#
+# 写法模仿「需求解析」那一步会给出的要素：指标、维度、过滤都写成字段的叫法，不带日期和取值。
+# 与题库里题面的对应关系：
+#   id           题号
+#   requirement  只有追问题要写：第二轮之后的完整需求（用来找相似样例）；其余题用题库里的首轮问题
+#   level        上溯层数，不写就是 0。大于 0 时先在第 0 层召回，再以第 0 层的候选表为起点上溯
+#   metrics / dimensions / filters   指标、维度、过滤
+
+# ═══════════════ 基础时点余额 ═══════════════
+
+- id: B01
+  metrics: [对公贷款余额]
+
+- id: B02
+  metrics: [对公不良贷款余额]
+
+- id: B03
+  metrics: [对公保证金存款余额]
+
+- id: B04
+  metrics: [对公贷款余额]
+  filters: [客户号]
+
+- id: B05
+  metrics: [对公贷款余额]
+  dimensions: [放款机构, 机构号]
+
+- id: B06
+  metrics: [有余额对公客户数]
+  filters: [机构号]
+
+- id: B07
+  metrics: [对公贷款借据笔数]
+
+- id: B08
+  metrics: [对公活期存款余额]
+
+# ═══════════════ 口径区分 ═══════════════
+
+- id: K01
+  metrics: [不含保证金的对公存款余额]
+
+- id: K02
+  metrics: [含保证金的对公存款余额]
+
+- id: K03
+  metrics: [不含保证金的存款余额, 保证金存款余额]
+  dimensions: [开户机构, 机构号]
+
+- id: K04
+  metrics: [对公定期存款余额]
+
+- id: K05
+  metrics: [对公贷款不良率]
+
+- id: K06
+  metrics: [对公客户数]
+  filters: [全口径存款余额]
+
+# ═══════════════ 维度关联 ═══════════════
+
+- id: D01
+  metrics: [不含保证金的对公存款余额]
+  dimensions: [一级分行名称]
+
+- id: D02
+  metrics: [不含保证金的对公存款余额]
+  dimensions: [行业名称]
+
+- id: D03
+  metrics: [不含保证金的存款余额]
+  dimensions: [客户号, 客户名称]
+
+- id: D04
+  metrics: [对公贷款余额]
+  dimensions: [企业规模, 规模名称]
+
+- id: D05
+  metrics: [对公贷款余额]
+  dimensions: [二级分行名称]
+
+- id: D06
+  metrics: [不含保证金的对公存款余额]
+  filters: [一级分行名称, 行业名称]
+
+# ═══════════════ 时间口径 ═══════════════
+
+- id: T01
+  metrics: [对公贷款余额]
+  dimensions: [一级分行名称]
+
+- id: T02
+  metrics: [不含保证金的对公存款余额]
+
+- id: T03
+  metrics: [不含保证金的对公存款年日均余额]
+  dimensions: [开户机构, 机构号]
+
+- id: T04
+  metrics: [不含保证金的对公存款月日均余额]
+
+- id: T05
+  metrics: [对公贷款余额]
+
+# ═══════════════ 向上溯源 ═══════════════
+
+- id: U01
+  level: 1
+  metrics: [不含保证金的对公存款原币余额]
+  dimensions: [币种代码]
+
+- id: U02
+  level: 1
+  metrics: [对公贷款余额]
+  dimensions: [贷款产品, 产品代码]
+
+- id: U03
+  level: 1
+  metrics: [对公贷款余额]
+  dimensions: [五级分类代码]
+
+- id: U04
+  level: 1
+  metrics: [折人民币余额]
+  dimensions: [账号, 币种代码, 是否保证金]
+  filters: [客户号]
+
+- id: U05
+  level: 2
+  metrics: [对公存款账户数]
+  filters: [账户状态]
+
+# ═══════════════ 追问（用第二轮之后的完整需求） ═══════════════
+
+- id: F01
+  requirement: 查 2026 年 9 月末全行不含保证金的对公存款余额，按一级分行拆开，列出一级分行名称和余额
+  metrics: [不含保证金的对公存款余额]
+  dimensions: [一级分行名称]
+
+- id: F02
+  requirement: 查 2026 年 6 月末各行业的对公贷款余额，列出行业名称和余额
+  metrics: [对公贷款余额]
+  dimensions: [行业名称]
+
+- id: F03
+  requirement: 查 2026 年 9 月末各开户机构含保证金的对公存款余额，列出机构号和余额
+  metrics: [含保证金的对公存款余额]
+  dimensions: [开户机构, 机构号]
+
+- id: F04
+  requirement: 查 2026 年 9 月末不含保证金存款余额最高的 10 个制造业对公客户，列出客户名称和余额，按余额从高到低排列
+  metrics: [不含保证金的存款余额]
+  dimensions: [客户名称]
+  filters: [行业]
+
+- id: F05
+  requirement: 查 2026 年 9 月末全行对公不良贷款余额
+  metrics: [对公不良贷款余额]

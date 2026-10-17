@@ -1,0 +1,342 @@
+"""候选召回的测试：三层范围、上游表和样例带入的表不占名额、二元组关键字匹配、两路 RRF 合并、
+通用字段与恒为空字段的排除、向量器不一致时的退化、同分时的先后、结果确定，以及模拟题的召回率
+
+全部用哈希向量器，不加载 BGE，也不引用真实专题库。
+"""
+import json
+import os
+import subprocess
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
+import pytest
+import yaml
+
+from eval.questions import load_questions
+from lineage.graph import LineageGraph
+from metadata.importer import enrich_mart, load_mart
+from metadata.index import HashEmbedder, build_vectors
+from metadata.models import ColumnMeta, Example, LineageEdge, Mart, ScriptColumn, TableMeta
+from metadata.store import MetadataStore
+from nl2sql.retriever import MAX_EXAMPLES, MAX_HITS_PER_TABLE, MAX_TABLES, RecallQuery, Retriever
+
+ROOT = Path(__file__).resolve().parents[1]
+MOCK_MART_DIR = ROOT / "data" / "mock_mart"
+RECALL_TERMS = Path(__file__).parent / "data" / "recall_terms.yaml"
+MIN_RECALLED_QUESTIONS = 32          # 35 道出 SQL 的题里，标准用表全部进了候选的题数不能低于它
+SCHEMA_LAYER = {"ads": "专题层", "zt": "专题层", "dwd": "整合层", "dim": "整合层", "ods": "贴源层"}
+
+# 子进程里跑的脚本：在模拟库上召回两次，把结果打印成 JSON。换 PYTHONHASHSEED 重复跑，结果必须逐字相同
+CHILD_SCRIPT = """
+import json, os, sys
+os.environ["METADATA_EMBEDDER"] = "hash"
+from dataclasses import asdict
+from pathlib import Path
+from lineage.graph import LineageGraph
+from metadata.importer import enrich_mart, load_mart
+from metadata.index import HashEmbedder, build_vectors
+from metadata.store import MetadataStore
+from nl2sql.retriever import RecallQuery, Retriever
+
+root = Path(sys.argv[1])
+mart, _ = load_mart(root)
+mart, _, _ = enrich_mart(mart, root)
+embedder = HashEmbedder()
+store = MetadataStore.from_mart(mart, build_vectors(mart, embedder)[0])
+retriever = Retriever(store, LineageGraph(store), embedder)
+query = RecallQuery("2026 年 6 月末对公存款账户按币种统计账户数和折人民币余额", ["对公存款余额", "账户数"], ["币种代码"], ["客户号"])
+first = retriever.recall(query)
+second = retriever.recall(query, 1, [item.table_id for item in first.tables])
+print(json.dumps([asdict(first), asdict(second)], ensure_ascii=True))
+"""
+
+
+# ── 构造资料的工具 ──────────────────────────────────────
+
+def make_mart(tables: list[tuple], edges: list[LineageEdge] = (), script_columns: list[ScriptColumn] = (),
+              examples: list[Example] = ()) -> Mart:
+    """手写的小资料：tables 是 (表标识, 表中文名, [(字段名, 字段中文名)], 表类型, 数据日期字段)，后两项可省"""
+    metas, columns = [], []
+    for table_id, table_cn, fields, *rest in tables:
+        schema, name = table_id.split(".")
+        table_type = rest[0] if rest else ("维表" if schema == "dim" else "快照表")
+        metas.append(TableMeta(table_id=table_id, layer=SCHEMA_LAYER[schema], schema_name=schema, table_name=name,
+                               table_cn=table_cn, table_type=table_type, grain_columns=[],
+                               date_column=rest[1] if len(rest) > 1 else None))
+        columns += [ColumnMeta(table_id=table_id, column_name=column, ordinal=number, column_cn=column_cn)
+                    for number, (column, column_cn) in enumerate(fields, 1)]
+    return Mart(tables=metas, columns=columns, lineage=list(edges), script_columns=list(script_columns),
+                examples=list(examples))
+
+
+def make_store(mart: Mart, with_vectors: bool = True) -> tuple[MetadataStore, LineageGraph]:
+    """由资料建只读入口和血缘图；向量由哈希向量器算"""
+    store = MetadataStore.from_mart(mart, build_vectors(mart, HashEmbedder())[0] if with_vectors else None)
+    return store, LineageGraph(store)
+
+
+def make_retriever(mart: Mart, with_embedder: bool = True) -> Retriever:
+    """哈希向量建库、哈希向量器检索；with_embedder 为 False 时不传向量器，只走关键字路"""
+    store, graph = make_store(mart)
+    return Retriever(store, graph, HashEmbedder() if with_embedder else None)
+
+
+def hit_names(result) -> set[str]:
+    """候选表里所有命中字段的字段名"""
+    return {hit.column_name for item in result.tables for hit in item.hits}
+
+
+@pytest.fixture(scope="module")
+def mock_mart() -> Mart:
+    """模拟专题库补全之后（41 条关联、12 条样例）的资料"""
+    mart, _ = load_mart(MOCK_MART_DIR)
+    return enrich_mart(mart, MOCK_MART_DIR)[0]
+
+
+@pytest.fixture(scope="module")
+def mock_parts(mock_mart) -> tuple[MetadataStore, LineageGraph]:
+    """模拟专题库带哈希向量的只读入口和血缘图"""
+    return make_store(mock_mart)
+
+
+@pytest.fixture(scope="module")
+def mock_retriever(mock_parts) -> Retriever:
+    return Retriever(*mock_parts, HashEmbedder())
+
+
+# ── 范围 ──────────────────────────────────────
+
+def test_scope_grows_with_the_upstream_layers(mock_retriever):
+    base = ["ads.corp_cust_loan_bal_d"]
+    level0, upstream0 = mock_retriever.scope_tables(0)
+    assert level0 == ["ads.corp_cust_dep_bal_d", "ads.corp_cust_loan_bal_d", "ads.org_corp_dep_bal_d",
+                      "dim.corp_cust", "dim.org"]                      # 专题层全部表加整合层的维表
+    assert upstream0 == []
+
+    level1, upstream1 = mock_retriever.scope_tables(1, base)
+    assert upstream1 == ["dim.corp_cust", "dwd.corp_loan_duebill_d"]    # 只有整合层，且只有这张贷款表的上游
+    assert level1 == level0 + ["dwd.corp_loan_duebill_d"]              # 维表本来就在第 0 层里，不重复
+
+    level2, upstream2 = mock_retriever.scope_tables(2, base)
+    assert upstream2[:2] == upstream1                                      # 近的在前：整合层的两张
+    assert set(upstream2[2:]) == {"ods.ecif_corp_cust", "ods.industry_dict", "ods.core_loan_duebill",
+                                  "ods.exch_rate"}                         # 再加贴源层
+    assert not {"ods.core_dep_acct", "dwd.corp_dep_acct_d"} & set(level2)  # 存款那条线不在这张表的上游里
+    assert level2 == level0 + upstream2[1:]
+
+
+def test_dimension_tables_are_not_climbed_and_bad_arguments_are_rejected(mock_retriever):
+    assert mock_retriever.scope_tables(2, ["dim.org"]) == (mock_retriever.scope_tables(0)[0], [])
+    for level in (1, 2):
+        with pytest.raises(ValueError, match="base_tables"):
+            mock_retriever.recall(RecallQuery("x", ["存款余额"]), level)
+    with pytest.raises(ValueError):
+        mock_retriever.scope_tables(3, ["ads.org_corp_dep_bal_d"])
+
+
+# ── 名额 ──────────────────────────────────────
+
+def ten_table_mart(carriers: int = 10) -> Mart:
+    """10 张专题层表、1 张整合层上游表、1 张贴源层上游表、1 张只有样例用到的贴源层表
+
+    t01 有 7 个字段都对得上「存款金额」，其余每张表 1 个（名字一样长，同分时按字段编号，t01 排在最前）；
+    carriers 张表带样板字段「时间-年」。
+    """
+    tables = []
+    for number in range(1, 11):
+        fields = [("org_no", "机构号")]
+        if number <= carriers:
+            fields.append(("time_year", "时间-年"))
+        fields += ([(f"amt_{i}", f"存款金额{cn}") for i, cn in enumerate("一二三四五六七", 1)]
+                   if number == 1 else [("amt", "存款金额一")])
+        tables.append((f"ads.t{number:02d}", "存款汇总", fields))
+    tables += [("dwd.src", "存款明细", [("amt", "存款金额")]), ("ods.raw", "存款原始", [("amt", "存款金额")]),
+               ("ods.other", "其他", [("amt", "存款金额")])]
+    edges = [LineageEdge(target_table="ads.t01", target_column="amt_1", source_table="dwd.src", source_column="amt"),
+             LineageEdge(target_table="dwd.src", target_column="amt", source_table="ods.raw", source_column="amt")]
+    example = Example(example_id="demo.sql#1", requirement="存款金额汇总统计", sql_text="SELECT 1",
+                      tables=["ods.other"], source_file="demo.sql", line_no=1)
+    return make_mart(tables, edges, examples=[example])
+
+
+def test_at_most_eight_tables_and_upstream_and_example_tables_take_no_slot():
+    retriever = make_retriever(ten_table_mart())
+    result = retriever.recall(RecallQuery("存款金额汇总统计", ["存款金额"]), 1, ["ads.t01"])
+    assert [item.reason for item in result.tables] == ["recall"] * MAX_TABLES + ["upstream", "example"]
+    assert result.tables[-2].table_id == "dwd.src" and result.tables[-2].hits     # 上游表在自己的范围里找命中字段
+    assert result.tables[-1].table_id == "ods.other" and result.tables[-1].hits == []
+    assert result.examples[0].example_id == "demo.sql#1"
+    scores = [item.score for item in result.tables[:MAX_TABLES]]
+    assert scores == sorted(scores, reverse=True)
+    assert max(len(item.hits) for item in result.tables) == MAX_HITS_PER_TABLE    # t01 有 7 个字段命中，只列 5 个
+    # 上溯只往后追加：专题层这 8 张表的先后和得分，与不上溯时完全一样
+    level0 = retriever.recall(RecallQuery("存款金额汇总统计", ["存款金额"]))
+    assert [(item.table_id, item.score) for item in result.tables[:MAX_TABLES]] == [
+        (item.table_id, item.score) for item in level0.tables if item.reason == "recall"]
+    assert result.scope_size == 11 and result.scope_level == 1
+
+
+# ── 关键字路 ──────────────────────────────────────
+
+def test_keyword_route_ranks_by_bigram_coverage_not_by_substring():
+    mart = make_mart([("ads.loan", "贷款汇总", [("a", "贷款余额"), ("b", "贷款利率"), ("c", "存款余额")])])
+    result = make_retriever(mart, with_embedder=False).recall(RecallQuery("x", ["贷款余额"]))
+    hits = result.tables[0].hits
+    assert [hit.column_name for hit in hits] == ["a", "c", "b"]         # 覆盖 3/3 加子串分、2/3、1/3
+    assert all(hit.via == ("keyword",) for hit in hits)
+
+
+def test_keyword_route_matches_english_words_after_nfkc():
+    mart = make_mart([("ads.acct", "账户汇总", [("org_no", "机构号"), ("cust_no", "客户号"), ("bal", "余额")])])
+    retriever = make_retriever(mart, with_embedder=False)
+    for term in ("ORG_NO", "ＯＲＧ＿ＮＯ"):                                # 大写、全角都归一成 org_no
+        hits = retriever.recall(RecallQuery("x", [term])).tables[0].hits
+        assert hits[0].column_name == "org_no" and hits[0].via == ("keyword",)
+
+
+# ── 两路合并 ──────────────────────────────────────
+
+def test_two_routes_are_merged_with_rrf_and_role_weights(mock_parts):
+    store, graph = mock_parts
+    both, keyword_only = Retriever(store, graph, HashEmbedder()), Retriever(store, graph, None)
+    for retriever, routes, expected in ((both, ("vector", "keyword"), 2 / 61), (keyword_only, ("keyword",), 1 / 61)):
+        for role, weight in (("metrics", 1.0), ("dimensions", 0.7), ("filters", 0.5)):
+            query = RecallQuery("x", **{"metrics": [], role: ["不良贷款余额"]})
+            top = retriever.recall(query).tables[0].hits[0]
+            assert (top.column_name, top.via) == ("npl_bal_rmb", routes)    # 两路都排第一：1/61 + 1/61
+            assert top.score == pytest.approx(weight * expected)
+
+
+# ── 排除 ──────────────────────────────────────
+
+def test_columns_that_are_always_null_or_etl_time_are_not_recalled():
+    tables = [("ads.bal", "余额汇总", [("bal_a", "存款余额"), ("bal_b", "存款余额备用"), ("load_tm", "存款加工时间")])]
+    kinds = {"bal_a": "null", "bal_b": "derived", "load_tm": "etl_time"}
+    script_columns = [ScriptColumn(script_name="s.sql", stmt_index=1, target_table="ads.bal", target_column=column,
+                                   expression="x", kind=kind) for column, kind in kinds.items()]
+    query = RecallQuery("x", ["存款余额"])
+    assert hit_names(make_retriever(make_mart(tables)).recall(query)) == {"bal_a", "bal_b", "load_tm"}
+    result = make_retriever(make_mart(tables, script_columns=script_columns)).recall(query)
+    assert hit_names(result) == {"bal_b"}
+
+
+def test_generic_fields_only_count_when_the_term_names_them():
+    fields = [("data_dt", "数据日期"), ("etl_dt", "数据日期"), ("id", "主键"), ("dep_amt", "存款金额"), ("note", "备注")]
+    retriever = make_retriever(make_mart([("ads.dep", "客户存款汇总", fields, "快照表", "data_dt")]))
+    # 检索词恰好是表名：表名给每个字段都加分，但数据日期（登记的、只靠中文名认出的）和通用键名不计分
+    assert hit_names(retriever.recall(RecallQuery("x", ["客户存款汇总"]))) == {"dep_amt", "note"}
+    assert {"data_dt", "etl_dt"} <= hit_names(retriever.recall(RecallQuery("x", ["数据日期"])))
+    assert "id" in hit_names(retriever.recall(RecallQuery("x", ["主键"])))
+
+
+def test_boilerplate_fields_of_a_layer_are_treated_as_generic():
+    query = RecallQuery("存款金额汇总统计", ["存款金额"])
+    everywhere = make_retriever(ten_table_mart(carriers=10)).recall(query)    # 10 张专题层表全都有「时间-年」
+    assert "time_year" not in hit_names(everywhere)
+    few = make_retriever(ten_table_mart(carriers=5)).recall(query)            # 只有一半的表有，达不到样板的标准
+    assert "time_year" in hit_names(few)
+
+
+# ── 向量器 ──────────────────────────────────────
+
+def test_a_different_embedder_with_the_same_dimension_is_never_mixed_in(mock_parts):
+    store, graph = mock_parts
+    query = RecallQuery("x", ["不良贷款余额"])
+    other = HashEmbedder()
+    other.name = "other-512"                                               # 同为 512 维，混用不会报错
+    result = Retriever(store, graph, other).recall(query)
+    assert result.notes and "hash-bigram-512" in result.notes[0] and "other-512" in result.notes[0]
+    assert {hit.via for item in result.tables for hit in item.hits} == {("keyword",)}
+    assert any("vector" in hit.via for item in Retriever(store, graph, HashEmbedder()).recall(query).tables
+               for hit in item.hits)
+
+
+def test_without_vectors_or_embedder_only_the_keyword_route_runs_and_says_why(mock_parts, mock_mart):
+    store, graph = mock_parts
+    query = RecallQuery("x", ["不良贷款余额"])
+    no_embedder = Retriever(store, graph, None).recall(query)
+    assert "没有传入向量器" in no_embedder.notes[0]
+    bare_store, bare_graph = make_store(mock_mart, with_vectors=False)
+    no_vectors = Retriever(bare_store, bare_graph, HashEmbedder()).recall(query)
+    assert "没有字段向量" in no_vectors.notes[0]
+    for result in (no_embedder, no_vectors):
+        assert {hit.via for item in result.tables for hit in item.hits} == {("keyword",)}
+
+
+# ── 样例 ──────────────────────────────────────
+
+def test_similar_examples_bring_their_tables_in(mock_parts):
+    store, graph = mock_parts
+    example = next(item for item in store.examples() if item.example_id == "03_上溯整合层.sql#1")
+    query = RecallQuery(example.requirement, ["折人民币余额"], ["币种代码"])
+    for embedder in (HashEmbedder(), None):                                # 没有向量时只用 Jaccard，也能找到
+        result = Retriever(store, graph, embedder).recall(query)
+        assert result.examples[0].example_id == example.example_id
+        assert len(result.examples) <= MAX_EXAMPLES
+        brought = next(item for item in result.tables if item.table_id == "dwd.corp_dep_acct_d")
+        assert brought.reason == "example"                                 # 第 0 层范围之外，是样例把它带进来的
+    assert Retriever(store, graph, None).recall(RecallQuery("zzqq", ["zzqq"])).examples == []
+
+
+# ── 先后与确定性 ──────────────────────────────────────
+
+def tie_mart(first: str, second: str) -> Mart:
+    """两张表对两个检索词的名次正好对调，得分完全相同"""
+    return make_mart([(first, "汇总表", [("p", "甲指标"), ("q", "乙指标项")]),
+                      (second, "汇总表", [("p", "甲指标项"), ("q", "乙指标")])])
+
+
+def test_equal_scores_fall_back_to_layer_then_table_id():
+    query = RecallQuery("x", ["甲指标", "乙指标"])
+    same_layer = make_retriever(tie_mart("ads.n", "ads.m"), with_embedder=False).recall(query)
+    assert [item.table_id for item in same_layer.tables] == ["ads.m", "ads.n"]
+    assert same_layer.tables[0].score == pytest.approx(same_layer.tables[1].score)
+    # 层级高的在前，哪怕表标识排在后面
+    mixed = make_retriever(tie_mart("dim.a", "zt.m"), with_embedder=False).recall(query)
+    assert [item.table_id for item in mixed.tables] == ["zt.m", "dim.a"]
+
+
+def test_results_do_not_depend_on_the_hash_seed():
+    outputs = []
+    for seed in ("1", "2"):
+        done = subprocess.run([sys.executable, "-c", CHILD_SCRIPT, str(MOCK_MART_DIR)], cwd=ROOT, encoding="utf-8",
+                              errors="replace", capture_output=True, env={**os.environ, "PYTHONHASHSEED": seed},
+                              check=False)
+        assert done.returncode == 0, done.stderr
+        outputs.append(done.stdout)
+    assert outputs[0] == outputs[1]
+    first, second = json.loads(outputs[0])
+    assert first["scope_level"] == 0 and second["scope_level"] == 1 and first["tables"]
+
+
+def test_repeated_calls_give_the_same_result(mock_retriever):
+    query = RecallQuery("2026 年 9 月末各行业不含保证金的对公存款余额", ["不含保证金的存款余额"], ["行业名称"])
+    assert asdict(mock_retriever.recall(query)) == asdict(mock_retriever.recall(query))
+
+
+def test_notes_explain_empty_queries_and_terms_without_hits(mock_parts):
+    store, graph = mock_parts
+    assert "没有检索词" in " ".join(Retriever(store, graph, HashEmbedder()).recall(RecallQuery("x", [])).notes)
+    result = Retriever(store, graph, None).recall(RecallQuery("x", ["zzqq"]))
+    assert result.tables == [] and "检索词「zzqq」没有命中任何字段" in result.notes
+
+
+# ── 模拟题的召回率 ──────────────────────────────────────
+
+def test_gold_tables_of_the_mock_questions_reach_the_candidates(mock_retriever):
+    terms = {item["id"]: item for item in yaml.safe_load(RECALL_TERMS.read_text(encoding="utf-8"))}
+    questions = [question for question in load_questions() if question.expect == "sql"]
+    assert set(terms) == {question.id for question in questions}
+    missed = {}
+    for question in questions:
+        spec = terms[question.id]
+        query = RecallQuery(spec.get("requirement", question.turns[0]), spec.get("metrics", []),
+                            spec.get("dimensions", []), spec.get("filters", []))
+        result = mock_retriever.recall(query)
+        if spec.get("level", 0):                                           # 向上溯源的题：以第 0 层的候选为起点上溯
+            result = mock_retriever.recall(query, spec["level"], [item.table_id for item in result.tables])
+        absent = set(question.gold_tables) - {item.table_id for item in result.tables}
+        if absent:
+            missed[question.id] = sorted(absent)
+    assert len(questions) - len(missed) >= MIN_RECALLED_QUESTIONS, missed
