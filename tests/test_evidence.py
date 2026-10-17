@@ -20,6 +20,7 @@ from lineage.graph import LineageGraph
 from metadata.models import (
     ColumnMeta,
     Example,
+    FieldRef,
     LineageEdge,
     Mart,
     Relation,
@@ -452,6 +453,23 @@ def test_a_long_chain_is_cut_at_the_step_limit_and_says_so():
     assert (short_one.field, short_one.truncated, len(short_one.steps)) == ("ods.t.a1", False, 5)
     assert any("ods.t.v" in note and "12 步" in note for note in evidence.notes)
     assert not any("ods.t.a1" in note for note in evidence.notes)
+
+
+def test_the_memo_graph_walks_each_field_once_and_changes_no_answer(mock_graph, monkeypatch):
+    a, b = FieldRef(table=ADS_ORG, column="dep_bal_rmb"), FieldRef(table=ADS_ORG, column="dep_bal_tot_rmb")
+    expected = (mock_graph.compare(a, b), mock_graph.upstream(ADS_ORG, "dep_bal_rmb"))
+    walked = []
+    original = LineageGraph.upstream
+    monkeypatch.setattr(LineageGraph, "upstream",
+                        lambda self, table, column, depth=3: walked.append((table, column)) or original(self, table, column, depth))
+    memo = evidence_module._MemoGraph(mock_graph)
+
+    answers = (memo.compare(a, b), memo.upstream(ADS_ORG, "dep_bal_rmb"))
+    memo.compare(b, a)
+    memo.compare(a, b)
+
+    assert answers == expected
+    assert walked == [(ADS_ORG, "dep_bal_rmb"), (ADS_ORG, "dep_bal_tot_rmb")]       # 比较了三次，每个字段只走一遍
 
 
 # ── 指标检索词与指标命中字段 ──────────────────────────────────────

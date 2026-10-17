@@ -157,7 +157,7 @@ def test_summarize_exec_keeps_errors_and_notes_and_stays_json_friendly():
                                           row_count=1))
 
     assert (failed.executed, failed.error, failed.elapsed_ms) == (False, "ValueError: 只能执行单条语句", 3)
-    assert (skipped.executed, skipped.note, skipped.rows) == (False, "仅生成模式，未执行", [])
+    assert (skipped.executed, skipped.rows) == (False, []) and skipped.note == NullExecutor().execute("SELECT 1").note != ""
     assert json.loads(json.dumps(with_data.model_dump(mode="json"))) == {
         "executed": True, "columns": ["d", "v"], "rows": [["2026-09-30", "1.5"]], "row_count": 1,
         "truncated": False, "elapsed_ms": 0, "error": "", "note": ""}

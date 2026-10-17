@@ -155,6 +155,25 @@ def _evidence_table(store: MetadataStore, meta: TableMeta, hits: list[FieldHit],
 
 # ── 加工链路 ──────────────────────────────────────
 
+class _MemoGraph(LineageGraph):
+    """组装一份证据期间用的血缘图：同一个字段的上游链路只走一遍
+
+    加工链路要走一遍，同源对比里每个字段又要和其余五个各比一次，每次比较都重新走两条上游链路。
+    与原来的图共享全部内部索引，不重建。
+    """
+
+    def __init__(self, base: LineageGraph) -> None:
+        self.__dict__.update(base.__dict__)
+        self._upstream_memo: dict[tuple[str, str, int], list[Hop]] = {}
+
+    def upstream(self, table: str, column: str, depth: int = 3) -> list[Hop]:
+        """同 LineageGraph.upstream；返回的列表是缓存里的，调用方不要修改"""
+        key = (table, column, depth)
+        if key not in self._upstream_memo:
+            self._upstream_memo[key] = super().upstream(table, column, depth)
+        return self._upstream_memo[key]
+
+
 def _metric_terms(query: RecallQuery) -> list[str]:
     """指标检索词：指标那一项里每一项去掉首尾空白、去重，与召回里命中字段的 term 写法一致"""
     return _unique(text.strip() for text in query.metrics if text.strip())
@@ -252,7 +271,7 @@ def _compare(graph: LineageGraph, a: _MetricHit, b: _MetricHit, term: str) -> Fi
     """
     diff = graph.compare(a.ref, b.ref, LINEAGE_DEPTH)
     for upstream, downstream, path in ((a, b, diff.path_b), (b, a, diff.path_a)):
-        depths = [hop.depth for hop in path if hop.source == upstream.ref]
+        depths = [hop.depth for hop in path if (hop.source.table, hop.source.column) == (upstream.table_id, upstream.column)]
         if depths:
             return FieldComparison(term=term, a=upstream.field, b=downstream.field, relation="derived_from",
                                    common=[_field_id(ref.table, ref.column) for ref in diff.common],
@@ -436,7 +455,7 @@ def build_evidence(store: MetadataStore, graph: LineageGraph, recall: RecallResu
     closures: dict[str, list[str]] = {}
     if use_lineage:
         terms = _metric_terms(query)
-        lineage, comparisons = _lineage_and_comparisons(graph, _metric_hits(candidates, terms), terms, notes)
+        lineage, comparisons = _lineage_and_comparisons(_MemoGraph(graph), _metric_hits(candidates, terms), terms, notes)
         closures = {table_id: graph.upstream_tables(table_id) for table_id in table_ids}
         links = _table_links(table_ids, closures)
 
