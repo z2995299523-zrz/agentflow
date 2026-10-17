@@ -899,7 +899,8 @@ def test_structural_relations_of_the_mock_keep_only_manual_and_same_name_grain_k
     assert all(r in structural for r in full if r.origin == "grain_key")      # 完整推导里的同名粒度键，这里一条不少
 
     def mapping(r: Relation) -> frozenset:
-        return frozenset(tuple(sorted(((r.left_table, a), (r.right_table, b)))) for a, b in zip(r.left_columns, r.right_columns))
+        return frozenset(tuple(sorted(((r.left_table, a), (r.right_table, b))))
+                         for a, b in zip(r.left_columns, r.right_columns))
 
     claimed = {mapping(r): r.origin for r in full}
     extra = [r for r in structural if r.origin == "grain_key" and r not in full]

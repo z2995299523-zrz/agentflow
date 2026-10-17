@@ -175,7 +175,8 @@ def structure_graph(mock_store) -> LineageGraph:
 def test_limits_are_the_documented_values():
     assert (LINEAGE_DEPTH, MAX_LINEAGE_FIELDS, MAX_STEPS_PER_FIELD, MAX_COMPARE_FIELDS, MAX_JOIN_HINTS,
             MAX_JOIN_TABLES, MAX_UPSTREAM_OPTIONS) == (3, 12, 12, 6, 20, 3, 10)
-    assert (FULL_DESC_CHARS, SHORT_DESC_CHARS, ENUM_CHARS, EXPR_CHARS, COND_CHARS, MAX_CONDS) == (200, 60, 200, 800, 300, 6)
+    assert (FULL_DESC_CHARS, SHORT_DESC_CHARS, ENUM_CHARS, EXPR_CHARS, COND_CHARS, MAX_CONDS) == (
+        200, 60, 200, 800, 300, 6)
     assert MAX_LINEAGE_TOTAL == 20
 
 
@@ -274,7 +275,8 @@ def test_evidence_header_follows_the_switches_and_the_recall():
 
     evidence = evidence_of(store, graph, recall, lineage=False, examples=True, all_layers=True)
 
-    assert (evidence.use_lineage, evidence.use_examples, evidence.all_layers, evidence.scope_level) == (False, True, True, 1)
+    assert (evidence.use_lineage, evidence.use_examples, evidence.all_layers, evidence.scope_level) == (
+        False, True, True, 1)
     assert evidence.notes == ["向量器核对没过，只走了关键字路"]
 
 
@@ -293,10 +295,13 @@ def test_column_kind_comes_from_the_script_and_only_with_lineage():
     store, graph = make_store(
         [("ads.t", [("a", "甲"), ("b", "乙"), ("c", "丙"), ("d", "丁"), ("e", "戊"), ("f", "己")])],
         script_columns=[script_column("ads.t", "a", "derived"),
-                        script_column("ads.t", "b", "null", script="s1.sql"), script_column("ads.t", "b", "derived", script="s2.sql"),
+                        script_column("ads.t", "b", "null", script="s1.sql"),
+                        script_column("ads.t", "b", "derived", script="s2.sql"),
                         script_column("ads.t", "c", "null"),
-                        script_column("ads.t", "d", "etl_time", script="s1.sql"), script_column("ads.t", "d", "null", script="s2.sql"),
-                        script_column("ads.t", "e", "derived", script="s1.sql"), script_column("ads.t", "e", "null", script="s2.sql")])
+                        script_column("ads.t", "d", "etl_time", script="s1.sql"),
+                        script_column("ads.t", "d", "null", script="s2.sql"),
+                        script_column("ads.t", "e", "derived", script="s1.sql"),
+                        script_column("ads.t", "e", "null", script="s2.sql")])
     recall = recall_of(cand("ads.t"))
 
     with_lineage = evidence_of(store, graph, recall, lineage=True)
@@ -341,7 +346,8 @@ def test_filters_and_joins_of_a_step_are_written_as_conditions(mock_store, mock_
 
 
 def test_without_lineage_there_is_no_lineage_comparison_link_or_upstream_option(mock_store, mock_graph):
-    recall = recall_of(cand(ADS_ORG, hits=[hit(ADS_ORG, "dep_bal_rmb", "存款余额"), hit(ADS_ORG, "dep_bal_tot_rmb", "存款余额")]),
+    recall = recall_of(cand(ADS_ORG, hits=[hit(ADS_ORG, "dep_bal_rmb", "存款余额"),
+                                           hit(ADS_ORG, "dep_bal_tot_rmb", "存款余额")]),
                        cand(ADS_DEP))
 
     evidence = evidence_of(mock_store, mock_graph, recall, ["存款余额"], lineage=False)
@@ -366,7 +372,8 @@ def test_join_conditions_get_a_prefix_that_follows_the_join_type(join_type, pref
 
 def test_conditions_are_deduplicated_cut_to_length_and_limited_in_number():
     long = "ods.s.note = '" + "x" * 400 + "'"
-    filters = [("WHERE", "ods.s.flag = 1"), ("HAVING", "SUM(ods.s.v) > 0"), ("WHERE", "ods.s.flag = 1"), ("WHERE", long)]
+    filters = [("WHERE", "ods.s.flag = 1"), ("HAVING", "SUM(ods.s.v) > 0"), ("WHERE", "ods.s.flag = 1"),
+               ("WHERE", long)]
     filters += [("WHERE", f"ods.s.c{number} = {number}") for number in range(6)]
     store, graph = make_store([("ads.t", [("v", "指标")]), ("ods.s", [("v", "指标")])],
                               edges=[edge("ads.t.v", "ods.s.v", script="load.sql")],
@@ -379,6 +386,21 @@ def test_conditions_are_deduplicated_cut_to_length_and_limited_in_number():
     assert step.filters[:2] == ["WHERE ods.s.flag = 1", "HAVING SUM(ods.s.v) > 0"]
     assert step.filters[2] == ("WHERE " + long)[:COND_CHARS] + "…"
     assert any("超过 6 条" in note for note in evidence.notes)
+
+
+def test_a_target_written_by_two_scripts_gets_the_conditions_of_both_in_one_step():
+    store, graph = make_store(
+        [("ads.t", [("v", "指标")]), ("ods.a", [("v", "甲")]), ("ods.b", [("v", "乙")])],
+        edges=[edge("ads.t.v", "ods.a.v", script="a.sql", origin="script"), edge("ads.t.v", "ods.b.v", script="b.sql")],
+        scripts=[statement("a.sql", "ads.t", filters=[("WHERE", "ods.a.flag = 1"), ("WHERE", "shared = 1")]),
+                 statement("b.sql", "ads.t", filters=[("WHERE", "ods.b.flag = 2"), ("WHERE", "shared = 1")])])
+
+    (lineage,) = evidence_of(store, graph, recall_of(cand("ads.t", hits=[hit("ads.t", "v", "指标")])), ["指标"]).lineage
+
+    (step,) = lineage.steps
+    assert step.sources == ["ods.a.v", "ods.b.v"]
+    assert step.filters == ["WHERE ods.a.flag = 1", "WHERE shared = 1", "WHERE ods.b.flag = 2"]      # 两个脚本的合起来，去重
+    assert (step.script_name, step.origin) == ("a.sql", "script")                                   # 取第一跳的
 
 
 def test_a_step_with_few_conditions_adds_no_note(mock_store, mock_graph):
@@ -394,7 +416,8 @@ def test_expression_prefers_the_script_then_the_lineage_list_and_is_cut():
     store, graph = make_store(
         [("ads.t", [("scripted", "有脚本"), ("listed", "只有清单"), ("bare", "什么都没写"), ("long", "很长")]),
          ("ods.s", [("v", "指标")])],
-        edges=[edge("ads.t.scripted", "ods.s.v", transform="清单里的文字"), edge("ads.t.listed", "ods.s.v", transform="MAX(v)"),
+        edges=[edge("ads.t.scripted", "ods.s.v", transform="清单里的文字"),
+               edge("ads.t.listed", "ods.s.v", transform="MAX(v)"),
                edge("ads.t.bare", "ods.s.v"), edge("ads.t.long", "ods.s.v")],
         script_columns=columns)
     hits = [hit("ads.t", name, "指标") for name in ("scripted", "listed", "bare", "long")]
@@ -433,7 +456,8 @@ def test_sources_missing_from_the_field_list_are_marked_unknown():
 
 def fan_out_fixture() -> tuple[MetadataStore, LineageGraph]:
     """t.v 取自 a1..a4，每个 a 取自四个 b，每个 b 取自一个 c：深度 3 以内 1 + 4 + 16 = 21 步"""
-    names = ["v"] + [f"a{i}" for i in range(1, 5)] + [f"{kind}{i}{j}" for kind in "bc" for i in range(1, 5) for j in range(1, 5)]
+    names = ["v"] + [f"a{i}" for i in range(1, 5)]
+    names += [f"{kind}{i}{j}" for kind in "bc" for i in range(1, 5) for j in range(1, 5)]
     edges = [edge("ods.t.v", f"ods.t.a{i}") for i in range(1, 5)]
     edges += [edge(f"ods.t.a{i}", f"ods.t.b{i}{j}") for i in range(1, 5) for j in range(1, 5)]
     edges += [edge(f"ods.t.b{i}{j}", f"ods.t.c{i}{j}") for i in range(1, 5) for j in range(1, 5)]
@@ -460,8 +484,12 @@ def test_the_memo_graph_walks_each_field_once_and_changes_no_answer(mock_graph, 
     expected = (mock_graph.compare(a, b), mock_graph.upstream(ADS_ORG, "dep_bal_rmb"))
     walked = []
     original = LineageGraph.upstream
-    monkeypatch.setattr(LineageGraph, "upstream",
-                        lambda self, table, column, depth=3: walked.append((table, column)) or original(self, table, column, depth))
+
+    def counting(self, table, column, depth=3):
+        walked.append((table, column))
+        return original(self, table, column, depth)
+
+    monkeypatch.setattr(LineageGraph, "upstream", counting)
     memo = evidence_module._MemoGraph(mock_graph)
 
     answers = (memo.compare(a, b), memo.upstream(ADS_ORG, "dep_bal_rmb"))
@@ -529,7 +557,7 @@ def test_anchor_1_two_deposit_balances_with_the_same_source_but_different_proces
 
 
 @pytest.mark.parametrize("scores", [(0.04, 0.03), (0.03, 0.04)], ids=["downstream first", "upstream first"])
-def test_anchor_2_the_org_balance_is_derived_from_the_customer_balance_whatever_the_ranking(mock_store, mock_graph, scores):
+def test_anchor_2_org_balance_is_derived_from_the_customer_balance_whatever_the_ranking(mock_store, mock_graph, scores):
     recall = recall_of(cand(ADS_ORG, hits=[hit(ADS_ORG, "dep_bal_rmb", "存款余额", scores[0])]),
                        cand(ADS_DEP, hits=[hit(ADS_DEP, "dep_bal_rmb", "存款余额", scores[1])]))
 
@@ -680,7 +708,8 @@ def test_anchor_5_without_lineage_the_customer_summary_joins_the_customer_dimens
     full = evidence_of(mock_store, mock_graph, recall)
 
     (hop,) = structural.joins[0].hops
-    assert (hop.left_columns, hop.right_columns, hop.cardinality, hop.origin) == (["cust_no"], ["cust_no"], "N:1", "grain_key")
+    assert (hop.left_columns, hop.right_columns, hop.cardinality, hop.origin) == (
+        ["cust_no"], ["cust_no"], "N:1", "grain_key")
     assert hop.note.startswith("同名粒度键")
     assert full.joins[0].hops[0].origin == "lineage"                              # 完整推导里这条映射先被血缘传递认领
 
@@ -693,7 +722,7 @@ def test_anchor_6_without_lineage_the_joins_only_the_scripts_know_about_are_miss
     full = evidence_of(mock_store, mock_graph, recall)
 
     (hop,) = structural.joins[0].hops
-    assert (hop.left_columns, hop.right_columns, hop.origin) == (["org_no"], ["org_no"], "grain_key")     # 没有 up_org_no 那条
+    assert (hop.left_columns, hop.right_columns, hop.origin) == (["org_no"], ["org_no"], "grain_key")     # 没有 up_org_no
     assert structural.joins[0].hops[0].cardinality == "1:1"
     assert (full.joins[0].hops[0].left_columns, full.joins[0].hops[0].origin) == (["up_org_no"], "lineage")
     assert structure_graph.relations_between(ORG_INFO, ORG_INFO) == []            # 机构表按上级机构号的自关联只在脚本里
@@ -878,7 +907,7 @@ def test_an_example_unknown_to_the_store_is_skipped_with_a_note(mock_store, mock
     assert any("no.sql#9" in note for note in evidence.notes)
 
 
-def test_use_examples_off_only_withholds_the_examples_removing_their_tables_is_drop_examples_job(mock_store, mock_graph):
+def test_use_examples_off_withholds_examples_but_dropping_their_tables_is_for_drop_examples(mock_store, mock_graph):
     example = mock_store.examples()[0]
     recall = recall_of(cand(ADS_DEP), cand(CUST, "example"),
                        examples=[ExampleHit(example_id=example.example_id, requirement="x", score=0.03, tables=[CUST])])
@@ -930,7 +959,8 @@ def test_structure_store_has_tables_columns_and_structural_relations_only(mock_s
     assert {r.origin for r in structure.relations()} == {"manual", "grain_key"}
     assert structure.lineage_edges() == [] and structure.scripts() == [] and structure.examples() == []
     assert all(structure.script_columns(t.table_id) == [] for t in mock_store.tables())
-    assert structure.vectors("field") is None and structure.vectors("example") is None and structure.embedder_name is None
+    assert structure.vectors("field") is None and structure.vectors("example") is None
+    assert structure.embedder_name is None
     counts = structure.counts()
     assert (counts["血缘"], counts["加工语句"], counts["样例"], counts["字段向量"]) == (0, 0, 0, 0)
     assert (counts["表"], counts["字段"]) == (mock_store.counts()["表"], mock_store.counts()["字段"])
@@ -1028,9 +1058,10 @@ def test_anchor_4_upstream_questions_reach_the_integration_layer_and_carry_the_p
         assert LOAN_D in evidences[qid].table_ids(), qid
     u01 = evidences["U01"]
     assert u01.scope_level == 1
-    ads_joins = [text for item in u01.lineage if item.field.startswith("ads.") for step in item.steps for text in step.joins]
+    ads_steps = [step for item in u01.lineage if item.field.startswith("ads.") for step in item.steps]
+    ads_joins = [text for step in ads_steps for text in step.joins]
     assert "JOIN dim.corp_cust ON dwd.corp_dep_acct_d.cust_no = dim.corp_cust.cust_no" in ads_joins     # 上溯时要还原的加工条件
-    ads_filters = [text for item in u01.lineage if item.field.startswith("ads.") for step in item.steps for text in step.filters]
+    ads_filters = [text for step in ads_steps for text in step.filters]
     assert "WHERE dwd.corp_dep_acct_d.data_dt = CAST('${data_dt}' AS DATE)" in ads_filters
     assert [option.table_id for option in evidences["U05"].upstream_options] == []         # 已经是第 2 层
 

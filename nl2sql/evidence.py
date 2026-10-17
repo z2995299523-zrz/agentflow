@@ -271,7 +271,8 @@ def _compare(graph: LineageGraph, a: _MetricHit, b: _MetricHit, term: str) -> Fi
     """
     diff = graph.compare(a.ref, b.ref, LINEAGE_DEPTH)
     for upstream, downstream, path in ((a, b, diff.path_b), (b, a, diff.path_a)):
-        depths = [hop.depth for hop in path if (hop.source.table, hop.source.column) == (upstream.table_id, upstream.column)]
+        key = (upstream.table_id, upstream.column)
+        depths = [hop.depth for hop in path if (hop.source.table, hop.source.column) == key]
         if depths:
             return FieldComparison(term=term, a=upstream.field, b=downstream.field, relation="derived_from",
                                    common=[_field_id(ref.table, ref.column) for ref in diff.common],
@@ -455,7 +456,8 @@ def build_evidence(store: MetadataStore, graph: LineageGraph, recall: RecallResu
     closures: dict[str, list[str]] = {}
     if use_lineage:
         terms = _metric_terms(query)
-        lineage, comparisons = _lineage_and_comparisons(_MemoGraph(graph), _metric_hits(candidates, terms), terms, notes)
+        metrics = _metric_hits(candidates, terms)
+        lineage, comparisons = _lineage_and_comparisons(_MemoGraph(graph), metrics, terms, notes)
         closures = {table_id: graph.upstream_tables(table_id) for table_id in table_ids}
         links = _table_links(table_ids, closures)
 

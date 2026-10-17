@@ -143,7 +143,8 @@ def test_summarize_exec_turns_rows_into_lists():
 
     summary = summarize_exec(result)
 
-    assert summary == ExecSummary(executed=True, columns=["org", "bal"], rows=[["A", Decimal("1.50")], ["B", Decimal("2")]],
+    assert summary == ExecSummary(executed=True, columns=["org", "bal"],
+                                  rows=[["A", Decimal("1.50")], ["B", Decimal("2")]],
                                   row_count=2, truncated=True, elapsed_ms=12)
     assert all(isinstance(row, list) for row in summary.rows)
     result.rows.append(("C", Decimal("3")))
@@ -157,7 +158,8 @@ def test_summarize_exec_keeps_errors_and_notes_and_stays_json_friendly():
                                           row_count=1))
 
     assert (failed.executed, failed.error, failed.elapsed_ms) == (False, "ValueError: 只能执行单条语句", 3)
-    assert (skipped.executed, skipped.rows) == (False, []) and skipped.note == NullExecutor().execute("SELECT 1").note != ""
+    assert (skipped.executed, skipped.rows) == (False, [])
+    assert skipped.note == NullExecutor().execute("SELECT 1").note != ""
     assert json.loads(json.dumps(with_data.model_dump(mode="json"))) == {
         "executed": True, "columns": ["d", "v"], "rows": [["2026-09-30", "1.5"]], "row_count": 1,
         "truncated": False, "elapsed_ms": 0, "error": "", "note": ""}
