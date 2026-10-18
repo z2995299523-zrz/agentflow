@@ -91,7 +91,7 @@ Docker：`docker-compose up -d`（镜像构建时会导入模拟库的元数据�
 ## 🧪 测试与评估
 
 ```bash
-python run_tests.py      # 单元测试（1469 项，不调模型、不加载 BGE）
+python run_tests.py      # 单元测试（1475 项，不调模型、不加载 BGE）
 python run_eval.py       # 模拟库三组对照评估（调用 DeepSeek，40 题，几分钟）
 ```
 

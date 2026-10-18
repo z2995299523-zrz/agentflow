@@ -74,6 +74,8 @@ class QuestionOutcome:
     llm_calls: int
     tokens: int
     attribution: str                          # 对的题为空
+    # SQL 用的表包含某一组标准用表（多关联一张不影响结果的维表也算）；期望反问的题、旧记录里没有这一项时为 None
+    table_contains_ok: bool | None = None
 
 
 @dataclass
@@ -209,13 +211,15 @@ def _score(question: EvalQuestion, config: str, results: list[QueryResult], grou
     wants_sql = question.expect == "sql"
     exec_ok: bool | None = None
     exec_error = ""
-    recall_ok = table_ok = column_ok = None
+    recall_ok = table_ok = column_ok = table_contains_ok = None
     if wants_sql:
         exec_ok, exec_error = _execute_and_compare(question, final, executor, gold_cache)
         validation = final.validation
         candidates = set(final.candidate_tables)
+        used = set(validation.tables) if validation is not None else set()
         recall_ok = any(group.tables <= candidates for group in groups)
-        table_ok = validation is not None and any(set(validation.tables) == group.tables for group in groups)
+        table_ok = validation is not None and any(used == group.tables for group in groups)
+        table_contains_ok = validation is not None and any(group.tables <= used for group in groups)
         column_ok = validation is not None and any(group.columns <= set(validation.columns) for group in groups)
     clarify_ok = (final.status == "need_clarify") == (question.expect == "clarify")
     correct = exec_ok if wants_sql else clarify_ok
@@ -226,7 +230,7 @@ def _score(question: EvalQuestion, config: str, results: list[QueryResult], grou
         clarify_ok=clarify_ok, first_pass_ok=final.first_pass_ok,
         final_ok=None if final.status not in SQL_STATUSES else final.status == "ok",
         elapsed_ms=sum(item.elapsed_ms for item in results), llm_calls=sum(item.llm_calls for item in results),
-        tokens=_tokens(results), attribution=attribution)
+        tokens=_tokens(results), attribution=attribution, table_contains_ok=table_contains_ok)
 
 
 def _execute_and_compare(question: EvalQuestion, final: QueryResult, executor: Executor,
@@ -296,20 +300,22 @@ def load_outcomes(run_dir: Path, configs: Sequence[str]) -> dict[tuple[str, str]
     """读取 run_dir 里已有的逐题记录，键是（配置, 题号）
 
     读不出来的行（例如进程被打断时写了一半的最后一行）直接跳过，那道题会重跑；同一道题有多行时取最后一行。
+    按字节读、按换行符切行、逐行解码：最后一行截在汉字中间时只丢这一行；记录里的 U+2028 这类字符
+    json.dumps 不转义，按文本的 splitlines 切会把一行切断。
     """
     found: dict[tuple[str, str], QuestionOutcome] = {}
     for config in configs:
         path = Path(run_dir) / f"{config}.jsonl"
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
+        for raw in path.read_bytes().split(b"\n"):
+            if not raw.strip():
                 continue
             try:
-                record = json.loads(line)
+                record = json.loads(raw.decode("utf-8"))
                 results = [QueryResult.model_validate(item) for item in record.pop("results")]
                 outcome = QuestionOutcome(results=results, **record)
-            except (ValueError, TypeError, KeyError):       # JSON 不完整、字段缺失或多出来
+            except (ValueError, TypeError, KeyError):       # 解码失败、JSON 不完整、字段缺失或多出来
                 continue
             found[(outcome.config, outcome.question_id)] = outcome
     return found
@@ -423,6 +429,7 @@ class Metrics:
     exec_ok: int = 0                    # 执行准确的题数（分母 sql_questions）
     recall_ok: int = 0
     table_ok: int = 0
+    table_contains_ok: int = 0          # SQL 用的表包含标准用表（放宽的选表口径）
     column_ok: int = 0
     with_sql: int = 0                   # 流水线给出了 SQL 的题数（状态 ok 或 unvalidated）
     first_pass_ok: int = 0              # 其中第一次生成就通过校验的
@@ -445,6 +452,10 @@ class Metrics:
     @property
     def table_rate(self) -> float | None:
         return _ratio(self.table_ok, self.sql_questions)
+
+    @property
+    def table_contains_rate(self) -> float | None:
+        return _ratio(self.table_contains_ok, self.sql_questions)
 
     @property
     def column_rate(self) -> float | None:
@@ -480,6 +491,7 @@ def compute_metrics(outcomes: Sequence[QuestionOutcome]) -> Metrics:
             metrics.exec_ok += outcome.exec_ok is True
             metrics.recall_ok += outcome.recall_ok is True
             metrics.table_ok += outcome.table_ok is True
+            metrics.table_contains_ok += outcome.table_contains_ok is True
             metrics.column_ok += outcome.column_ok is True
             if outcome.category == FOLLOW_UP_CATEGORY:
                 metrics.follow_up += 1
@@ -523,6 +535,8 @@ def _metric_rows(metrics: Metrics) -> list[tuple[str, str, float | None]]:
         ("执行准确率", _rate_text(metrics.exec_ok, metrics.sql_questions), metrics.exec_rate),
         ("候选召回率", _rate_text(metrics.recall_ok, metrics.sql_questions), metrics.recall_rate),
         ("选表准确率", _rate_text(metrics.table_ok, metrics.sql_questions), metrics.table_rate),
+        ("选表准确率（包含标准用表）", _rate_text(metrics.table_contains_ok, metrics.sql_questions),
+         metrics.table_contains_rate),
         ("字段准确率", _rate_text(metrics.column_ok, metrics.sql_questions), metrics.column_rate),
         ("校验一次通过率", _rate_text(metrics.first_pass_ok, metrics.with_sql), metrics.first_pass_rate),
         ("修正后通过率", _rate_text(metrics.passed, metrics.with_sql), metrics.passed_rate),
@@ -548,6 +562,8 @@ def _limitations(sql_count: int, alternative_count: int) -> list[str]:
         f"选表、字段准确率按「标准答案和其它正确写法」中任一组算对。题库里有 {alternative_count} 道题登记了其它正确写法"
         "（用机构汇总表的题，登记的是客户汇总表的写法）；没有登记的等价写法（例如改用整合层明细再关联客户维表）"
         "仍会被判为选表不对，执行准确率不受影响。",
+        "选表准确率要求 SQL 用的表与某一组完全一致，多关联一张不影响结果的维表也算错；"
+        "「选表准确率（包含标准用表）」是放宽的口径，SQL 用的表包含某一组就算对，两个数一起看。",
     ]
 
 
@@ -944,6 +960,8 @@ def _check_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
         if not args.out:
             parser.error("真实库静态评估必须写 --out（输出目录）：不给默认值，免得报告写进入库的目录")
         return
+    if args.mart and not args.out:
+        parser.error("给了 --mart 时必须写 --out：资料目录可能是真实库，报告不能写进入库的 eval/reports")
     configs = [item.strip().upper() for item in args.configs.split(",") if item.strip()]
     unknown = [config for config in configs if config not in CONFIGS]
     if not configs or unknown:
@@ -971,6 +989,10 @@ def _check_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
 
 def main(argv: list[str] | None = None) -> int:
     """命令行入口，返回退出码：0 成功，1 运行失败，2 参数不对"""
+    # 输出走管道或重定向时 Windows 上是 GBK，打印不了「↔」这类字符；换成问号，不让评估中途崩掉
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)

@@ -17,7 +17,7 @@ AgentFlow 现在是「基于专题库模型结构与血缘的自然语言转 SQL
 # 安装依赖（国内加速加 -i https://pypi.tuna.tsinghua.edu.cn/simple）
 pip install -r requirements.txt
 
-python run_tests.py                       # 单元测试，1469 项，不调模型、不加载 BGE（--quick 效果相同）
+python run_tests.py                       # 单元测试，1475 项，不调模型、不加载 BGE（--quick 效果相同）
 python -m pytest tests/test_workflow.py -q  # 单个测试文件
 
 python -m metadata.importer               # 导入 MART_DIR 指向的资料：校验、解析脚本、补血缘、推导关联、收样例、算向量
@@ -81,7 +81,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 
 ### Test Infrastructure
 
-`tests/` 下全部是 pytest，1469 项，不调模型、不加载 BGE、不引用 `data/real_mart`。公共夹具在 `tests/conftest.py`：`tiny_store`、`mock_store`、`mock_graph`、`mock_retriever`、`mock_validator`、`mock_db`。
+`tests/` 下全部是 pytest，1475 项，不调模型、不加载 BGE、不引用 `data/real_mart`。公共夹具在 `tests/conftest.py`：`tiny_store`、`mock_store`、`mock_graph`、`mock_retriever`、`mock_validator`、`mock_db`。
 
 ## Tech Stack
 

@@ -1,5 +1,6 @@
 """流水线装配：向量器还原、按资料目录建流水线、进程内缓存、字段链路的描述"""
 import json
+import os
 import threading
 from datetime import date
 
@@ -7,7 +8,7 @@ import pytest
 
 import config
 from metadata import index
-from metadata.importer import run_import
+from metadata.importer import default_db_path, run_import
 from metadata.index import BgeEmbedder, HashEmbedder
 from metadata.models import Mart
 from metadata.store import MetadataStore, VectorBundle
@@ -134,6 +135,22 @@ def test_get_pipeline_is_cached_shared_across_threads_and_cleared_by_reset(impor
     service.reset_pipeline()
     assert service.get_metadata()[0] is not store
     assert service.get_pipeline() is not pipeline and len(created) == 2
+
+
+def test_reimporting_the_metadata_is_picked_up_without_a_restart(imported_mart, monkeypatch):
+    monkeypatch.setattr(config, "MART_DIR", str(imported_mart))
+    monkeypatch.setattr(service, "ChatModelClient", lambda **kwargs: ScriptedLLM([]))
+    store, _ = service.get_metadata()
+    pipeline = service.get_pipeline()
+    assert service.get_metadata()[0] is store and service.get_pipeline() is pipeline    # 文件没变：用缓存
+
+    run_import(imported_mart, embedder=HashEmbedder())                                    # 重新导入
+    db = default_db_path(imported_mart)
+    stat = db.stat()                     # 两次导入可能落在同一个时间刻度里：把修改时间往后拨，测的是「变了就重读」
+    os.utime(db, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000))
+
+    assert service.get_metadata()[0] is not store
+    assert service.get_pipeline() is not pipeline and service.get_pipeline().deps.store is service.get_metadata()[0]
 
 
 def test_metadata_works_without_a_model_key_but_the_pipeline_does_not(imported_mart, monkeypatch):

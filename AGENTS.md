@@ -15,7 +15,7 @@ agentflow/
 ├── app.py              # Streamlit 界面：查数页、元数据页
 ├── main.py             # FastAPI 接口：/nl2sql/query、/metadata/tables、/metadata/lineage、/health
 ├── config.py           # 配置：模型、MART_DIR、SQL_DIALECT、EXECUTOR、LLM_TIMEOUT
-├── run_tests.py        # 单元测试入口（1469 项，不调模型）
+├── run_tests.py        # 单元测试入口（1475 项，不调模型）
 ├── run_eval.py         # 评估入口（模拟库三组对照）
 ├── metadata/           # 元数据层：模板、读取、校验、脚本解析、关联推导、向量、样例、导入、只读入口
 ├── lineage/graph.py    # 血缘图与关联图

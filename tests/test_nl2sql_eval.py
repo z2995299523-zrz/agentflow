@@ -1,5 +1,7 @@
 """评估程序的测试：假流水线返回预制的 QueryResult，不调模型"""
+import io
 import json
+import sys
 import threading
 from datetime import date
 from decimal import Decimal
@@ -1205,3 +1207,55 @@ def test_main_reports_a_missing_metadata_database_without_a_traceback(monkeypatc
 
     assert code == 1
     assert "metadata.importer" in capsys.readouterr().err
+
+
+# ── 终审补的几处：放宽的选表口径、按字节读逐题记录、控制台编码、--mart 要配 --out ──────────
+
+def test_an_extra_dimension_table_fails_the_strict_table_check_but_passes_containment(mock_store):
+    outcome, _ = score(sql_question(), make_result(tables=(LOAN, "dim.org")), store=mock_store)
+
+    assert (outcome.exec_ok, outcome.table_ok, outcome.table_contains_ok) == (True, False, True)
+    metrics = compute_metrics([outcome])
+    assert (metrics.table_ok, metrics.table_contains_ok, metrics.table_contains_rate) == (0, 1, 1.0)
+
+
+def test_report_shows_both_table_checks(small_summary):
+    summary, questions = small_summary
+    text = render_report(summary, questions)
+
+    assert "| 选表准确率 |" in text and "| 选表准确率（包含标准用表） |" in text
+    assert "两个数一起看" in text
+
+
+def test_load_outcomes_reads_bytes_so_a_cut_character_or_a_line_separator_loses_nothing(tmp_path):
+    first = make_outcome(question_id="Q1", attribution="说明里有 行分隔符和\u0085")
+    lines = [json.dumps(nl2sql_eval.outcome_to_record(item), ensure_ascii=False, default=str)
+             for item in (first, make_outcome(question_id="Q2"))]
+    cut = json.dumps(nl2sql_eval.outcome_to_record(make_outcome(question_id="Q3", attribution="中文")),
+                     ensure_ascii=False, default=str).encode("utf-8")
+    cut = cut[:cut.index("中".encode("utf-8")) + 1]                    # 截在一个汉字的三个字节中间
+    (tmp_path / "C.jsonl").write_bytes(("\n".join(lines) + "\n").encode("utf-8") + cut)
+
+    done = load_outcomes(tmp_path, ["C"])
+
+    assert sorted(done) == [("C", "Q1"), ("C", "Q2")]
+    assert done[("C", "Q1")].attribution == first.attribution
+
+
+def test_main_survives_characters_the_console_cannot_encode(tmp_path, mock_db, mock_store, monkeypatch):
+    failed = make_result(status="failed", validated=False, failed_step="plan",
+                         message="关联（ads.x ↔ dim.y）的左表不在 tables 里")
+    pipeline = FakePipeline(lambda request: failed)
+    pipeline.deps.store = mock_store
+    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir: pipeline)
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="gbk"))   # 「↔」不在 GBK 里
+
+    code = main(["--configs", "C", "--ids", "B01", "--out", str(tmp_path)])
+
+    assert code == 0 and len(list(tmp_path.glob("*_nl2sql_eval.md"))) == 1
+
+
+def test_mock_mode_with_a_mart_needs_an_out_directory(tmp_path, capsys):
+    code = main(["--configs", "C", "--mart", str(tmp_path)])
+
+    assert code == 2 and "--out" in capsys.readouterr().err

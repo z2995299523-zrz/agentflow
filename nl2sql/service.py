@@ -1,8 +1,9 @@
 """
 按资料目录装配查询流水线，界面、接口、评估共用
 - build_pipeline：读元数据库，建血缘图、召回、校验器、模型和执行层
-- get_metadata、get_pipeline：进程内缓存。元数据页和元数据接口只用 get_metadata，没配模型 Key 也能用
-- reset_pipeline：重新导入元数据之后、测试里清缓存
+- get_metadata、get_pipeline：进程内缓存。元数据页和元数据接口只用 get_metadata，没配模型 Key 也能用；
+  元数据库文件变了（重新导入过）就重新读，流水线也跟着重新装配，不用重启
+- reset_pipeline：测试里清缓存
 - describe_lineage：一个字段的上游、下游链路，元数据接口和元数据页共用
 """
 import threading
@@ -26,6 +27,7 @@ IMPORT_COMMAND = "python -m metadata.importer"
 
 _LOCK = threading.RLock()                    # get_pipeline 持锁时还会调 get_metadata，所以用可重入锁
 _metadata: tuple[MetadataStore, LineageGraph] | None = None
+_metadata_key: tuple[str, int] | None = None  # 缓存的元数据来自哪个文件、文件的修改时间
 _pipeline: Pipeline | None = None
 
 
@@ -112,21 +114,37 @@ def build_pipeline(mart_dir: Path | None = None, *, llm: LLMClient | None = None
     return _assemble(store, graph, mart_dir, llm, executor_kind)
 
 
+def _db_key(mart_dir: Path) -> tuple[str, int] | None:
+    """元数据库的路径和修改时间（纳秒）；文件不存在时为 None"""
+    db_path = default_db_path(mart_dir)
+    try:
+        return str(db_path), db_path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
 def get_metadata() -> tuple[MetadataStore, LineageGraph]:
     """进程内缓存的元数据和血缘图，只读，不需要模型配置
+
+    每次取的时候比对元数据库文件的路径和修改时间：重新导入过（导入器写完整个文件再替换），就重新读，
+    并清掉流水线的缓存，下次 get_pipeline 用新的元数据重新装配。
 
     Raises:
         FileNotFoundError: 元数据库不存在，信息里带导入命令
     """
-    global _metadata
+    global _metadata, _metadata_key, _pipeline
     with _LOCK:
-        if _metadata is None:
-            _metadata = _load_metadata(Path(config.MART_DIR))
+        mart_dir = Path(config.MART_DIR)
+        key = _db_key(mart_dir)
+        if _metadata is None or key != _metadata_key:
+            _metadata = _load_metadata(mart_dir)
+            _metadata_key = key
+            _pipeline = None
         return _metadata
 
 
 def get_pipeline() -> Pipeline:
-    """进程内缓存的流水线，线程安全，复用 get_metadata 的结果
+    """进程内缓存的流水线，线程安全，复用 get_metadata 的结果；元数据重新读过就重新装配
 
     Raises:
         FileNotFoundError: 元数据库不存在
@@ -134,17 +152,18 @@ def get_pipeline() -> Pipeline:
     """
     global _pipeline
     with _LOCK:
+        store, graph = get_metadata()
         if _pipeline is None:
-            store, graph = get_metadata()
             _pipeline = _assemble(store, graph, Path(config.MART_DIR), None, None)
         return _pipeline
 
 
 def reset_pipeline() -> None:
     """清掉 get_metadata、get_pipeline 的缓存"""
-    global _metadata, _pipeline
+    global _metadata, _metadata_key, _pipeline
     with _LOCK:
         _metadata = None
+        _metadata_key = None
         _pipeline = None
 
 
