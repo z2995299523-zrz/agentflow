@@ -31,6 +31,7 @@ echo ========================================
 echo   AgentFlow 已启动！
 echo   API 文档: http://localhost:8000/docs
 echo   Web 界面: http://localhost:8501
+echo   还没导入元数据的话，先运行 python -m metadata.importer
 echo ========================================
 echo.
 echo 关闭窗口即可停止所有服务。

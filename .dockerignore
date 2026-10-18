@@ -1,0 +1,12 @@
+# 不进镜像：密钥、真实专题库资料、本机生成物、开发用目录
+.env
+.git/
+.claude/
+.hermes/
+data/real_mart/
+data/*/build/
+eval/reports/runs/
+uploads/
+chroma_data/
+chroma_data_eval/
+**/__pycache__/

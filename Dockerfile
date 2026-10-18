@@ -4,11 +4,6 @@ FROM python:3.12-slim
 # 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖（matplotlib 中文支持）
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    fonts-wqy-microhei \
-    && rm -rf /var/lib/apt/lists/*
-
 # 安装 Python 依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
@@ -16,8 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua
 # 复制项目代码
 COPY . .
 
-# 创建数据和上传目录
-RUN mkdir -p data uploads chroma_data
+# 导入模拟专题库的元数据（不算向量，几秒钟；召回只走关键字。要向量就在容器里去掉 --no-index 重新导入）
+RUN python -m metadata.importer data/mock_mart --no-index
 
 # 暴露端口
 EXPOSE 8000 8501

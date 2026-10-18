@@ -1,8 +1,9 @@
 """
 AgentFlow 统一测试入口
-运行所有测试套件并生成汇总报告
+运行测试套件并生成汇总报告
 用法: python run_tests.py [--quick]
-  --quick  跳过需要 LLM 的测试（仅跑单元测试）
+  单元测试一律不调模型、不加载 BGE，--quick 只为兼容旧用法，效果相同。
+  要用模型跑评估，用 python run_eval.py
 """
 import sys
 import os
@@ -11,14 +12,6 @@ import subprocess
 from pathlib import Path
 
 os.chdir(Path(__file__).parent)
-
-# 加载环境变量
-env_file = Path("D:/hermes-agent-home/.env")
-if env_file.exists():
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        if "=" in line and not line.startswith("#"):
-            k, v = line.strip().split("=", 1)
-            os.environ.setdefault(k, v.strip())
 
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -73,18 +66,13 @@ def run_suite(name: str, cmd: list[str], timeout: int = 300) -> dict:
 
 
 def main():
+    # Windows 控制台是 GBK 时打印不了 ✅ 这类字符，换成问号，不让汇总报错
+    sys.stdout.reconfigure(errors="replace")
     quick = "--quick" in sys.argv
 
     suites = [
-        ("NL2SQL 单元测试 (836项)", ["python", "-m", "pytest", "tests", "-q", "--tb=short"], 600),
-        ("SQL 模块 (18项)", ["python", "test_sql.py"], 300),
-        ("RAG 模块 (5项)", ["python", "test_rag.py"], 300),
-        ("FC 工具 (9项)", ["python", "test_sql_tools.py"], 180),
-        ("LangGraph (17项)", ["python", "-m", "pytest", "test_graph.py", "-v", "--tb=short"], 300),
+        ("NL2SQL 单元测试", ["python", "-m", "pytest", "tests", "-q", "--tb=short"], 600),
     ]
-
-    if not quick:
-        suites.append(("LangGraph 评估", ["python", "-m", "pytest", "eval/langgraph_eval.py", "-v", "--tb=short"], 300))
 
     print(f"{BOLD}{'='*60}{RESET}")
     print(f"{BOLD}  AgentFlow 测试套件{' (快速模式)' if quick else ''}{RESET}")

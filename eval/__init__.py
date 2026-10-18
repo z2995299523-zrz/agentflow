@@ -1,4 +1,6 @@
-"""LangGraph 工作流评估模块"""
-from eval.langgraph_eval import evaluate_routing, evaluate_e2e, llm_judge
-
-__all__ = ["evaluate_routing", "evaluate_e2e", "llm_judge"]
+"""
+评估
+- questions.py：模拟库的评估题库（含其它正确答案）
+- compare.py：结果集比对
+- nl2sql_eval.py：模拟库三组对照评估、真实库静态评估、报告
+"""
