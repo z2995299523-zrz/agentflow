@@ -870,7 +870,7 @@ A 组的「所有层级的表一次给全」实施时理解为：召回在全部
 - `config.py` 去掉旧的数据库、向量库、上传、Embedding 配置；`requirements.txt` 另外去掉 chromadb、langchain、langchain-community、openai、python-multipart，补上 httpx（接口测试用）
 - `run_tests.py` 只跑 `tests/` 下的单元测试，`run_eval.py` 改为跑三组对照评估
 - 新增 `.dockerignore`：镜像里不带 `.env` 和真实资料目录；Dockerfile 构建时导入模拟库的元数据
-- 本机的 `data/sample.db`、`data/test_docs/` 已删；`uploads/`、`chroma_data/`、`chroma_data_eval/` 等用户决定
+- 本机的 `data/sample.db`、`data/test_docs/`，以及 `uploads/`、`chroma_data/`、`chroma_data_eval/` 都已删（用户确认）
 
 旧版本通过 git 标签 `v1-agentflow` 保留，随时可以检出演示。
 
