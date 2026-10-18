@@ -1,218 +1,150 @@
-# AgentFlow — 企业级 AI 智能助手平台
+# AgentFlow — 基于专题库模型结构与血缘的查数副驾驶
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
-[![LangChain](https://img.shields.io/badge/LangChain-1.x-green.svg)](https://www.langchain.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.x-orange.svg)](https://langchain-ai.github.io/langgraph/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
-开箱即用的 AI 助手平台，支持文档知识库问答（RAG）和自然语言数据分析（Text-to-SQL），多 Agent 协作，一键 Docker 部署。
+用自然语言描述查数需求，工具结合专题库的数据字典、字段血缘、加工脚本和历史样例，生成可审核的 GaussDB / PostgreSQL 查询 SQL，并写清口径、用表依据和关联说明。口径有分岔时先反问一次，支持连续追问。
 
-##   Demo 预览
+> 旧版本（文档问答 + 旧 SQL Agent + 意图路由）保留在标签 `v1-agentflow`。
 
-```
-💬 智能对话                          📊 数据查询
-┌─────────────────────────┐      ┌─────────────────────────┐
-│ 用户：AgentFlow有哪些核 │      │ 用户：销售额最高的3个    │
-│       心功能？          │      │       产品是哪些？       │
-│                        │      │                         │
-│ 🤖：根据文档，核心功能  │      │ 🔍 SQL:                 │
-│   1. 文档知识库问答(RAG) │      │ SELECT ... ORDER BY     │
-│   2. 自然语言数据分析    │      │    SUM(sales) DESC      │
-│   3. 统一API接口         │      │    LIMIT 3              │
-│   4. 一键部署            │      │                         │
-│ 📖 来源：产品介绍.txt    │      │ 📊 ████████████ (图表)   │
-└─────────────────────────┘      └─────────────────────────┘
-```
-
-## 🏗 系统架构
+## Demo 预览
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Streamlit WebUI                       │
-│         💬 Chat  │  📄 Upload  │  📊 Query              │
-└─────────────────────┬───────────────────────────────────┘
-                      │
-┌─────────────────────▼───────────────────────────────────┐
-│                 LangGraph Supervisor                     │
-│              🎯 意图识别 → 智能路由                       │
-│         ┌────────┼────────┐         │                   │
-│         ▼        ▼        ▼         ▼                   │
-│     ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐              │
-│     │ RAG  │ │ SQL  │ │Mixed │ │Fallback│              │
-│     │ Agent│ │ Agent│ │双 路 │ │  兜底  │              │
-│     └──┬───┘ └──┬───┘ └──┬───┘ └───┬────┘              │
-│        │        │        │         │                     │
-│        ▼        ▼        ▼         ▼                     │
-│     ┌──────────────────────────────────┐                │
-│     │         Finalize / Answer         │               │
-│     └──────────────────────────────────┘                │
-└─────────────────────────────────────────────────────────┘
-         │              │              │
-         ▼              ▼              ▼
-   ┌──────────┐  ┌──────────┐  ┌──────────┐
-   │ ChromaDB │  │ SQLite / │  │  DeepSeek │
-   │ (向量库) │  │PostgreSQL│  │   (LLM)   │
-   └──────────┘  └──────────┘  └──────────┘
+用户：查 2026 年 9 月末全行对公存款余额
+助手：「对公存款余额」要按哪个口径统计？
+      [全口径（含保证金）]  [不含保证金]  [仅保证金]       ← 依据：三个字段同源，但加工条件不同
+用户：（点「不含保证金」）
+助手：完整需求  查询 2026-09-30 全行不含保证金的对公存款余额
+      SQL       SELECT SUM(b.dep_bal_rmb) FROM ads.org_corp_dep_bal_d AS b
+                WHERE b.data_dt = DATE '2026-09-30'
+      口径说明  dep_bal_rmb 由客户汇总表按机构汇总，客户层只汇总 is_margin = '0' 的账户……
+      用表依据  只到全行汇总，用汇总程度最高的机构汇总表
+      执行结果  返回 1 行（模拟库）
 ```
+
+## 🏗 架构
+
+```
+                 ┌──── 元数据层（导入时一次算好）─────────────────────────────┐
+四张清单 + 加工脚本 │ 校验 → 脚本解析补血缘 → 推导关联 → 收样例 → 字段向量 → 元数据库 │
++ 历史样例  ──────► │                     血缘图（字段级）+ 关联图（表级）           │
+                 └────────────────────────────────────────────────────────────┘
+查询流水线（LangGraph，七步里只有三步调模型）：
+  ① 需求解析(模型) → ② 候选召回 → ③ 证据组装 → ④ 选表定口径(模型) → ⑤ 生成 SQL(模型) → ⑥ 静态校验 → ⑦ 输出
+                       ▲                         │  缺字段：上溯一层（最多 2 层）   │ 有错误：带着错误重写（最多 2 次）
+                       └─────────────────────────┘                     ⑤ ◄─────┘
+                                                 │  口径分岔：反问 → ⑦
+```
+
+- **确定性的部分全是代码**：召回（关键字 + BGE 向量）、血缘展开、同源字段对比、关联路径、静态校验（sqlglot），同样的输入得到同样的证据
+- **模型只做三件事**：把需求拆成要素、按证据选表定口径、写 SQL；①④ 用 JSON 模式输出，代码核对不过就带着问题重试一次
+- **只生成不执行**：真实库默认只给 SQL；模拟库可以接 DuckDB 只读执行，用来演示和评估
 
 ## ✨ 核心功能
 
-| 功能 | 说明 | 状态 |
-|------|------|:--:|
-| 📚 知识库问答 | 上传 PDF/Word/TXT/MD，自然语言提问，AI 基于文档回答（带引用来源） | ✅ |
-| 📊 自然语言查数据 | Text-to-SQL：用中文描述需求，自动生成 SQL 并执行 | ✅ |
-| 🤖 多 Agent 协作 | LangGraph Supervisor 自动判断意图，路由到 RAG/SQL/Mixed | ✅ |
-| 📈 自动可视化 | 查询结果自动选择柱状图/折线图/饼图展示 | ✅ |
-| 🔌 REST API | FastAPI 统一接口，Swagger 自动文档 | ✅ |
-| 💬 Web 界面 | Streamlit 三模块：Chat / Upload / Query，流式输出 | ✅ |
-| 🐳 一键部署 | Docker Compose 启动，改个 .env 就能跑 | ✅ |
-| 🧠 多轮对话 | MemorySaver 记忆上下文，支持追问 | ✅ |
+| 功能 | 说明 |
+|------|------|
+| 🔎 口径从血缘里来 | 指标字段沿血缘上溯三跳，带上每一跳的加工表达式、过滤条件、关联条件；同源不同口径的字段自动比对 |
+| ❓ 反问一次 | 只有「同源不同口径」而需求没说时才问，每个选项写明对应哪个字段、怎么加工 |
+| ⬆️ 向上溯源 | 专题层缺维度或粒度不够时上溯到整合层、贴源层，并还原下游加工时用过的条件 |
+| 💬 连续追问 | 「只看制造业」「换成 6 月末」合并成新的完整需求 |
+| ✅ 静态校验 | 表、字段存在，快照表带数据日期，关联不发散等八条规则，不过就带着错误重写 |
+| 🗂 元数据页 | 按层级浏览表和字段，查看字段的上游链路和下游字段 |
+| 🔌 REST API | `POST /nl2sql/query` 等四个接口，Swagger 自动文档 |
 
 ## 🚀 快速开始
 
-### 方式一：Docker（推荐）
-
 ```bash
-# 1. 克隆项目
-git clone https://github.com/z2995299523-zrz/agentflow.git
-cd agentflow
-
-# 2. 配置 API Key
-cp .env.example .env
-# 编辑 .env，填入 DEEPSEEK_API_KEY=你的Key
-
-# 3. 一键启动
-docker-compose up -d
-
-# 4. 打开浏览器
-# Web UI:  http://localhost:8501
-# API文档: http://localhost:8000/docs
-```
-
-### 方式二：本地运行
-
-```bash
-# 1. 安装依赖
+# 1. 安装依赖（国内加 -i https://pypi.tuna.tsinghua.edu.cn/simple）
 pip install -r requirements.txt
 
-# 国内加速：
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-# 2. 配置
+# 2. 配置：复制模板，填入 DEEPSEEK_API_KEY
 cp .env.example .env
-# 编辑 .env，填入 DEEPSEEK_API_KEY
 
-# 3. 启动（Windows）
-start.bat
+# 3. 导入模拟专题库的元数据（第一次会下载并加载 BGE 模型；加 --no-index 跳过向量）
+python -m metadata.importer
 
-# 3. 启动（Linux/Mac）
-bash start.sh
+# 4. 启动：Windows 用 start.bat，Linux/Mac 用 bash start.sh
+#    界面 http://localhost:8501，接口文档 http://localhost:8000/docs
+#    想在界面上看执行结果，在 .env 里设 EXECUTOR=duckdb
 ```
+
+Docker：`docker-compose up -d`（镜像构建时会导入模拟库的元数据，不算向量）。
+
+### 换成自己的专题库
+
+1. `python -m metadata.template 模板.xlsx` 生成空白模板，按表清单、字段清单、血缘清单、关联关系填好，加工脚本放进 `scripts/`，历史样例放进 `examples/`
+2. `.env` 里把 `MART_DIR` 指向资料目录
+3. `python -m metadata.importer`，看导入报告里的错误和警告
 
 ## 📡 API 端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/health` | 健康检查 |
+| `POST` | `/nl2sql/query` | 查数：`{question, prev_requirement, prev_clarify}`，返回状态、SQL、口径说明、校验结果、逐步轨迹 |
+| `GET` | `/metadata/tables` | 表清单，可按层级过滤 |
+| `GET` | `/metadata/lineage` | 一个字段的上游链路和下游字段 |
+| `GET` | `/health` | 资料目录、各类元数据数量、执行层、模型；没导入元数据时提示导入命令 |
 | `GET` | `/docs` | Swagger 自动文档 |
-| `POST` | `/rag/upload` | 上传文档到知识库 |
-| `POST` | `/rag/query` | 知识库问答（带来源引用） |
-| `GET` | `/rag/documents` | 列出已上传文档 |
-| `DELETE` | `/rag/documents/{name}` | 删除文档 |
-| `POST` | `/sql/query` | 自然语言 → SQL 查询 |
-| `POST` | `/sql/visualize` | 查询 + 自动生成图表（Base64 PNG） |
-| `GET` | `/sql/schema` | 获取数据库表结构 |
 
-## 🧪 测试
+## 🧪 测试与评估
 
 ```bash
-# 运行全部测试
-python run_tests.py
-
-# 快速模式（跳过 LLM 测试）
-python run_tests.py --quick
-
-# 运行质量评估
-python run_eval.py
+python run_tests.py      # 单元测试（1469 项，不调模型、不加载 BGE）
+python run_eval.py       # 模拟库三组对照评估（调用 DeepSeek，40 题，几分钟）
 ```
 
-### 测试结果基线
+### 评估基线（模拟库，2026-10-17，deepseek-chat）
 
-| 套件 | 测试数 | 结果 |
-|------|:--:|:--:|
-| SQL 模块 | 18 | ✅ 全部通过 |
-| RAG 模块 | 5 | ✅ 全部通过 |
-| Function Calling | 9 | ✅ 全部通过 |
-| LangGraph 工作流 | 17 | ✅ 全部通过 |
+| 指标 | A 仅模型结构 | B 加血缘 | C 加血缘和样例 |
+|------|:--:|:--:|:--:|
+| 执行准确率（主指标，35 道 SQL 题） | 82.9% | 80.0% | **97.1%** |
+| 候选召回率 | 100% | 100% | 100% |
+| 字段准确率 | 82.9% | 91.4% | 94.3% |
+| 反问准确率（40 题） | 95.0% | 95.0% | 97.5% |
+| 追问准确率（5 题） | 100% | 100% | 100% |
+| 平均耗时 / 模型调用 | 6.0 秒 / 3.3 次 | 6.1 秒 / 3.5 次 | 6.3 秒 / 3.4 次 |
 
-### 性能基线
-
-| 指标 | 数值 |
-|------|------|
-| API P50 响应 | 7.4s |
-| API P95 响应 | 15.8s |
-| RAG 检索 | <0.1s（BGE GPU 加速） |
-| 文档上传 | <0.1s（小文件） |
+完整报告（含每道错题的归因）：[eval/reports/2026-10-17_nl2sql_eval.md](eval/reports/2026-10-17_nl2sql_eval.md)。题库和模拟库是为本项目构造的，局限写在报告末尾。
 
 ## 🛠 技术栈
 
 | 层 | 技术 | 选型理由 |
 |----|------|---------|
-| LLM | DeepSeek Chat | 便宜、国内直连、中文好 |
-| Embedding | BGE-small-zh-v1.5（本地） | 免费、离线、GPU 加速 |
-| AI 框架 | LangChain 1.x + LangGraph | 生态最全、Agent 支持好 |
-| 向量数据库 | ChromaDB | 轻量、零配置、持久化 |
-| 后端 | FastAPI（异步） | 高性能、自动文档 |
-| 前端 | Streamlit | 纯 Python、聊天组件原生 |
-| 部署 | Docker Compose | 一键启动、环境隔离 |
+| LLM | DeepSeek Chat（OpenAI 兼容接口） | 便宜、国内直连、中文好，JSON 模式稳定 |
+| 编排 | LangGraph 1.x | 三条回路（上溯、修正、反问）用条件边表达，逐步给出进度 |
+| SQL 解析与校验 | sqlglot | 方言转换、作用域解析（CTE、子查询、临时表）、静态校验 |
+| Embedding | BGE-small-zh-v1.5（本地） | 免费、离线；向量存进元数据库，numpy 全量检索 |
+| 元数据库 | SQLite | 单文件，导入一次，查询时全部读进内存 |
+| 模拟库执行 | DuckDB | 只读、带超时，演示和评估用 |
+| 后端 / 前端 | FastAPI / Streamlit | 自动文档 / 纯 Python |
 
 ## 📁 项目结构
 
 ```
 agentflow/
-├── app.py              # Streamlit WebUI（Chat+Upload+Query）
-├── main.py             # FastAPI 入口（7 端点）
-├── config.py           # 配置管理（多 Provider 切换）
-├── run_tests.py        # 统一测试入口
-├── run_eval.py         # 质量评估入口
-│
-├── rag/                # RAG 知识库模块
-│   ├── loader.py       #   文档加载（PDF/Word/TXT/MD）
-│   ├── vectorstore.py  #   ChromaDB + BGE 向量化
-│   └── chain.py        #   LCEL 问答链（带来源引用）
-│
-├── sql/                # Text-to-SQL 模块
-│   ├── agent.py        #   SQL Agent（安全封装，只读）
-│   ├── visualizer.py   #   自动图表生成（bar/line/pie）
-│   └── tools.py        #   Function Calling 工具封装
-│
-├── graph/              # LangGraph 多Agent 工作流
-│   ├── state.py        #   共享 State 定义
-│   ├── nodes.py        #   RAG + SQL 节点
-│   ├── supervisor.py   #   意图识别路由器
-│   ├── workflow.py     #   StateGraph 组装
-│   └── memory.py       #   多轮对话记忆
-│
-├── prompts/            # Prompt 工程体系
-├── eval/               # 评估模块（路由/端到端/LLM-as-Judge）
-├── notes/              # 技术笔记库（24篇）
-│
-├── docker-compose.yml  # Docker 编排
-├── Dockerfile          # Docker 镜像
-├── start.bat           # Windows 一键启动
-├── start.sh            # Linux/Mac 一键启动
-├── .env.example        # 环境变量模板
-└── requirements.txt    # Python 依赖
+├── app.py              # Streamlit 界面：查数页、元数据页
+├── main.py             # FastAPI 接口（4 个）
+├── config.py           # 配置：模型、资料目录、方言、执行层
+├── run_tests.py        # 单元测试入口
+├── run_eval.py         # 评估入口
+├── metadata/           # 元数据层：模板、读取、校验、脚本解析、关联推导、向量、样例、导入
+├── lineage/            # 血缘图与关联图
+├── nl2sql/             # 查询流水线：七步、LangGraph 编排、装配、执行层
+├── prompts/            # 三个模型步骤的提示词
+├── eval/               # 题库、结果比对、评估程序、报告
+├── data/mock_mart/     # 模拟专题库（银行对公存贷款，三层 14 张表）：清单、加工脚本、样例、造数程序
+├── tests/              # 单元测试
+└── notes/              # 设计文档与技术笔记
 ```
 
 ## 📝 开发进度
 
-- [x] Week 1-2: RAG 知识库问答
-- [x] Week 3-4: Text-to-SQL + Function Calling
-- [x] Week 5: LangGraph 多Agent 工作流
-- [x] Week 6: Streamlit WebUI + 流式输出 + 端到端测试
-- [x] Week 7: Docker 部署 + 测试体系 + 文档
-- [ ] Week 8: 面试冲刺
+- [x] v1（标签 `v1-agentflow`）：文档问答、Text-to-SQL、LangGraph 多 Agent、Streamlit、Docker
+- [x] 元数据层、真实资料转换器、模拟专题库、方言转换与执行层、评估题库
+- [x] 加工脚本解析与补血缘、关联推导、血缘图、向量召回、样例库、静态校验
+- [x] 三个模型步骤、证据组装、LangGraph 编排、三组对照评估、新界面与接口、下线旧模块
 
 ## 👤 作者
 
@@ -220,8 +152,7 @@ agentflow/
 
 - GitHub: [@z2995299523-zrz](https://github.com/z2995299523-zrz)
 - 邮箱: z2995299523@gmail.com
-- 技术栈: Python / LangChain / RAG / Text-to-SQL / Agent
 
 ---
 
-📌 **面试中怎么说**：这是一个从 0 到 1 独立开发的企业级 AI Agent 平台，覆盖 RAG + Text-to-SQL + 多 Agent 协作三大核心能力。LangGraph Supervisor 自动判断用户意图并路由到对应 Agent，支持 RAG 和 SQL 的串联分析。全栈自研（FastAPI + Streamlit + Docker），有完整的测试体系和性能基线（P50=7.4s）。
+📌 **面试中怎么说**：查数最难的不是写 SQL，是定口径。字段的中文名和说明常常不全，真正的口径藏在加工脚本里。这个工具把专题库的血缘和加工脚本解析成字段级的加工链路，选表定口径时让模型看着链路做决定，口径有分岔就带着选项反问。七步里只有三步调模型，其余是确定性代码。在模拟库上做了三组对照：加上血缘和样例后，执行准确率从 82.9% 到 97.1%。

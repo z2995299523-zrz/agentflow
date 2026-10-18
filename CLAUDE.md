@@ -2,149 +2,107 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> 最后更新: 2026-06-03 | 由 /init 生成
+> 最后更新: 2026-10-18 | NL2SQL 改造的三份计划都已完成
 
-## NL2SQL 改造（进行中）
+## 项目概述
 
-项目正在改造成「基于专题库模型结构与血缘的自然语言转 SQL」工具，在 `feat/nl2sql` 分支上进行。
-旧版本保留在标签 `v1-agentflow`。改造完成之前，本文件后面对旧模块的说明仍然有效，旧模块不要改动。
+AgentFlow 现在是「基于专题库模型结构与血缘的自然语言转 SQL」工具（查数副驾驶）：用自然语言描述查数需求，结合专题库的数据字典、字段血缘、加工脚本和历史样例，生成可审核的 GaussDB / PostgreSQL 查询 SQL。改造在 `feat/nl2sql` 分支上完成；旧版本（文档问答、旧 SQL Agent、意图路由）保留在标签 `v1-agentflow`，代码已经删除。
 
 - 设计文档：`notes/2026-10-13_design_nl2sql专题库改造.md`
-- 已完成（第一份计划）：元数据层 `metadata/`、真实资料转换器、模拟专题库 `data/mock_mart/`、方言转换与执行层 `nl2sql/`、评估题库 `eval/nl2sql_questions.yaml`
-- 已完成（第二份计划）：SQL 作用域解析 `metadata/sqlscope.py`、加工脚本解析与补血缘 `metadata/script_parser.py`、关联推导 `metadata/relations.py`、血缘图 `lineage/graph.py`、向量索引 `metadata/index.py`（向量存在元数据库里）、样例库 `metadata/examples.py` 与 `data/mock_mart/examples/`、静态校验 `nl2sql/validator.py`、候选召回 `nl2sql/retriever.py`
-- 真实专题库：资料、转换器、转换结果都在 `data/real_mart/`，这个目录不入库。真实的表名、模式名、路径不得写进任何会提交的文件
-- 待做（第三份计划）：三个模型步骤与证据组装、LangGraph 编排、评估、新界面与接口、下线旧模块
-
-```bash
-python -m pytest tests -q                 # NL2SQL 单元测试，不调模型、不加载 BGE（conftest 设了 METADATA_EMBEDDER=hash），836 项
-python -m metadata.importer               # 导入 MART_DIR 指向的资料：校验、解析脚本、补血缘、推导关联、收样例、算向量，生成元数据库和导入报告
-python -m metadata.importer 目录 --no-index   # 不算向量，几秒导完；第一次加载 BGE 在机械盘上冷启动可能要几分钟
-python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel 模板（目标已存在时不覆盖，要覆盖加 --force）
-python -m data.mock_mart.build_mock       # 重新生成模拟专题库（库文件在固态盘上约 15 秒，在机械盘上约 1.5 分钟）
-python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
-python -m metadata.importer data/real_mart   # 导入真实专题库的元数据
-```
+- 真实专题库：资料、转换器、转换结果、评估文件和报告都在 `data/real_mart/`，这个目录不入库。真实的表名、模式名、路径不得写进任何会提交的文件
 
 ## Quick Commands
 
 ```bash
-# 安装依赖
+# 安装依赖（国内加速加 -i https://pypi.tuna.tsinghua.edu.cn/simple）
 pip install -r requirements.txt
-# 国内加速:
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 运行全部测试
-python run_tests.py
+python run_tests.py                       # 单元测试，1469 项，不调模型、不加载 BGE（--quick 效果相同）
+python -m pytest tests/test_workflow.py -q  # 单个测试文件
 
-# 快速模式（跳过 LLM 调用，仅单元测试）
-python run_tests.py --quick
+python -m metadata.importer               # 导入 MART_DIR 指向的资料：校验、解析脚本、补血缘、推导关联、收样例、算向量
+python -m metadata.importer 目录 --no-index   # 不算向量，几秒导完；第一次加载 BGE 在机械盘上冷启动可能要几分钟
+python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel 模板（目标已存在时不覆盖，要覆盖加 --force）
+python -m data.mock_mart.build_mock       # 重新生成模拟专题库（库文件在固态盘上约 15 秒，在机械盘上约 1.5 分钟）
+python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
 
-# 运行单个测试套件
-python test_sql.py          # SQL 模块 (unittest, 18项)
-python test_rag.py          # RAG 模块 (unittest, 5项)
-python test_sql_tools.py    # Function Calling (unittest, 9项)
-python -m pytest test_graph.py -v --tb=short   # LangGraph (pytest, 17项)
+python run_eval.py                        # 模拟库三组对照评估（调用 DeepSeek，40 题，约 3 分钟），报告写到 eval/reports/
+python run_eval.py --configs C --ids B01,K02   # 只跑部分配置和题目
+python run_eval.py --static data/real_mart/eval_questions.yaml --mart data/real_mart --out data/real_mart/eval   # 真实库静态评估
 
-# 运行单个 pytest 用例
-python -m pytest test_graph.py::test_supervisor_routing -v
-
-# 质量评估
-python run_eval.py
-
-# 本地启动（Windows）
-start.bat
-# 本地启动（Linux/Mac）
-bash start.sh
-
-# 单独启动服务
-uvicorn main:app --host 0.0.0.0 --port 8000     # FastAPI → http://localhost:8000/docs
-streamlit run app.py --server.port 8501           # WebUI → http://localhost:8501
-
-# Docker
-docker-compose up -d
-docker-compose down
+uvicorn main:app --port 8000              # 接口 → http://localhost:8000/docs
+streamlit run app.py --server.port 8501   # 界面 → http://localhost:8501（EXECUTOR=duckdb 时展示模拟库的执行结果）
+start.bat                                 # Windows 同时启动接口和界面；Linux/Mac 用 bash start.sh；Docker 用 docker-compose up -d
 ```
 
 ## Environment Setup
 
-- 配置从 **两个 `.env` 文件** 加载：项目 `.env`（优先）+ `D:/hermes-agent-home/.env`（fallback）
-- 复制 `.env.example` → `.env`，填入 `DEEPSEEK_API_KEY`
+- 配置从 **两个 `.env` 文件** 加载：项目 `.env`（优先）+ `D:/hermes-agent-home/.env`（fallback），见 `config.py`
+- 复制 `.env.example` → `.env`，填入 `DEEPSEEK_API_KEY`；`MART_DIR`、`SQL_DIALECT`、`EXECUTOR`、`LLM_TIMEOUT` 的说明在模板里
 - `HF_ENDPOINT=https://hf-mirror.com` 在 `config.py` 顶部设置（必须在其他 import 之前，否则 BGE 模型下载失败）
-- `run_tests.py` 和 `run_eval.py` 各自硬编码读取 `D:/hermes-agent-home/.env` — 如果该路径不存在，测试会因缺 Key 失败
+- 单元测试的 `tests/conftest.py` 设了 `METADATA_EMBEDDER=hash`，不加载 BGE
+- 依赖版本：fastapi ≥ 0.124 加 starlette ≥ 0.49.1（streamlit 1.57 要求 starlette ≥ 0.40）；langgraph 限定 1.x；sqlglot 限定 25.x
 
 ## Architecture
 
-### LangGraph Workflow (核心路由逻辑)
+### 元数据层（导入时一次算好）
 
 ```
-START → supervisor → rag | sql | fallback
-         rag → [mixed且SQL未跑 → sql] | [其他 → finalize]
-         sql → [mixed且RAG未跑 → rag] | [其他 → finalize]
-         finalize → END
-         fallback → END
+四张清单（表、字段、血缘、关联关系）+ 加工脚本 + 历史样例
+  → metadata/loader 读取 → checks 校验 → script_parser 解析脚本、补血缘 → relations 推导关联
+  → examples 收样例（入库前过静态校验）→ index 算字段和样例向量 → store 写进 SQLite 元数据库
 ```
 
-- **supervisor**: LLM 零样本意图分类 → `rag` / `sql` / `fallback`
-- **mixed 双路**: 当意图为 `mixed` 时，RAG 和 SQL 节点会相互路由，确保两者都执行后再 finalize
-- **防死循环**: `route_after_rag`/`route_after_sql` 检查对方结果是否已存在，避免无限循环
-- **MemorySaver**: 通过 `thread_id` 隔离多轮对话，`make_config(thread_id)` 创建会话，`clear_memory(thread_id)` 清除
+- `metadata/store.py` 的 `MetadataStore` 是只读入口，构造时全部读进内存
+- `metadata/sqlscope.py` 作用域解析：字段穿过 CTE、UNION、子查询、临时表追溯到实体表
+- `lineage/graph.py` 血缘图与关联图：字段上游链路（每一跳带加工表达式、过滤条件、关联条件）、同源对比、表的上下游、关联路径
 
-### State 定义 (`graph/state.py`)
-
-`AgentState` 是一个 `TypedDict`，字段在各节点间流转：
-- `messages` — 用 `add_messages` reducer 自动追加（不覆盖）
-- `question` / `intent` / `rag_result` / `sql_result` / `final_answer` — 普通字段，节点返回部分字典即可合并
-
-### 模块依赖关系
+### 查询流水线（`nl2sql/`，七步里三步调模型）
 
 ```
-app.py (Streamlit WebUI) ──→ graph/ (LangGraph workflow)
-main.py (FastAPI)       ──→ rag/ + sql/  (独立调用，不走 graph)
-config.py               ←── 所有模块共用（get_llm_kwargs / get_db_uri）
-prompts/                ←── rag/ + sql/ + graph/supervisor 引用
+QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(模型) → ⑤ generate(模型) → ⑥ validate → ⑦ output → QueryResult
+  ④ need_upstream：上溯一层回到 ②（最多 2 层）；need_clarify、cannot_answer 直接去 ⑦
+  ⑥ 有错误：带着错误回到 ⑤（最多修正 2 次）
 ```
 
-- `app.py` 用 `wf.stream()` 实现流式输出，通过 `st.status()` 实时展示 supervisor 意图和 agent 执行过程
-- `main.py` 的 7 个 REST 端点是独立调用，不经过 LangGraph（Week 5 之前的遗留设计）
+- `schemas.py`：各步骤的输入输出，是模块之间的契约；`llm.py`：模型调用（`ChatModelClient`、测试用的 `ScriptedLLM`、带重试的 `structured_call`）
+- `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（超过 4 万字按九级收缩）
+- `retriever.py` 候选召回（关键字加向量，三层范围）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R8；`output.py` 第 ⑦ 步的工具
+- `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
+- `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB
+- 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`）
+- 对照实验开关 `use_lineage`、`use_examples`：A 组 False/False（全部层级召回、只给表结构推得出的关联、不上溯），B 组 True/False，C 组 True/True
+
+### 界面、接口与评估
+
+- `app.py`（Streamlit）：查数页（逐步进度、反问点选、追问、新话题、执行结果）、元数据页（按层级看表和字段、字段的上下游）
+- `main.py`（FastAPI）：`POST /nl2sql/query`、`GET /metadata/tables`、`GET /metadata/lineage`、`GET /health`
+- `eval/`：40 题题库（10 题登记了其它正确答案）、结果比对、三组对照评估与错题归因、真实库静态评估。基线（2026-10-17）：执行准确率 A 82.9% / B 80.0% / C 97.1%，报告 `eval/reports/2026-10-17_nl2sql_eval.md`
 
 ### Test Infrastructure
 
-| 套件 | 框架 | 文件 | LLM 依赖 |
-|------|------|------|:--:|
-| SQL 模块 | `unittest` | `test_sql.py` | 是 |
-| RAG 模块 | `unittest` | `test_rag.py` | 是 |
-| FC 工具 | `unittest` | `test_sql_tools.py` | 否 |
-| LangGraph | `pytest` | `test_graph.py` | 是 |
-| 评估 | `pytest` | `eval/langgraph_eval.py` | 是 |
-
-`run_tests.py --quick` 跳过 LangGraph 评估，其他套件即使需要 LLM 也会运行（需 Key）。
+`tests/` 下全部是 pytest，1469 项，不调模型、不加载 BGE、不引用 `data/real_mart`。公共夹具在 `tests/conftest.py`：`tiny_store`、`mock_store`、`mock_graph`、`mock_retriever`、`mock_validator`、`mock_db`。
 
 ## Tech Stack
 
 | 层 | 技术 | 注意 |
 |----|------|------|
-| LLM | DeepSeek Chat (via OpenAI 兼容 API) | 默认 provider，便宜/国内直连/中文好 |
-| AI 框架 | LangChain 1.x + LangGraph 1.x | ⚠️ 禁止用 0.x chains 模块，用 LCEL |
-| Embedding | BAAI/bge-small-zh-v1.5 (sentence-transformers) | 本地免费，GPU 加速 |
-| 向量库 | ChromaDB | 本地持久化 `./chroma_data/` |
-| 后端 | FastAPI | 异步，7 端点 |
-| 前端 | Streamlit | app.py，三模块：Chat/Upload/Query |
-| 数据库 | SQLite `./data/sample.db` | 3 表：products/customers/sales（72 条） |
-| 部署 | Docker Compose | 4 个卷持久化：chroma_data/uploads/data/hf_cache |
+| LLM | DeepSeek Chat（OpenAI 兼容接口，langchain-openai） | ①④ 用 JSON 模式，温度 0 |
+| 编排 | LangGraph 1.x | 不带检查点，流水线无状态 |
+| SQL | sqlglot 25.x | 方言转换、作用域解析、静态校验 |
+| Embedding | BAAI/bge-small-zh-v1.5（sentence-transformers） | 向量存进元数据库，numpy 全量检索 |
+| 元数据库 | SQLite（`data/<资料>/build/metadata.db`） | 生成物不入库 |
+| 模拟库执行 | DuckDB | 只读、超时、限量读取 |
+| 后端 / 前端 | FastAPI / Streamlit | |
+| 部署 | Docker Compose | 镜像构建时导入模拟库元数据 |
 
-## LangChain 1.x 关键约束（踩坑总结）
+## 踩坑与约束
 
-1. **禁止 `import langchain.chains`** — 用 LCEL 手动组合
-2. **`langchain_chroma` 包不存在** — 用 `langchain_community.vectorstores.Chroma`
-3. **`@tool` 装饰器语法**: `@tool(description=...)` 不是 `@tool("...")`
-4. **`create_sql_agent` 必须**: `handle_parsing_errors=True` + `return_intermediate_steps=True`
-5. **`SafeSQLDatabase.run()` 必须透传 `**kwargs`**（否则 `execution_options` 报错）
-6. **DeepSeek 输出格式不稳定** — 通过 suffix 强制 `Final Answer:` 格式解决
-7. **`matplotlib.use('Agg')` 必须在 `import pyplot` 之前**
-8. **Windows 中文字体**: SimHei + `axes.unicode_minus = False`
-9. **Pandas 3.0 + SQLAlchemy 2.0**: `read_sql_query` 不兼容，用 `conn.exec_driver_sql()` 替代
-
-完整踩坑记录见 `notes/2026-05-16_pitfall_fastapi-启动踩坑.md`
+1. `langchain_openai` 的 azure 模块会连带导入 transformers 和 torch，冷启动十几到几十秒。`ChatModelClient` 构造时才导入它，测试里用假模块
+2. DeepSeek 的 JSON 模式要求提示词里出现 json 字样和完整的格式示例
+3. 固定规则放系统提示词、每次变化的内容放用户消息，DeepSeek 的前缀缓存才能命中
+4. sqlglot 美化会把 `DATE '…'` 改写成 `CAST('…' AS DATE)`；`format_sql` 用校验器核对美化没有引入新错误
+5. Windows 控制台是 GBK 时打印 emoji 会报错（`run_tests.py` 已处理）；脚本打印中文前设 `PYTHONIOENCODING=utf-8`
 
 ## ⛔ 硬性规则（不可跳过）
 
@@ -161,19 +119,17 @@ prompts/                ←── rag/ + sql/ + graph/supervisor 引用
 - LLM 调用统一走 `config.get_llm_kwargs()`，不硬编码 Key
 - 新增 Prompt 写入 `prompts/` 目录，不从代码里拼字符串
 
-## Current Status (2026-06-03)
+## Current Status (2026-10-18)
 
 | 模块 | 状态 |
 |------|:--:|
-| RAG + Embedding | ✅ |
-| Text-to-SQL + FC | ✅ |
-| LangGraph 多Agent | ✅ |
-| FastAPI (7 端点) | ✅ |
-| Streamlit WebUI (流式输出) | ✅ |
-| Docker 部署 | ✅ |
-| 测试体系 + 评估 | ✅ |
-| README + 文档 | ✅ |
-| 面试冲刺 (Week 8) | ⏳ |
+| 元数据层、真实资料转换器、模拟专题库 | ✅ |
+| 脚本解析与补血缘、关联推导、血缘图、向量召回、样例库、静态校验 | ✅ |
+| 三个模型步骤、证据组装、LangGraph 编排 | ✅ |
+| 三组对照评估、真实库静态评估 | ✅ |
+| 新界面与接口 | ✅ |
+| 旧模块下线 | ✅ |
+| 面试冲刺 | ⏳ |
 
 ## 用户背景（张润泽）
 - 6 年银行对公数据开发（ETL/数据库/调度），大专学历，全职转型 AI 应用开发
@@ -186,4 +142,4 @@ prompts/                ←── rag/ + sql/ + graph/supervisor 引用
 - Hermes 负责：需求理解、任务分解、写计划、进度跟进、中文沟通、代码讲解
 - Claude Code 负责：编码实现、代码审查、运行测试、修复 bug
 - 桥梁文件：`.hermes/bridge.md`（每次会话结束后更新）
-- 项目知识库：`notes/`（24 篇笔记，面试可直接用）
+- 项目知识库：`notes/`（39 篇笔记，面试可直接用）
