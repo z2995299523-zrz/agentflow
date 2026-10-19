@@ -5,6 +5,7 @@ Description=AgentFlow conversation backup and restore verification
 Type=oneshot
 User=agentflow
 Group=agentflow
+EnvironmentFile=/etc/agentflow/app.env
 ExecStart=/opt/agentflow/current/.venv/bin/python /opt/agentflow/current/deploy/backup_history.py
 UMask=0077
 NoNewPrivileges=true

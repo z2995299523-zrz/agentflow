@@ -2,6 +2,8 @@
 
 沿用同机已有网站的 Git 指定提交发布方式：本地测试及构建 → 推送 Git → 服务器拉取完整提交 → Linux 测试、准备数据 → 备份 → 原子切换 → 验证。新增站点使用独立账户和端口。
 
+给 Claude Code 接手的完整操作文件见 [服务器部署交接](CLAUDE_CODE_SERVER_DEPLOYMENT.md)，包含 SSH、本机与服务器命令、真实资料传输、访问控制、验收和回退。
+
 | 项目 | 位置 |
 | --- | --- |
 | HTTPS | `https://<服务器IP>:8447` |
@@ -10,13 +12,15 @@
 | 独立版本 | `/opt/agentflow/releases/git-<完整SHA>` |
 | 当前版本 | `/opt/agentflow/current` |
 | 元数据和模拟库 | `/var/lib/agentflow/marts/<SHA>/build`，每版独立 |
-| 稳定会话库 | `/var/lib/agentflow/history.db`，跨版本保留 |
+| 真实资料快照 | `/var/lib/agentflow/datasets/<资料版本>`，独立校验安装，不入 Git |
+| 真实会话库 | `/var/lib/agentflow/history-real.db`，跨真实资料版本保留 |
+| 旧模拟会话库 | `/var/lib/agentflow/history.db`，保留 |
 | 模型缓存 | `/var/lib/agentflow/huggingface` |
 | 配置 | `/etc/agentflow/app.env`，root:agentflow 0640，不进入 Git |
 | 备份 | `/var/backups/agentflow`，每日 UTC 04:25，在线备份并隔离恢复核对行数 |
 | 证据 | `/opt/agentflow/deployments/<SHA>`，Linux 测试、依赖清单、发布及验收记录 |
 
-这是使用模拟银行专题库的公开演示站，继承现有应用的共享会话行为；没有用户隔离。不要输入真实客户资料或敏感需求。真实专题库目录和本地会话记录不上传。模型请求使用服务器的 DeepSeek 配置。
+当前使用真实专题库模型资料，入口通过独立访问密码保护；进入站点后仍是共享会话，没有按用户隔离。真实资料通过私有快照上传，真实名称和资料不进入 Git。本地会话不上传。模型请求使用服务器的 DeepSeek 配置，`EXECUTOR=none`，只生成并校验 SQL，不连接单位业务数据库。
 
 ## 本地准备
 
@@ -36,8 +40,9 @@ python deploy/package_frontend.py
 LLM_PROVIDER=deepseek
 LLM_MODEL=deepseek-chat
 DEEPSEEK_API_KEY=<通过安全通道写入>
-MART_DIR=./data/mock_mart
-EXECUTOR=duckdb
+MART_DIR=/var/lib/agentflow/datasets/real-20261019-v1
+EXECUTOR=none
+AGENTFLOW_HISTORY_DB=/var/lib/agentflow/history-real.db
 SQL_DIALECT=postgres
 LLM_TIMEOUT=120
 ```
@@ -45,7 +50,7 @@ LLM_TIMEOUT=120
 服务器拉取指定提交后，使用该提交内的 `deploy/release.py`。代码使用同机已有且重新核验摘要的 `<uv 路径>`；先安装官方 CPU 版 torch，再安装与本地一致的直接依赖，记录实际 Linux 依赖版本。该工具不会修改其它网站的运行环境。
 
 ```bash
-sudo python3 /opt/agentflow/releases/git-<SHA>/deploy/release.py <SHA> prepare --frontend /tmp/agentflow-frontend-<SHA>.tar.gz
+sudo python3 /opt/agentflow/releases/git-<SHA>/deploy/release.py <SHA> prepare --frontend /tmp/agentflow-frontend-<SHA>.tar.gz --mart-dir /var/lib/agentflow/datasets/real-20261019-v1 --executor none
 sudo python3 /opt/agentflow/releases/git-<SHA>/deploy/release.py <SHA> activate
 sudo python3 /opt/agentflow/current/deploy/release.py <SHA> verify
 ```
@@ -58,7 +63,7 @@ Nginx 复用同机已有的 IP 证书和续期任务，只新增 8447 入口。S
 
 ## 验证和回滚
 
-除 `verify` 外，必须验证公网 HTTPS、首页静态资源、前端路由、元数据及字段血缘、真实 DeepSeek 问答、SSE 分步到达、DuckDB 只读结果，以及会话在重启后仍存在。检查原有站点服务与 HTTPS 仍正常。公网验证使用系统证书校验，不能加 `-k` 作为正式验收。
+除 `verify` 外，必须验证匿名访问返回 401、已认证的公网 HTTPS、首页静态资源、前端路由、元数据及字段血缘、真实 DeepSeek 问答、SSE 分步到达，以及会话在重启后仍存在。真实资料应为 `executor=none` 且没有实际执行，不能当作真实数据库执行验收。检查原有站点服务与 HTTPS 仍正常。公网验证使用系统证书校验，不能加 `-k` 作为正式验收。
 
 ```bash
 sudo python3 /opt/agentflow/current/deploy/release.py <当前SHA> rollback
@@ -66,4 +71,4 @@ sudo python3 /opt/agentflow/current/deploy/release.py <当前SHA> rollback
 
 回滚只切换本次发布登记的上一版代码，保留最新会话。首次发布没有上一版时脚本拒绝回滚，需人工审阅停用。当前没有会话结构迁移；如后续改动 `nl2sql/history.py` 的建表结构，必须先评估兼容性并单独演练迁移，不能直接套用代码回滚。
 
-备份只包含有价值的会话库和来源版本记录；元数据、模拟数据、模型可以从已登记版本重新生成。服务器本机备份不等于离机备份。已有备份与历史版本不自动清理。
+每日备份包含当前资料对应的会话库和来源版本记录；真实资料快照不在 Git 内，必须另外保留本机原资料及服务器上的原始资料包和摘要，不能宣称仅从 Git 就能恢复。模拟数据可从代码再生成，BGE 模型可重新下载。服务器本机备份不等于离机备份。已有备份与历史版本不自动清理。

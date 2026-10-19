@@ -1,6 +1,8 @@
 """在线备份会话库，并通过隔离恢复核对表行数；不复制密钥和模型缓存。"""
 import hashlib
+import argparse
 import json
+import os
 import sqlite3
 import tempfile
 from contextlib import closing
@@ -41,9 +43,13 @@ def backup_history(source: Path, destination: Path) -> dict:
 
 
 def main() -> None:
-    """备份服务器上的稳定会话库，并输出不含秘密的验收证据。"""
+    """备份当前资料对应的会话库，也允许在切换前指定旧资料的会话路径。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", type=Path, default=Path(os.environ.get(
+        "AGENTFLOW_HISTORY_DB", "/var/lib/agentflow/history.db")))
+    args = parser.parse_args()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    print(json.dumps(backup_history(Path("/var/lib/agentflow/history.db"),
+    print(json.dumps(backup_history(args.source,
                                    Path("/var/backups/agentflow") / f"history-{stamp}.db"),
                      ensure_ascii=False))
 
