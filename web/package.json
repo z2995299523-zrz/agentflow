@@ -1,0 +1,30 @@
+{
+  "name": "agentflow-web",
+  "private": true,
+  "version": "1.0.0",
+  "description": "专题库查数副驾驶的前端：查数页、元数据页",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@ant-design/icons": "6.3.4",
+    "@xyflow/react": "12.12.0",
+    "antd": "6.6.5",
+    "highlight.js": "11.12.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-router": "7.18.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "5.9.3",
+    "vite": "8.3.2"
+  }
+}

@@ -43,7 +43,6 @@ LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "120"))
 # ============================================
 FASTAPI_HOST = os.getenv("FASTAPI_HOST", "0.0.0.0")
 FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", "8000"))
-STREAMLIT_PORT = int(os.getenv("STREAMLIT_PORT", "8501"))
 
 
 def get_llm_kwargs(temperature: float | None = None):

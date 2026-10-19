@@ -12,9 +12,9 @@
 | NL2SQL 改造 | ✅ 三份计划都已完成，生成质量做了第二轮 | 2026-10-19 已快进合并到 master 并推送到 GitHub（5027867），标签 `v1-agentflow` 也已推送 |
 | 元数据层与血缘图 | ✅ 完成 | metadata/（模板、读取、校验、脚本解析补血缘、关联推导、样例库、向量、导入）、lineage/graph.py |
 | 查询流水线 | ✅ 完成 | nl2sql/：七步（三步调模型）、LangGraph 编排、证据九级收缩、执行层（超时、限量读取） |
-| 界面与接口 | ✅ 完成 | app.py 查数页、元数据页；main.py 四个接口 |
+| 界面与接口 | ✅ 前端换成 React | web/（React + Ant Design）查数页、元数据页，前后端分开部署；main.py 11 个接口（含 SSE 流式查数、会话历史） |
 | 评估 | ✅ 第二轮 | 模拟库执行准确率首轮 A 82.9% / B 80.0% / C 97.1% → 第二轮两次运行 A 85.7%、82.9% / B 100%、91.4% / C 97.1%、97.1%；真实库给出 SQL 10/11 → 11/11 |
-| 测试 | ✅ 1546 项 | `python run_tests.py`，不调模型、不加载 BGE |
+| 测试 | ✅ 1552 项 | `python run_tests.py`，不调模型、不加载 BGE；前端 `cd web && npm run build`（类型检查加构建） |
 | 旧模块 | 🗑 已下线 | rag/、sql/、graph/ 等已删，旧版本在标签 `v1-agentflow` |
 | 笔记库 | ✅ 40 篇 | notes/（含设计文档、六步讲解、面试话术） |
 | 下一步 | ⏳ | 用户人工判断真实库 11 题的 SQL（R04 的两种答法）；面试冲刺 |
@@ -22,6 +22,24 @@
 ---
 
 ## 📜 历史记录
+
+### 2026-10-19 · 会话 [Claude Code] — 前端改造：React + Ant Design 替换 Streamlit
+
+**用户定的：** React + TypeScript + Vite + Ant Design；前后端分开部署；会话历史存数据库（先用 SQLite）；字段血缘画成节点连线图。
+
+**做了什么：** 笔记 `notes/2026-10-19_tech_nl2sql-前端改造.md`。
+- 接口：新增 SSE 流式查数 `POST /nl2sql/stream`；会话 `/conversations` 一组（列、建、取、改名、删，提问 `POST /conversations/{id}/turns` 也是 SSE）；元数据 `columns`、`search`、`examples`；`lineage` 带链路上每个字段的中文名和层级，`tables` 带说明，`health` 带方言
+- 会话历史 `nl2sql/history.py`：每套资料一个 `build/history.db`（不入库）；追问、反问的上下文由服务端从会话里算，规则和原来界面一样
+- 修了一个锁问题：第一次装配流水线（机械盘上约 3 分钟）期间 `/health`、元数据、会话接口全部卡住。装配改用单独的锁，接口启动时在后台预热（装配、加载 BGE）
+- 前端 `web/`：查数页（七步进度、反问卡片、SQL 高亮复制、结果分页导出、会话列表）、元数据页（层级筛选、服务端搜索、字段清单、React Flow 血缘图）
+- 部署：`start.bat`、`start.sh` 起接口加 `vite preview`（8080）；Docker 两个容器（`web` 多阶段构建，nginx 转发 `/api`、SSE 不缓冲）
+- 删掉 `app.py`、`tests/test_app.py`、streamlit 和 pandas 依赖。本机 `.claude/launch.json`（不入库）换成 api（8000，DuckDB）、web（5173）、web-preview（8080）、api-real（8010，真实库）、web-real（5180）
+
+**验证：** 单元测试 1552 项全部通过；前端类型检查、构建通过；内置浏览器实测模拟库加 DuckDB（提问、反问点选、追问、30 行分页、改名、新会话、元数据、搜索、血缘图）和真实库（R02 出 SQL、元数据 833 张表、最长一条有 42 条血缘的链路图）；`vite preview` 的转发下 SSE 逐步到达。
+
+**遗留：** Docker 镜像没实测（本机 Docker 没启动）；首屏 JS 366 KB（gzip），以后可以再拆包。
+
+**下一步：** 用户在浏览器里看一遍界面；决定什么时候推送。
 
 ### 2026-10-19 · 会话 [Claude Code] — 合并到 master 并推送
 

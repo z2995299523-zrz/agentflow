@@ -137,6 +137,50 @@ def test_get_pipeline_is_cached_shared_across_threads_and_cleared_by_reset(impor
     assert service.get_pipeline() is not pipeline and len(created) == 2
 
 
+def test_metadata_and_history_stay_available_while_the_pipeline_is_assembling(imported_mart, monkeypatch):
+    monkeypatch.setattr(config, "MART_DIR", str(imported_mart))
+    assembling, release = threading.Event(), threading.Event()
+
+    def slow_client(**kwargs):                     # 第一次导入模型库很慢：装配卡在这里
+        assembling.set()
+        release.wait(10)
+        return ScriptedLLM([])
+
+    monkeypatch.setattr(service, "ChatModelClient", slow_client)
+    found = []
+    worker = threading.Thread(target=lambda: found.append(service.get_pipeline()))
+    worker.start()
+    assert assembling.wait(10)
+
+    answered = []
+    reader = threading.Thread(target=lambda: answered.append((service.get_metadata(), service.get_history())))
+    reader.start()
+    reader.join(5)
+    answered_while_assembling = bool(answered)      # 放行之前看：装配期间元数据、会话历史照常能取，不排队
+    release.set()
+    worker.join(10)
+
+    assert answered_while_assembling
+    assert found and service.get_pipeline() is found[0]
+
+
+def test_warm_up_assembles_the_pipeline_and_never_raises(imported_mart, monkeypatch):
+    monkeypatch.setattr(config, "MART_DIR", str(imported_mart))
+    monkeypatch.setattr(service, "ChatModelClient", lambda **kwargs: ScriptedLLM([]))
+
+    service.warm_up()
+    assert service._pipeline is not None                                             # 第一问直接用缓存
+
+    service.reset_pipeline()
+
+    def no_key(**kwargs):
+        raise ValueError("未找到 deepseek 的 API Key")
+
+    monkeypatch.setattr(service, "ChatModelClient", no_key)
+    service.warm_up()                                                                 # 没配 Key：只记日志，不抛
+    assert service._pipeline is None
+
+
 def test_reimporting_the_metadata_is_picked_up_without_a_restart(imported_mart, monkeypatch):
     monkeypatch.setattr(config, "MART_DIR", str(imported_mart))
     monkeypatch.setattr(service, "ChatModelClient", lambda **kwargs: ScriptedLLM([]))
@@ -165,6 +209,21 @@ def test_metadata_works_without_a_model_key_but_the_pipeline_does_not(imported_m
     assert store.counts()["表"] == 3
     with pytest.raises(ValueError, match="API Key"):
         service.get_pipeline()
+
+
+def test_history_sits_next_to_the_metadata_db_and_follows_the_mart_dir(tiny_mart, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "MART_DIR", str(tiny_mart))
+
+    store = service.get_history()
+
+    assert store.path == default_db_path(tiny_mart).parent / "history.db" and store.path.exists()
+    assert service.get_history() is store                     # 进程内缓存
+    other = tmp_path / "other_mart"
+    monkeypatch.setattr(config, "MART_DIR", str(other))
+    assert service.get_history().path == default_db_path(other).parent / "history.db"   # 换了资料目录就换一个库
+    service.reset_pipeline()
+    monkeypatch.setattr(config, "MART_DIR", str(tiny_mart))
+    assert service.get_history() is not store and service.get_history().path == store.path
 
 
 # ── describe_lineage ──────────────────────────────

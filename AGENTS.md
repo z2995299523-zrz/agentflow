@@ -1,6 +1,6 @@
 # AgentFlow — Project Context for Codex
 
-> 最后更新: 2026-10-18 | 详细说明见 `CLAUDE.md`，进度见 `.hermes/bridge.md`
+> 最后更新: 2026-10-19 | 详细说明见 `CLAUDE.md`，进度见 `.hermes/bridge.md`
 
 ## Project Overview
 
@@ -12,14 +12,14 @@ AgentFlow 是「基于专题库模型结构与血缘的自然语言转 SQL」工
 
 ```
 agentflow/
-├── app.py              # Streamlit 界面：查数页、元数据页
-├── main.py             # FastAPI 接口：/nl2sql/query、/metadata/tables、/metadata/lineage、/health
+├── main.py             # FastAPI 接口：查数（含 SSE 流式）、会话、元数据（表、字段、搜索、血缘、样例）、/health
+├── web/                # 前端（React + TypeScript + Vite + Ant Design）：查数页、元数据页；前后端分开部署
 ├── config.py           # 配置：模型、MART_DIR、SQL_DIALECT、EXECUTOR、LLM_TIMEOUT
-├── run_tests.py        # 单元测试入口（1535 项，不调模型）
+├── run_tests.py        # 单元测试入口（1552 项，不调模型）
 ├── run_eval.py         # 评估入口（模拟库三组对照）
 ├── metadata/           # 元数据层：模板、读取、校验、脚本解析、关联推导、向量、样例、导入、只读入口
 ├── lineage/graph.py    # 血缘图与关联图
-├── nl2sql/             # 查询流水线：schemas、llm、parser、retriever、evidence、planner、generator、validator、output、workflow、service、executor、dialect
+├── nl2sql/             # 查询流水线：schemas、llm、parser、retriever、evidence、planner、generator、validator、output、workflow、service、executor、dialect、history（会话历史）
 ├── prompts/nl2sql.py   # 三个模型步骤的提示词与证据渲染
 ├── eval/               # 题库、结果比对、评估程序、报告
 ├── data/mock_mart/     # 模拟专题库（银行对公存贷款，三层 14 张表）
@@ -34,7 +34,8 @@ agentflow/
 - LLM: DeepSeek Chat（OpenAI 兼容接口，langchain-openai），Key 从项目 `.env` 或 Hermes `.env` 读
 - 编排: LangGraph 1.x；SQL 解析与校验: sqlglot 25.x
 - 向量模型: BAAI/bge-small-zh-v1.5（本地，sentence-transformers），向量存进 SQLite 元数据库
-- 模拟库执行: DuckDB；Web: FastAPI + Streamlit
+- 模拟库执行: DuckDB；接口: FastAPI（SSE 流式查数，会话历史存 SQLite）
+- 前端: React 19 + TypeScript + Vite 8 + Ant Design 6，血缘图 React Flow；`cd web && npm run dev` 开发，`npm run build` 类型检查加构建
 
 ## Coding Standards
 - 所有公开函数写中文 docstring + type hints

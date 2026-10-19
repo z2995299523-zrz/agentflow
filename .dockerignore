@@ -6,6 +6,7 @@
 data/real_mart/
 data/*/build/
 eval/reports/runs/
+web/
 uploads/
 chroma_data/
 chroma_data_eval/

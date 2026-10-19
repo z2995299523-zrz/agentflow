@@ -40,6 +40,13 @@
 - **确定性的部分全是代码**：召回（关键字 + BGE 向量）、血缘展开、同源字段对比、关联路径、静态校验（sqlglot），同样的输入得到同样的证据
 - **模型只做三件事**：把需求拆成要素、按证据选表定口径、写 SQL；①④ 用 JSON 模式输出，代码核对不过就带着问题重试一次
 - **只生成不执行**：真实库默认只给 SQL；模拟库可以接 DuckDB 只读执行，用来演示和评估
+- **前后端分开**：界面（React，`web/`）只调接口；每一轮的七步进度用 SSE 推给浏览器，会话历史存在 SQLite，流水线本身保持无状态
+
+```
+浏览器 ──/api──► Vite 开发服务器或 nginx ──去掉 /api──► FastAPI ──► 流水线（后台线程）
+   ▲                                                    │ 每走完一步：event: step
+   └──────────────── SSE（text/event-stream）◄──────────┘ 跑完存进会话历史：event: turn
+```
 
 ## ✨ 核心功能
 
@@ -49,14 +56,16 @@
 | ❓ 反问一次 | 只有「同源不同口径」而需求没说时才问，每个选项写明对应哪个字段、怎么加工 |
 | ⬆️ 向上溯源 | 专题层缺维度或粒度不够时上溯到整合层、贴源层，并还原下游加工时用过的条件 |
 | 💬 连续追问 | 「只看制造业」「换成 6 月末」合并成新的完整需求 |
-| ✅ 静态校验 | 表、字段存在，快照表带数据日期，关联不发散等八条规则，不过就带着错误重写 |
-| 🗂 元数据页 | 按层级浏览表和字段，查看字段的上游链路和下游字段 |
-| 🔌 REST API | `POST /nl2sql/query` 等四个接口，Swagger 自动文档 |
+| ✅ 静态校验 | 表、字段存在，快照表带数据日期，关联不发散等九条规则，不过就带着错误重写 |
+| 🖥 查数页 | 七步进度边跑边亮（SSE）；SQL 高亮、一键复制；口径说明、用表依据、校验结果分栏看；反问选项点一下就是回答；执行结果分页、导出 CSV |
+| 🗂 会话历史 | 每个会话的每一轮存进 SQLite，左侧按今天、昨天、更早分组，可以搜索、改名、删除；追问的上下文由服务端从会话里算 |
+| 🕸 元数据页 | 按层级浏览、搜索表和字段；字段血缘画成节点连线图（上游在左、下游在右），点连线看这一跳的加工表达式、过滤和关联条件 |
+| 🔌 REST API | 查数（一次返回、流式）、会话、元数据、健康检查共 11 个接口，Swagger 自动文档 |
 
 ## 🚀 快速开始
 
 ```bash
-# 1. 安装依赖（国内加 -i https://pypi.tuna.tsinghua.edu.cn/simple）
+# 1. 安装后端依赖（国内加 -i https://pypi.tuna.tsinghua.edu.cn/simple）；界面还需要 Node.js 20.19 或 22.12 以上
 pip install -r requirements.txt
 
 # 2. 配置：复制模板，填入 DEEPSEEK_API_KEY
@@ -65,12 +74,14 @@ cp .env.example .env
 # 3. 导入模拟专题库的元数据（第一次会下载并加载 BGE 模型；加 --no-index 跳过向量）
 python -m metadata.importer
 
-# 4. 启动：Windows 用 start.bat，Linux/Mac 用 bash start.sh
-#    界面 http://localhost:8501，接口文档 http://localhost:8000/docs
+# 4. 启动：Windows 用 start.bat，Linux/Mac 用 bash start.sh（第一次会装前端依赖、构建界面）
+#    界面 http://localhost:8080，接口文档 http://localhost:8000/docs
 #    想在界面上看执行结果，在 .env 里设 EXECUTOR=duckdb
 ```
 
-Docker：`docker-compose up -d`（镜像构建时会导入模拟库的元数据，不算向量）。
+改前端代码时开两个终端：一个 `uvicorn main:app --port 8000`，一个 `cd web && npm install && npm run dev`（http://localhost:5173，热更新，`/api` 转给 8000）。
+
+Docker：`docker-compose up -d` 起两个容器，接口 `api`（镜像构建时导入模拟库的元数据，不算向量）和界面 `web`（多阶段构建：Node 构建，nginx 托管），界面 http://localhost:8080。
 
 ### 换成自己的专题库
 
@@ -83,15 +94,22 @@ Docker：`docker-compose up -d`（镜像构建时会导入模拟库的元数据�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/nl2sql/query` | 查数：`{question, prev_requirement, prev_clarify}`，返回状态、SQL、口径说明、校验结果、逐步轨迹 |
+| `POST` | `/nl2sql/stream` | 同上，SSE 流式返回：每走完一步一条 `step`，最后一条 `result` |
+| `GET` / `POST` | `/conversations` | 最近的会话 / 新建会话 |
+| `GET` / `PATCH` / `DELETE` | `/conversations/{id}` | 会话的全部轮次和上下文 / 改标题 / 删除 |
+| `POST` | `/conversations/{id}/turns` | 在会话里提问（SSE）：上一轮的需求和反问由服务端从会话里取，跑完存下这一轮 |
 | `GET` | `/metadata/tables` | 表清单，可按层级过滤 |
-| `GET` | `/metadata/lineage` | 一个字段的上游链路和下游字段 |
-| `GET` | `/health` | 资料目录、各类元数据数量、执行层、模型；没导入元数据时提示导入命令 |
+| `GET` | `/metadata/columns` | 一张表的字段清单，带每个字段的直接来源、直接去向数 |
+| `GET` | `/metadata/search` | 按关键字找表和字段，完全一样的排前面 |
+| `GET` | `/metadata/lineage` | 一个字段的上游链路和下游字段，带链路上每个字段的中文名和层级 |
+| `GET` | `/metadata/examples` | 样例库里的需求，界面上给用户参考怎么问 |
+| `GET` | `/health` | 资料目录、各类元数据数量、执行层、模型、方言；没导入元数据时提示导入命令 |
 | `GET` | `/docs` | Swagger 自动文档 |
 
 ## 🧪 测试与评估
 
 ```bash
-python run_tests.py      # 单元测试（1535 项，不调模型、不加载 BGE）
+python run_tests.py      # 单元测试（1552 项，不调模型、不加载 BGE）
 python run_eval.py       # 模拟库三组对照评估（调用 DeepSeek，40 题，几分钟）
 ```
 
@@ -118,20 +136,22 @@ python run_eval.py       # 模拟库三组对照评估（调用 DeepSeek，40 �
 | Embedding | BGE-small-zh-v1.5（本地） | 免费、离线；向量存进元数据库，numpy 全量检索 |
 | 元数据库 | SQLite | 单文件，导入一次，查询时全部读进内存 |
 | 模拟库执行 | DuckDB | 只读、带超时，演示和评估用 |
-| 后端 / 前端 | FastAPI / Streamlit | 自动文档 / 纯 Python |
+| 后端 | FastAPI | 自动文档；SSE 推送每一步的进度 |
+| 前端 | React 19 + TypeScript + Vite + Ant Design 6 | 国内企业后台最常见的组合；血缘图用 React Flow，SQL 高亮用 highlight.js |
+| 会话历史 | SQLite | 每套资料一个库文件，和元数据库放在一起；存储层只暴露七个方法，以后换库只换一个类 |
 
 ## 📁 项目结构
 
 ```
 agentflow/
-├── app.py              # Streamlit 界面：查数页、元数据页
-├── main.py             # FastAPI 接口（4 个）
+├── main.py             # FastAPI 接口（11 个，含 SSE 流式查数和会话）
+├── web/                # 前端（React + TypeScript + Vite + Ant Design）：查数页、元数据页；Dockerfile、nginx.conf
 ├── config.py           # 配置：模型、资料目录、方言、执行层
 ├── run_tests.py        # 单元测试入口
 ├── run_eval.py         # 评估入口
 ├── metadata/           # 元数据层：模板、读取、校验、脚本解析、关联推导、向量、样例、导入
 ├── lineage/            # 血缘图与关联图
-├── nl2sql/             # 查询流水线：七步、LangGraph 编排、装配、执行层
+├── nl2sql/             # 查询流水线：七步、LangGraph 编排、装配、执行层、会话历史
 ├── prompts/            # 三个模型步骤的提示词
 ├── eval/               # 题库、结果比对、评估程序、报告
 ├── data/mock_mart/     # 模拟专题库（银行对公存贷款，三层 14 张表）：清单、加工脚本、样例、造数程序
@@ -145,6 +165,7 @@ agentflow/
 - [x] 元数据层、真实资料转换器、模拟专题库、方言转换与执行层、评估题库
 - [x] 加工脚本解析与补血缘、关联推导、血缘图、向量召回、样例库、静态校验
 - [x] 三个模型步骤、证据组装、LangGraph 编排、三组对照评估、新界面与接口、下线旧模块
+- [x] 前端换成 React + Ant Design（替换 Streamlit）：SSE 流式进度、会话历史（SQLite）、血缘连线图、前后端分开部署
 
 ## 👤 作者
 
