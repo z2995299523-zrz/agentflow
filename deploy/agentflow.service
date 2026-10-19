@@ -1,0 +1,30 @@
+[Unit]
+Description=AgentFlow NL2SQL API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentflow
+Group=agentflow
+WorkingDirectory=/opt/agentflow/current
+EnvironmentFile=/etc/agentflow/app.env
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 TOKENIZERS_PARALLELISM=false
+Environment=OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+Environment=HF_HOME=/var/lib/agentflow/huggingface HF_ENDPOINT=https://huggingface.co
+ExecStart=/opt/agentflow/current/.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8790 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agentflow
+MemoryHigh=800M
+MemoryMax=1100M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

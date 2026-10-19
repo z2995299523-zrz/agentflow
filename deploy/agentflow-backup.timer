@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily AgentFlow conversation backup
+
+[Timer]
+OnCalendar=*-*-* 04:25:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

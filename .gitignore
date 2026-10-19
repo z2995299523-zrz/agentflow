@@ -45,5 +45,8 @@ data/real_mart/
 web/node_modules/
 web/dist/
 
+# 服务器发布的本地临时文件（构建包、验收证据和配置）
+.runtime-deploy/
+
 # NL2SQL 评估的逐题记录（报告入库，逐题记录不入库）
 eval/reports/runs/

@@ -1,0 +1,15 @@
+[Unit]
+Description=AgentFlow conversation backup and restore verification
+
+[Service]
+Type=oneshot
+User=agentflow
+Group=agentflow
+ExecStart=/opt/agentflow/current/.venv/bin/python /opt/agentflow/current/deploy/backup_history.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/agentflow
+ReadWritePaths=/var/backups/agentflow
