@@ -103,8 +103,14 @@ def prepare(commit: str, frontend: Path) -> None:
     run("install", "-d", "-o", "agentflow", "-g", "agentflow", "-m", "750", str(build))
     # 只连接生成物目录。每个版本有独立元数据及模拟库，会话库跨版本稳定保存。
     link = release / "data/mock_mart/build"
-    if not link.exists():
+    # 全套测试会在源码目录生成模拟库。保留其证据后连接正式持久目录，不能沿用 root 的测试目录。
+    if link.exists() and not link.is_symlink():
+        preserved = evidence / f"test-build-{time.time_ns()}"
+        link.rename(preserved)
+    if not link.is_symlink():
         link.symlink_to(build, target_is_directory=True)
+    if link.resolve() != build:
+        raise RuntimeError("生成物目录没有指向本次发布的持久目录")
     if not (DATA / "history.db").exists():
         as_app(release, "-c", "from pathlib import Path; from nl2sql.history import ConversationStore; "
                "ConversationStore(Path('/var/lib/agentflow/history.db'))")
