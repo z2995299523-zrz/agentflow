@@ -105,7 +105,7 @@ def render_status(result: QueryResult) -> None:
     elif result.status == "unvalidated":
         st.warning(f"已生成 SQL，但修正 {result.repair_rounds} 次后静态校验仍有错误，请人工检查后再使用")
     elif result.status == "need_clarify":
-        st.info("需要先确认口径")
+        st.info("需要先确认需求" if result.plan is None else "需要先确认口径")      # 没有方案说明是 ① 问的
     elif result.parsed is not None and not result.parsed.is_query:
         st.info(plain(result.message))                 # 不是查数需求：模型的回复
     else:

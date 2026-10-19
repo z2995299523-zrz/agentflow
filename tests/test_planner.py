@@ -1,11 +1,21 @@
-"""④ 选表定口径：核对规则（每条有正例和反例）、带重试的方案生成"""
+"""④ 选表定口径：核对规则（每条有正例和反例）、带重试的方案生成、方案精简、日均没说统计区间时的反问"""
 import pytest
 
 from nl2sql.llm import ScriptedLLM, StepError
-from nl2sql.planner import check_plan, plan_query
-from nl2sql.schemas import Clarify, ClarifyOption, Evidence, PlanField, PlanJoin, PlanTable
+from nl2sql.planner import check_plan, clarify_daily_average, plan_query, prune_plan
+from nl2sql.schemas import Clarify, ClarifyOption, Evidence, Metric, PlanField, PlanJoin, PlanTable, QueryPlan
 from prompts.nl2sql import render_evidence
-from tests.step_fixtures import CUST_BAL, DIM_ORG, EXAMPLE_ID, ORG_BAL, make_evidence, make_parsed, make_plan
+from tests.step_fixtures import (
+    CUST_BAL,
+    DIM_ORG,
+    DWD_ACCT,
+    EXAMPLE_ID,
+    ORG_BAL,
+    evidence_table,
+    make_evidence,
+    make_parsed,
+    make_plan,
+)
 
 
 @pytest.fixture(scope="module")
@@ -309,3 +319,137 @@ def test_an_empty_evidence_is_reported_without_a_blank_list():
     problems = check(make_plan(), Evidence(use_lineage=True, use_examples=False))
 
     assert len(problems) == 2 and all("可用的表：（没有）" in problem for problem in problems)
+
+
+# ── 方案精简 ──────────────────────────────────
+
+CUST = "dim.corp_cust"
+DAY_FILTER = "= DATE '2026-09-30'"
+
+
+@pytest.fixture(scope="module")
+def wide(mock_store) -> Evidence:
+    """精简用的证据：专题层两张汇总表、整合层明细、两张维表"""
+    return Evidence(use_lineage=True, use_examples=False,
+                    tables=[evidence_table(mock_store, table) for table in (CUST_BAL, ORG_BAL, DWD_ACCT, CUST, DIM_ORG)])
+
+
+def cust_plan(base: str = CUST_BAL, *, join_type: str = "INNER", cust_fields=(), filters=()) -> QueryPlan:
+    """base 的余额，用客户号关联客户维表；cust_fields 是客户维表除关联键以外用到的字段"""
+    metric = "dep_bal_rmb" if base == CUST_BAL else "bal_rmb"
+    return make_plan(
+        tables=[PlanTable(table=base), PlanTable(table=CUST)],
+        fields=[PlanField(table=base, column=metric, usage="metric"),
+                PlanField(table=base, column="data_dt", usage="filter"),
+                PlanField(table=base, column="cust_no", usage="join"),
+                PlanField(table=CUST, column="cust_no", usage="join"),
+                *[PlanField(table=CUST, column=column, usage=usage) for column, usage in cust_fields]],
+        joins=[PlanJoin(left_table=base, left_columns=["cust_no"], right_table=CUST, right_columns=["cust_no"],
+                        join_type=join_type)],
+        filters=[f"{base}.data_dt {DAY_FILTER}", *filters])
+
+
+def test_a_dimension_joined_only_by_its_key_to_a_mart_table_is_dropped_with_its_join(wide):
+    plan = cust_plan()
+
+    pruned, removed = prune_plan(plan, wide)
+
+    assert removed == [CUST]
+    assert [item.table for item in pruned.tables] == [CUST_BAL] and pruned.joins == []
+    assert [(item.table, item.column) for item in pruned.fields] == [(CUST_BAL, "dep_bal_rmb"), (CUST_BAL, "data_dt")]
+    assert len(plan.tables) == 2                                         # 传入的方案不变
+
+
+def test_an_inner_join_from_a_lower_layer_table_is_kept_because_it_may_restore_a_processing_filter(wide):
+    assert prune_plan(cust_plan(DWD_ACCT), wide)[1] == []
+
+
+def test_a_left_joined_dimension_on_the_right_is_dropped_whatever_the_layer(wide):
+    assert prune_plan(cust_plan(DWD_ACCT, join_type="LEFT"), wide)[1] == [CUST]
+
+
+@pytest.mark.parametrize("cust_fields, filters", [
+    ([("industry_nm", "dimension")], []),                                # 取了维表的字段
+    ([], ["c.industry_nm = '制造业'"]),                                  # 过滤里用别名写到了维表的字段
+    ([], [f"{CUST}.scale_cd = '1'"]),                                    # 过滤里写了维表的全名
+])
+def test_a_dimension_that_is_really_used_is_kept(wide, cust_fields, filters):
+    assert prune_plan(cust_plan(cust_fields=cust_fields, filters=filters), wide)[1] == []
+
+
+def test_a_middle_table_and_a_join_that_does_not_cover_the_grain_are_kept(wide):
+    via = make_plan(
+        tables=[PlanTable(table=CUST_BAL), PlanTable(table=DIM_ORG), PlanTable(table=ORG_BAL)],
+        fields=[PlanField(table=CUST_BAL, column="dep_bal_rmb", usage="metric"),
+                PlanField(table=DIM_ORG, column="org_no", usage="join")],
+        joins=[PlanJoin(left_table=CUST_BAL, left_columns=["org_no"], right_table=DIM_ORG, right_columns=["org_no"]),
+               PlanJoin(left_table=DIM_ORG, left_columns=["org_no"], right_table=ORG_BAL, right_columns=["org_no"])])
+    partial = make_plan(
+        tables=[PlanTable(table=CUST_BAL), PlanTable(table=DIM_ORG)],
+        fields=[PlanField(table=CUST_BAL, column="dep_bal_rmb", usage="metric"),
+                PlanField(table=DIM_ORG, column="lvl1_org_no", usage="join")],
+        joins=[PlanJoin(left_table=CUST_BAL, left_columns=["org_no"], right_table=DIM_ORG,
+                        right_columns=["lvl1_org_no"])])
+
+    assert prune_plan(via, wide)[1] == []
+    assert prune_plan(partial, wide)[1] == []                            # 不按粒度关联可能一对多
+
+
+def test_a_table_with_no_field_and_no_join_is_dropped_unless_a_filter_names_it(wide):
+    plan = make_plan(tables=[PlanTable(table=CUST_BAL), PlanTable(table=ORG_BAL)],
+                     fields=[PlanField(table=CUST_BAL, column="dep_bal_rmb", usage="metric")], joins=[],
+                     filters=[f"{CUST_BAL}.data_dt {DAY_FILTER}"])
+    named = plan.model_copy(update={"filters": [*plan.filters, f"{ORG_BAL}.data_dt {DAY_FILTER}"]})
+
+    assert prune_plan(plan, wide)[1] == [ORG_BAL]
+    assert prune_plan(named, wide)[1] == []
+
+
+def test_only_ok_plans_are_pruned(wide):
+    clarify = make_plan(decision="need_clarify", clarify=Clarify(question="含不含保证金？", options=two_options()))
+
+    assert prune_plan(clarify, wide) == (clarify, [])
+
+
+def test_pruned_tables_are_recorded_in_the_plan_for_the_later_steps(wide):
+    pruned, removed = prune_plan(cust_plan(), wide)
+
+    assert pruned.dropped_tables == removed == [CUST]
+
+
+# ── 日均没说统计区间时反问 ──────────────────────
+
+def avg_plan(column: str = "ytd_avg_bal_rmb", table: str = ORG_BAL) -> QueryPlan:
+    """用一种日均字段的方案"""
+    return make_plan(tables=[PlanTable(table=table)],
+                     fields=[PlanField(table=table, column=column, usage="metric"),
+                             PlanField(table=table, column="data_dt", usage="filter")], joins=[])
+
+
+def avg_parsed(metric: str = "对公存款日均余额", hints=("不含保证金",)):
+    return make_parsed(requirement=f"查询 2026-09-30 全行不含保证金的{metric}", metrics=[Metric(name=metric)],
+                       dimensions=[], caliber_hints=list(hints))
+
+
+def test_an_unqualified_daily_average_becomes_a_question_listing_each_period(wide):
+    plan = clarify_daily_average(avg_parsed(), wide, avg_plan())
+
+    assert plan.decision == "need_clarify" and "统计区间" in plan.clarify.question
+    assert [option.label for option in plan.clarify.options] == ["年日均", "月日均"]
+    assert f"{CUST_BAL}.mtd_avg_bal_rmb（月日均存款余额）" in plan.clarify.options[1].meaning
+    assert check_plan(plan, wide, allow_clarify=True, allow_upstream=True) == []
+
+
+@pytest.mark.parametrize("parsed, plan", [
+    (avg_parsed("对公存款年日均余额"), avg_plan()),                       # 说了统计区间
+    (avg_parsed("对公存款余额"), avg_plan("dep_bal_rmb")),                # 不是日均
+    (avg_parsed(), avg_plan("dep_bal_rmb")),                              # 方案没用日均字段
+])
+def test_a_daily_average_with_a_period_or_without_one_in_the_plan_is_left_alone(wide, parsed, plan):
+    assert clarify_daily_average(parsed, wide, plan) is plan
+
+
+def test_a_single_period_in_the_evidence_is_not_a_choice(wide):
+    narrow = wide.model_copy(update={"tables": [table for table in wide.tables if table.table_id != CUST_BAL]})
+
+    assert clarify_daily_average(avg_parsed(), narrow, avg_plan()).decision == "ok"

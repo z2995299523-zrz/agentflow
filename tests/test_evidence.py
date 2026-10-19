@@ -280,6 +280,30 @@ def test_evidence_header_follows_the_switches_and_the_recall():
     assert evidence.notes == ["向量器核对没过，只走了关键字路"]
 
 
+def test_code_columns_carry_the_name_column_of_their_table_or_a_code_table_in_the_evidence(mock_store, mock_graph):
+    recall = recall_of(cand(ADS_DEP), cand(CUST), cand("ods.ecif_corp_cust"), cand("ods.industry_dict"))
+
+    evidence = evidence_of(mock_store, mock_graph, recall, ["存款余额"])
+
+    cust = {column.name: column for column in evidence.table(CUST).columns}
+    assert [cust[name].name_column for name in ("industry_cd", "scale_cd", "cust_no", "industry_nm")] == \
+        ["industry_nm", "scale_nm", "cust_nm", ""]
+    assert cust["industry_cd"].code_table == ""                                  # 同表有名称字段就不再指码值表
+    dep = {column.name: column for column in evidence.table(ADS_DEP).columns}
+    assert dep["cust_no"].code_table == "dim.corp_cust.cust_nm"                  # 整合层的维表排在贴源层前面
+    assert dep["org_no"].code_table == ""                                        # 机构维表不在证据里
+    ecif = {column.name: column for column in evidence.table("ods.ecif_corp_cust").columns}
+    assert ecif["industry_cd"].code_table == "ods.industry_dict.industry_nm"
+
+
+def test_a_code_table_outside_the_evidence_is_not_pointed_to(mock_store, mock_graph):
+    evidence = evidence_of(mock_store, mock_graph, recall_of(cand("ods.ecif_corp_cust")), ["客户"])
+
+    columns = {column.name: column for column in evidence.table("ods.ecif_corp_cust").columns}
+    assert columns["industry_cd"].code_table == "" and columns["industry_cd"].name_column == ""
+    assert columns["cust_no"].name_column == "cust_nm"
+
+
 def test_candidates_unknown_to_the_store_and_repeated_ones_are_left_out():
     store, graph = candidates_fixture()
 

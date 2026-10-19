@@ -1,4 +1,4 @@
-"""静态校验的测试：R1–R8 每条规则的正例与反例、报告里实际用到的表和字段、标准 SQL 与模拟脚本"""
+"""静态校验的测试：R1–R9 每条规则的正例与反例、报告里实际用到的表和字段、标准 SQL 与模拟脚本"""
 import difflib
 from pathlib import Path
 
@@ -872,6 +872,17 @@ def test_r8_reports_both_differences(validator):
     assert all(issue.level == WARNING for issue in report.issues if issue.rule == "R8")
 
 
+def test_r8_a_table_the_plan_dropped_is_an_error_and_not_reported_twice(validator):
+    sql = (f"SELECT SUM(b.dep_bal_rmb) AS dep_bal_rmb FROM {ORG_BAL} b JOIN dim.org o ON b.org_no = o.org_no "
+           f"WHERE b.data_dt = {DAY}")
+
+    report = validator.validate(sql, expected_tables=[ORG_BAL], excluded_tables=["dim.org"])
+
+    (message,) = of(report, "R8")
+    assert "已经去掉了 dim.org" in message and [issue.level for issue in report.issues if issue.rule == "R8"] == [ERROR]
+    assert validator.validate(D01, expected_tables=[ORG_BAL, "dim.org"], excluded_tables=["dim.corp_cust"]).ok
+
+
 # ── 实际用到的表和字段 ────────────────────────────────────
 
 def test_report_traces_columns_through_cte_to_entity_fields(validator):
@@ -927,6 +938,67 @@ def test_table_function_joined_to_an_entity_table_skips_r6(unrelated):
         "SELECT o.org_nm FROM dim.org o JOIN generate_series(1, 3) AS g(n) ON o.org_no = CAST(g.n AS VARCHAR)")
 
     assert report.issues == []
+
+
+# ── R9 代码字段不和中文名称比较 ───────────────────────────
+
+CUST_DEP = (f"SELECT SUM(b.dep_bal_rmb) AS dep_bal_rmb FROM {DEP} b JOIN dim.corp_cust c ON b.cust_no = c.cust_no "
+            f"WHERE b.data_dt = {DAY} AND ")
+
+
+def test_r9_a_code_column_compared_with_a_name_points_to_the_name_column(validator):
+    report = validator.validate(CUST_DEP + "c.industry_cd = '制造业'")
+
+    (message,) = of(report, "R9")
+    assert "dim.corp_cust.industry_cd（行业代码）是代码字段" in message
+    assert "改用同表的 dim.corp_cust.industry_nm（行业名称）" in message
+    assert [issue.level for issue in report.issues if issue.rule == "R9"] == [ERROR]
+
+
+def test_r9_checks_in_lists_and_points_to_the_code_in_the_enum_values_too(validator):
+    report = validator.validate("SELECT c.cust_nm FROM dim.corp_cust c WHERE c.scale_cd IN ('大型', '1')")
+
+    (message,) = of(report, "R9")
+    assert "scale_nm" in message and "按码值说明应写成 '1'" in message
+
+
+def test_r9_without_a_name_column_points_to_the_code_table(validator):
+    report = validator.validate("SELECT e.cust_nm FROM ods.ecif_corp_cust e WHERE e.industry_cd LIKE '%制造业%'")
+
+    (message,) = of(report, "R9")
+    assert "ods.industry_dict.industry_nm" in message and "关联码值表" in message
+
+
+def test_r9_follows_the_column_through_a_cte(validator):
+    report = validator.validate("WITH x AS (SELECT c.industry_cd AS ind FROM dim.corp_cust c) "
+                                "SELECT x.ind FROM x WHERE '制造业' <> x.ind")
+
+    assert len(of(report, "R9")) == 1
+
+
+@pytest.mark.parametrize("condition", [
+    "c.industry_nm = '制造业'",                       # 名称字段
+    "c.scale_cd = '1'",                              # 代码
+    "c.industry_cd = 'C'",
+    "c.cust_no = '（2026）沪银借字第001号'",           # 带数字、标点的字面量可能就是代码
+    "c.cust_nm LIKE '%科技%'",                        # 不是代码字段
+])
+def test_r9_leaves_names_codes_and_non_code_columns_alone(validator, condition):
+    assert of(validator.validate(CUST_DEP + condition), "R9") == []
+
+
+def test_r9_needs_proof_that_the_column_holds_codes(mock_mart):
+    """码值说明里登记的取值就是中文、或者既没有名称字段也没有码值表时，不能确定存的是代码，不报"""
+    columns = [column.model_copy(update={"enum_values": "大型;中型"}) if column.column_name == "scale_cd" else column
+               for column in mock_mart.columns
+               if column.table_id != "ods.industry_dict"
+               and not (column.table_id == "dim.corp_cust" and column.column_name == "industry_nm")]
+    tables = [table for table in mock_mart.tables if table.table_id != "ods.industry_dict"]
+    lenient = SqlValidator(MetadataStore.from_mart(mock_mart.model_copy(update={"tables": tables, "columns": columns})))
+
+    report = lenient.validate("SELECT c.cust_nm FROM dim.corp_cust c WHERE c.scale_cd = '大型' AND c.industry_cd = '制造业'")
+
+    assert of(report, "R9") == []
 
 
 # ── 标准 SQL 与模拟脚本 ───────────────────────────────────

@@ -271,7 +271,7 @@ def _attribute(expect: str, final: QueryResult, recall_ok: bool | None, table_ok
         message = " ".join(final.message.split())[:60]
         return f"停在 {final.failed_step or '未知步骤'}：{message}"
     if expect == "sql" and final.status == "need_clarify":
-        return "④ 多余的反问"
+        return "④ 多余的反问" if final.plan is not None else "① 多余的反问"
     if expect == "clarify" and final.status != "need_clarify":
         return "④ 该反问没有反问"
     if recall_ok is False:

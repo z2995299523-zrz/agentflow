@@ -1,4 +1,4 @@
-"""① 需求解析：核对规则（每条有正例和反例）、检索词转换、带重试的解析"""
+"""① 需求解析：核对规则（每条有正例和反例）、① 的反问、检索词转换、带重试的解析"""
 from datetime import date
 
 import pytest
@@ -6,7 +6,7 @@ import pytest
 from nl2sql.llm import ScriptedLLM, StepError
 from nl2sql.parser import check_parsed, parse_request, to_recall_query
 from nl2sql.retriever import RecallQuery
-from nl2sql.schemas import FilterItem, Metric, ParsedRequest, QueryRequest, TimeSpec
+from nl2sql.schemas import Clarify, ClarifyOption, FilterItem, Metric, ParsedRequest, QueryRequest, TimeSpec
 from tests.step_fixtures import make_parsed
 
 TODAY = date(2026, 10, 13)
@@ -124,6 +124,38 @@ def test_a_non_query_skips_the_query_checks():
     parsed = ParsedRequest(is_query=False, reply="你好", time=TimeSpec(kind="point", dates=["乱写的"]))
 
     assert check_parsed(parsed) == []
+
+
+# ── check_parsed：① 的反问 ────────────────────
+
+def which_client(*labels: str) -> Clarify:
+    """① 问「哪个客户」的反问"""
+    return Clarify(question="要看哪个客户的贷款情况？", options=[ClarifyOption(label=label) for label in labels])
+
+
+def test_a_clarifying_query_passes_without_a_metric():
+    parsed = ParsedRequest(is_query=True, requirement="查询某个对公客户的贷款情况",
+                           clarify=which_client("列出全部客户", "指定一个客户"))
+
+    assert check_parsed(parsed) == []
+
+
+def test_a_clarify_needs_a_question_and_two_labelled_options():
+    parsed = ParsedRequest(is_query=True, requirement="查询某个对公客户的贷款情况",
+                           clarify=Clarify(question=" ", options=[ClarifyOption(label="列出全部客户"), ClarifyOption(label="")]))
+
+    problems = check_parsed(parsed)
+
+    assert len(problems) == 2 and "clarify.question" in problems[0] and "现在只有 1 个" in problems[1]
+
+
+def test_answering_a_clarify_cannot_ask_again():
+    parsed = make_parsed(clarify=which_client("列出全部客户", "指定一个客户"))
+
+    (problem,) = check_parsed(parsed, allow_clarify=False)
+
+    assert "不能再反问" in problem and "第一个选项" in problem
+    assert check_parsed(make_parsed(), allow_clarify=False) == []
 
 
 # ── to_recall_query ───────────────────────────
@@ -260,3 +292,15 @@ def test_parse_request_accepts_a_non_query_answer():
     parsed, records = parse_request(llm, QueryRequest(question="你好"), TODAY)
 
     assert not parsed.is_query and parsed.reply == reply.reply and len(records) == 1
+
+
+def test_parse_request_asks_the_model_again_when_it_clarifies_while_answering_a_clarify():
+    request = QueryRequest(question="按最常用的口径处理就行", prev_requirement="查询某个对公客户的贷款情况",
+                           prev_clarify=which_client("列出全部客户", "指定一个客户"))
+    asking = make_parsed(clarify=which_client("列出全部客户", "指定一个客户"))
+    llm = ScriptedLLM([asking.model_dump_json(), make_parsed().model_dump_json()])
+
+    parsed, records = parse_request(llm, request, TODAY)
+
+    assert parsed.clarify is None and [(r.attempt, r.ok) for r in records] == [(1, False), (2, True)]
+    assert "不能再反问" in llm.calls[1]["messages"][-1]["content"]

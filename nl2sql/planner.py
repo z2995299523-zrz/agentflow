@@ -2,15 +2,20 @@
 ④ 选表定口径
 模型按证据给出四种结论之一：ok（查询方案）、need_clarify（反问）、need_upstream（缺什么，要上溯）、
 cannot_answer（元数据里做不到）。代码核对方案里的表、字段、关联都在证据里之后才往下走。
+结论是 ok 的方案再由 prune_plan 去掉用不到的表（孤立表、只用来关联而去掉不改变结果的维表）；
+能反问时，需求只说「日均」而方案挑了一种统计区间，由 clarify_daily_average 改成反问。
 """
 import difflib
+import re
 from collections.abc import Iterable, Sequence
 
 from nl2sql.llm import LLMClient, structured_call
-from nl2sql.schemas import CallRecord, Evidence, ParsedRequest, QueryPlan
+from nl2sql.schemas import CallRecord, Clarify, ClarifyOption, Evidence, ParsedRequest, PlanJoin, QueryPlan
 from prompts.nl2sql import planner_messages
 
 MAX_SUGGESTIONS = 5               # 报错时附上最接近的几个字段名
+TOP_LAYER = "专题层"              # 专题层的表与维表参照完整（ETL 保证）：只用关联键关联维表不改变结果
+DIM_TABLE_TYPE = "维表"
 
 
 def plan_query(llm: LLMClient, parsed: ParsedRequest, evidence: Evidence, *, allow_clarify: bool,
@@ -155,3 +160,151 @@ def check_plan(plan: QueryPlan, evidence: Evidence, *, allow_clarify: bool, allo
     if not plan.reason.strip():
         return ["decision 是 cannot_answer 时必须在 reason 里写明元数据里做不到的原因"]
     return []
+
+
+# ── 方案精简 ──────────────────────────────────────
+
+def _mentioned(table: str, columns: Iterable[str], filters: Sequence[str]) -> bool:
+    """过滤条件里有没有写到这张表：写了「模式.表.」，或者写了 columns 里的字段名（按整词，带别名的也算）"""
+    patterns = [rf"(?<![\w.]){re.escape(table)}\."] + [rf"(?<!\w){re.escape(name)}(?!\w)" for name in columns]
+    return any(re.search(pattern, text, re.IGNORECASE) for text in filters for pattern in patterns)
+
+
+def _sides(join: PlanJoin, table: str) -> tuple[list[str], str, list[str]]:
+    """关联里这张表一侧的字段、另一侧的表和字段"""
+    if join.right_table == table:
+        return join.right_columns, join.left_table, join.left_columns
+    return join.left_columns, join.right_table, join.right_columns
+
+
+def _redundant_dimension(plan: QueryPlan, evidence: Evidence, table: str) -> PlanJoin | None:
+    """只用来关联、去掉也不改变结果的维表：返回要和它一起去掉的那条关联，不是这种维表时返回 None"""
+    meta = evidence.table(table)
+    if meta is None or meta.table_type != DIM_TABLE_TYPE or not meta.grain_columns:
+        return None
+    joins = [join for join in plan.joins if table in (join.left_table, join.right_table)]
+    if len(joins) != 1 or joins[0].left_table == joins[0].right_table:
+        return None                                                  # 中间表、自关联不动
+    join = joins[0]
+    keys, other, _ = _sides(join, table)
+    other_meta = evidence.table(other)
+    if other_meta is None or other not in {item.table for item in plan.tables}:
+        return None
+    used = [item for item in plan.fields if item.table == table]
+    if any(item.usage != "join" or item.column not in keys for item in used):
+        return None
+    if not set(meta.grain_columns) <= set(keys):                     # 关联键要包含维表的全部粒度字段：N:1，不发散
+        return None
+    others = [column.name for column in meta.columns if column.name not in keys]
+    if _mentioned(table, others, plan.filters):
+        return None
+    if (join.join_type == "LEFT" and join.right_table == table) or other_meta.layer == TOP_LAYER:
+        return join
+    return None
+
+
+def prune_plan(plan: QueryPlan, evidence: Evidence) -> tuple[QueryPlan, list[str]]:
+    """去掉方案里用不到的表
+
+    - 孤立表：没有字段、不在任何关联里、过滤条件里也没写到
+    - 只用来关联的维表：证据里是维表；方案里只引用了它的关联键，过滤条件里也没写到它；只出现在一条关联里（不是中间表）；
+      关联键包含它的全部粒度字段（N:1，不发散）；并且关联另一侧是专题层的表（专题层与维表参照完整），
+      或者它在 LEFT JOIN 的右边（左表的行原样保留）。去掉时连同这条关联、另一侧只为这条关联列出的关联键一起去掉。
+      整合层、贴源层的表内连接维表不动：那常常是在还原专题层加工时的内连接过滤
+    只处理结论是 ok 的方案，返回新方案，不修改传入的对象。去掉的表记进方案的 dropped_tables：
+    ⑤ 不能再用它们（样例里常有这些关联，⑤ 容易照抄回来），校验时用到了就报错。
+
+    Args:
+        plan: ④ 的方案
+        evidence: ③ 的结果
+
+    Returns:
+        (精简后的方案, 去掉的表，按去掉的先后)
+    """
+    if plan.decision != "ok":
+        return plan, []
+    removed: list[str] = []
+    current = plan
+    changed = True
+    while changed and len(current.tables) > 1:
+        changed = False
+        for item in current.tables:
+            table = item.table
+            in_joins = any(table in (join.left_table, join.right_table) for join in current.joins)
+            has_fields = any(field.table == table for field in current.fields)
+            if not in_joins and not has_fields:
+                if _mentioned(table, [], current.filters):          # 孤立表只认「模式.表.」：字段名和别的表重名的太多
+                    continue
+                current = current.model_copy(update={"tables": [t for t in current.tables if t.table != table]})
+            else:
+                join = _redundant_dimension(current, evidence, table)
+                if join is None:
+                    continue
+                _, other, other_keys = _sides(join, table)
+                joins = [j for j in current.joins if j is not join]
+                still_keys = {column for j in joins if other in (j.left_table, j.right_table)
+                              for column in _sides(j, other)[0]}
+                fields = [f for f in current.fields if f.table != table and not (
+                    f.table == other and f.usage == "join" and f.column in other_keys and f.column not in still_keys)]
+                current = current.model_copy(update={
+                    "tables": [t for t in current.tables if t.table != table], "fields": fields, "joins": joins})
+            removed.append(table)
+            changed = True
+            break
+    if removed:
+        current = current.model_copy(update={"dropped_tables": [*current.dropped_tables, *removed]})
+    return current, removed
+
+
+# ── 日均没说统计区间时反问 ──────────────────────────────
+
+AVG_WORD = "日均"
+AVG_PERIODS = {"年": "从当年 1 月 1 日算到截止日", "季": "从当季第一天算到截止日", "月": "从当月 1 日算到截止日",
+               "旬": "从当旬第一天算到截止日"}
+
+
+def _avg_period(cn: str) -> str:
+    """字段中文名里日均的统计区间：「年日均存款余额」→「年」；不是日均字段、没写区间时为空串"""
+    index = cn.find(AVG_WORD)
+    return cn[index - 1] if index > 0 and cn[index - 1] in AVG_PERIODS else ""
+
+
+def clarify_daily_average(parsed: ParsedRequest, evidence: Evidence, plan: QueryPlan) -> QueryPlan:
+    """需求只说「日均」、没说统计区间，方案却挑了其中一种日均字段时，改成反问
+
+    条件：结论是 ok；需求（完整需求、指标、口径线索）里有「日均」，没有「年日均」「季日均」「月日均」「旬日均」；
+    方案的指标字段里有日均字段，证据里还有同一个指标、统计区间不同的日均字段（中文名去掉区间那个字后相同，
+    如「年日均存款余额」和「月日均存款余额」）。只用中文名判断，三组都一样。
+    调用方只在本轮能反问时调用。
+
+    Args:
+        parsed: ① 的结果
+        evidence: ③ 的结果
+        plan: ④ 的方案
+
+    Returns:
+        改成的反问；不满足条件时原样返回
+    """
+    if plan.decision != "ok":
+        return plan
+    asked = " ".join([parsed.requirement, *(metric.name for metric in parsed.metrics), *parsed.caliber_hints])
+    if AVG_WORD not in asked or any(period + AVG_WORD in asked for period in AVG_PERIODS):
+        return plan
+    names = {(table.table_id, column.name): column.cn for table in evidence.tables for column in table.columns}
+    chosen = {names[(item.table, item.column)].replace(_avg_period(names[(item.table, item.column)]) + AVG_WORD,
+                                                       AVG_WORD, 1)
+              for item in plan.fields
+              if item.usage == "metric" and _avg_period(names.get((item.table, item.column), ""))}
+    variants: dict[str, list[str]] = {}
+    for (table_id, column), cn in names.items():
+        period = _avg_period(cn)
+        if period and cn.replace(period + AVG_WORD, AVG_WORD, 1) in chosen:
+            variants.setdefault(period, []).append(f"{table_id}.{column}（{cn}）")
+    if len(variants) < 2:
+        return plan
+    periods = [period for period in AVG_PERIODS if period in variants]
+    options = [ClarifyOption(label=f"{period}{AVG_WORD}",
+                             meaning=f"{AVG_PERIODS[period]}；用 {'、'.join(variants[period][:2])}")
+               for period in periods]
+    question = f"需求里的「{AVG_WORD}」按哪个统计区间算？（{'、'.join(option.label for option in options)}）"
+    return QueryPlan(decision="need_clarify", clarify=Clarify(question=question, options=options))

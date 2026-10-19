@@ -129,6 +129,21 @@ def test_clicking_a_clarify_option_answers_it_with_the_previous_turn(monkeypatch
     assert at.session_state["prev_clarify"] is None and at.session_state["prev_requirement"] == second.requirement
 
 
+def test_a_clarify_from_the_parser_asks_to_confirm_the_requirement_and_typing_answers_it(monkeypatch):
+    clarify = Clarify(question="要看哪个客户的贷款情况？", options=[ClarifyOption(label="列出全部客户"),
+                                                              ClarifyOption(label="指定一个客户")])
+    first = QueryResult(status="need_clarify", question="看一下某个客户的贷款情况", requirement="查询某个对公客户的贷款情况",
+                        clarify=clarify, trace=steps())                     # ① 问的：还没有方案
+    pipeline = FakePipeline([first, ok_result()])
+    at = open_app(monkeypatch, pipeline)
+
+    ask(at, "看一下某个客户的贷款情况")
+
+    assert [item.value for item in at.info] == ["需要先确认需求"] and clarify_buttons(at) == ["列出全部客户", "指定一个客户"]
+    ask(at, "客户 C000015")                                                  # 不点选项，直接输入回答
+    assert pipeline.requests[1].prev_clarify == clarify
+
+
 def test_follow_up_carries_the_previous_requirement_until_a_new_topic(monkeypatch):
     pipeline = FakePipeline([ok_result("需求一"), ok_result("需求二"), ok_result("需求三")])
     at = open_app(monkeypatch, pipeline)

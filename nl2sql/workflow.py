@@ -3,7 +3,8 @@
 七个节点：parse → recall → evidence → plan → generate → validate → output，三条回路：
 - ④ 说缺东西（need_upstream）时上溯一层，带着缺的东西回到 ②，最多上溯 MAX_SCOPE_LEVEL 层
 - ⑥ 校验有错误时带着错误回到 ⑤，最多修正 MAX_REPAIRS 次
-- ④ 反问（need_clarify）、做不到（cannot_answer）时直接去 ⑦
+- ① 反问（缺了没法默认的要素）、④ 反问（口径分岔）、④ 做不到（cannot_answer）时直接去 ⑦
+- ④ 结论是 ok 时先由 prune_plan 去掉用不到的表，再去 ⑤
 
 流水线本身无状态，不带检查点：追问、反问的上下文由调用方放进 QueryRequest。
 Pipeline.run 不向外抛异常，节点里没接住的程序错误也包成 failed（停在 internal）。
@@ -39,7 +40,7 @@ from nl2sql.output import (
     upstream_failure_message,
 )
 from nl2sql.parser import parse_request, to_recall_query
-from nl2sql.planner import plan_query
+from nl2sql.planner import clarify_daily_average, plan_query, prune_plan
 from nl2sql.retriever import RecallResult, Retriever
 from nl2sql.schemas import (
     INTERNAL_STEP,
@@ -217,12 +218,15 @@ class _Steps:
 
     # ① 需求解析
     def parse(self, state: PipelineState) -> tuple[dict[str, Any], str]:
-        """调模型解析需求；不是查数需求时流程结束，把模型给用户的回复作为原因"""
+        """调模型解析需求；不是查数需求时流程结束，把模型给用户的回复作为原因；缺了没法默认的要素时反问"""
         parsed, calls = parse_request(self._deps.llm, state["request"], state["today"])
         updates: dict[str, Any] = {"parsed": parsed, "calls": calls}
         if not parsed.is_query:
             updates.update(status=STATUS_FAILED, failed_step="parse", message=parsed.reply)
             return updates, "不是查数需求"
+        if parsed.clarify is not None and state["request"].prev_clarify is None:
+            updates["status"] = STATUS_CLARIFY
+            return updates, f"需要反问：{parsed.clarify.question}"
         summary = (f"完整需求：{parsed.requirement}；指标 {len(parsed.metrics)} 个、维度 {len(parsed.dimensions)} 个、"
                    f"过滤 {len(parsed.filters)} 个；时间：{_time_text(parsed.time)}")
         return updates, summary
@@ -260,10 +264,15 @@ class _Steps:
 
     # ④ 选表定口径
     def plan(self, state: PipelineState) -> tuple[dict[str, Any], str]:
-        """调模型定方案，按结论转向：反问、做不到直接结束；缺东西且没到顶就上溯一层，到顶了就失败"""
+        """调模型定方案，按结论转向：反问、做不到直接结束；缺东西且没到顶就上溯一层，到顶了就失败；
+        能反问而需求只说「日均」时改成反问；结论是 ok 时先去掉用不到的表"""
         request = state["request"]
+        allow_clarify = request.prev_clarify is None
         plan, calls = plan_query(self._deps.llm, state["parsed"], state["evidence"],
-                                 allow_clarify=request.prev_clarify is None, allow_upstream=request.use_lineage)
+                                 allow_clarify=allow_clarify, allow_upstream=request.use_lineage)
+        if allow_clarify:
+            plan = clarify_daily_average(state["parsed"], state["evidence"], plan)
+        plan, removed = prune_plan(plan, state["evidence"])
         updates: dict[str, Any] = {"plan": plan, "calls": calls}
         level = state["scope_level"]
         if plan.decision == "need_clarify":
@@ -280,7 +289,8 @@ class _Steps:
             updates.update(scope_level=level + 1, base_tables=[table.table_id for table in state["recall"].tables],
                            extra_terms=_unique([*state["extra_terms"], *plan.missing]))
             return updates, f"需要上溯：缺 {missing}"
-        return updates, f"结论 ok：用表 {_names(item.table for item in plan.tables)}"
+        summary = f"结论 ok：用表 {_names(item.table for item in plan.tables)}"
+        return updates, summary + (f"；去掉用不到的表 {_names(removed)}" if removed else "")
 
     # ⑤ 生成 SQL
     def generate(self, state: PipelineState) -> tuple[dict[str, Any], str]:
@@ -301,12 +311,14 @@ class _Steps:
 
     # ⑥ 静态校验
     def validate(self, state: PipelineState) -> tuple[dict[str, Any], str]:
-        """校验 SQL：期望的表和字段取自方案；没有错误为 ok，有错误且没修满就回去修，修满了为 unvalidated"""
+        """校验 SQL：期望的表和字段取自方案，方案去掉的表不能再用；
+        没有错误为 ok，有错误且没修满就回去修，修满了为 unvalidated"""
         plan = state["plan"]
         expected_tables = [item.table for item in plan.tables]
         expected_columns = [f"{item.table}.{item.column}" for item in plan.fields
                             if item.usage in ("metric", "dimension")]
-        summary = summarize_validation(self._deps.validator.validate(state["sql"], expected_tables, expected_columns))
+        summary = summarize_validation(self._deps.validator.validate(state["sql"], expected_tables, expected_columns,
+                                                                     excluded_tables=plan.dropped_tables))
         updates: dict[str, Any] = {"validation": summary}
         if "first_pass_ok" not in state:
             updates["first_pass_ok"] = summary.ok
@@ -404,11 +416,13 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
     else:                       # 证据还没组出来（召回之后、证据之前出错）时，退回召回的候选
         candidates = [table.table_id for table in recall.tables] if recall is not None else []
     started = state.get("started", time.perf_counter())
+    clarify = None
+    if values["status"] == STATUS_CLARIFY:                  # ④ 的反问；还没到 ④ 就是 ① 的反问
+        clarify = plan.clarify if plan is not None else parsed.clarify if parsed is not None else None
     return QueryResult(
         status=values["status"], question=request.question,
         requirement=parsed.requirement.strip() if parsed is not None and parsed.is_query else "",
-        parsed=parsed, sql=sql, plan=plan,
-        clarify=plan.clarify if values["status"] == STATUS_CLARIFY and plan is not None else None,
+        parsed=parsed, sql=sql, plan=plan, clarify=clarify,
         message=values["message"] if values["status"] == STATUS_FAILED else "",
         failed_step=values["failed_step"] if values["status"] == STATUS_FAILED else "",
         assumptions=merge_assumptions(parsed.assumptions if parsed is not None else [],
@@ -424,11 +438,11 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
 # ── 图 ──────────────────────────────────────
 
 def _go_unless_failed(next_step: str) -> Callable[[PipelineState], str]:
-    """路由：状态是 failed 就去输出，否则去下一步"""
+    """路由：状态是 failed（或者 ① 要反问，need_clarify）就去输出，否则去下一步"""
     target, output = _node_name(next_step), _node_name("output")
 
     def route(state: PipelineState) -> str:
-        return output if state.get("status") == STATUS_FAILED else target
+        return output if state.get("status") in (STATUS_FAILED, STATUS_CLARIFY) else target
 
     return route
 
@@ -451,8 +465,8 @@ def build_workflow(deps: PipelineDeps) -> Any:
     """建 LangGraph 图并编译，不带检查点
 
     START → parse → recall → evidence → plan → generate → validate → output → END。
-    每个节点出来后先看状态是不是 failed，是就直接去 output；plan 之后反问、做不到去 output，需要上溯回到 recall；
-    validate 之后要修正回到 generate。
+    每个节点出来后先看状态是不是 failed（parse 之后还有反问），是就直接去 output；
+    plan 之后反问、做不到去 output，需要上溯回到 recall；validate 之后要修正回到 generate。
 
     Args:
         deps: 流水线的依赖

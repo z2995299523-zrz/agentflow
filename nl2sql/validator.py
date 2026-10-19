@@ -8,10 +8,11 @@
     R5 快照表在所在查询层带具体的数据日期条件    错误（只取最早、最晚、去重日期的除外）
     R6 表之间的等值关联属于已知关联关系          警告
     R7 汇总查询里被关联的表按粒度字段全部约束    警告
-    R8 实际使用的表和字段与查询方案一致          警告
+    R8 实际使用的表和字段与查询方案一致          警告（用到了方案明确去掉的表是错误）
+    R9 代码字段不和中文名称比较                  错误（能确定是代码字段时才报，见 metadata.codes）
 
 做法：R1 解析；R2 看语法树的根节点和全部节点；R3 遍历实体表节点；R4 按元数据限定字段后逐个查询层检查每个字段；
-R5–R7 在限定后的作用域树上按查询层检查；R8 对比查询方案。别名指向、字段追溯、关联键都来自共享的 metadata.sqlscope。
+R5–R7、R9 在限定后的作用域树上按查询层检查；R8 对比查询方案。别名指向、字段追溯、关联键都来自共享的 metadata.sqlscope。
 报告同时给出 SQL 实际用到的实体表和字段（穿过 CTE、子查询追到实体表），评估时用来算选表和选字段的准确率。
 """
 import difflib
@@ -24,6 +25,7 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlglot.optimizer.scope import Scope, build_scope, walk_in_scope
 
 from metadata.checks import ERROR, SNAPSHOT_TYPE, WARNING
+from metadata.codes import code_tables, enum_segments, is_chinese_name, is_code_column, name_column, parse_enum
 from metadata.models import ColumnMeta, FieldRef, JoinKey, Relation, TableMeta
 from metadata.sqlscope import (
     DIALECT,
@@ -78,7 +80,7 @@ _TOKEN_POSITION = re.compile(r"(\d+):(\d+)\s*$")
 class ValidationIssue:
     """一条校验问题"""
 
-    rule: str                    # R1 到 R8
+    rule: str                    # R1 到 R9
     level: str                   # 错误 / 警告，取值同 metadata.checks
     message: str
 
@@ -492,6 +494,7 @@ class SqlValidator:
         self._column_sets: dict[str, frozenset[str]] = {
             tid: frozenset(names) for tid, names in self._columns.items()}
         self._catalog = _Catalog(tables, metas)
+        self._code_tables = code_tables(tables.values(), lambda tid: metas.get(tid, []))     # R9 用
         self._by_name: dict[str, list[str]] = {}          # 表名（不带模式）→ 全名
         for tid in tables:
             self._by_name.setdefault(tid.split(".", 1)[-1], []).append(tid)
@@ -504,16 +507,18 @@ class SqlValidator:
                 mappings.pairs.add(_pair_key((relation.left_table, left), (relation.right_table, right)))
 
     def validate(self, sql: str, expected_tables: Collection[str] | None = None,
-                 expected_columns: Collection[str] | None = None) -> ValidationReport:
+                 expected_columns: Collection[str] | None = None,
+                 excluded_tables: Collection[str] = ()) -> ValidationReport:
         """校验一条 SQL
 
-        R1、R2 不通过时直接返回；R3 不通过时不报 R4；作用域解析失败时报一条 R4 并跳过 R5–R7。
+        R1、R2 不通过时直接返回；R3 不通过时不报 R4；作用域解析失败时报一条 R4 并跳过 R5–R7、R9。
         任何输入都返回报告，不抛异常。
 
         Args:
             sql: 待校验的 SQL
             expected_tables: 查询方案里的表，传入时检查 R8
             expected_columns: 查询方案里的字段（模式.表.字段），传入时检查 R8
+            excluded_tables: 查询方案明确去掉的表（QueryPlan.dropped_tables），SQL 用到了报 R8 错误
 
         Returns:
             校验报告
@@ -530,7 +535,8 @@ class SqlValidator:
             self._guarded("R5", run, lambda: self._check_snapshot_dates(root, resolver, run))
             self._guarded("R6", run, lambda: self._check_relations(root, resolver, run))
             self._guarded("R7", run, lambda: self._check_fan_out(root, resolver, run))
-        self._check_plan(run, expected_tables, expected_columns)
+            self._guarded("R9", run, lambda: self._check_code_literals(root, resolver, run))
+        self._check_plan(run, expected_tables, expected_columns, excluded_tables)
         return run.report()
 
     @staticmethod
@@ -964,17 +970,87 @@ class SqlValidator:
 
     @staticmethod
     def _check_plan(run: _Run, expected_tables: Collection[str] | None,
-                    expected_columns: Collection[str] | None) -> None:
-        """R8：与查询方案对比。表看两边的差集；字段只看方案里有、SQL 没用到的"""
+                    expected_columns: Collection[str] | None, excluded_tables: Collection[str] = ()) -> None:
+        """R8：与查询方案对比。表看两边的差集；字段只看方案里有、SQL 没用到的；用到了方案明确去掉的表是错误"""
+        excluded = {name.strip().lower() for name in excluded_tables if name.strip()}
+        if back := sorted(excluded & set(run.tables)):
+            run.error("R8", f"查询方案已经去掉了 {_join(back)}（只用来关联、没有取字段，去掉不影响结果），"
+                            f"SQL 里不要再关联，删掉这个关联和它的关联条件")
         if expected_tables is not None:
             expected = {name.strip().lower() for name in expected_tables if name.strip()}
             used = set(run.tables)
             if missing := sorted(expected - used):
                 run.warn("R8", f"查询方案里的表没有用到：{_join(missing)}")
-            if extra := sorted(used - expected):
+            if extra := sorted(used - expected - excluded):
                 run.warn("R8", f"用到了查询方案之外的表：{_join(extra)}")
         if expected_columns is not None:
             expected = {name.strip().lower() for name in expected_columns if name.strip()}
             used_columns = {f"{ref.table}.{ref.column}" for ref in run.used}
             if missing := sorted(expected - used_columns):
                 run.warn("R8", f"查询方案里的字段没有用到：{_join(missing)}")
+
+    # ── R9 ──
+
+    def _check_code_literals(self, root: Scope, resolver: ScopeResolver, run: _Run) -> None:
+        """R9：代码字段和纯中文的名称比较（=、<>、IN、LIKE），查不出数据
+
+        字段要能直取追溯到一个实体表字段，并且能确定它是代码字段：同表有对应的名称字段、
+        码值说明里查得到这个名称、或者有以它为粒度的码值表。带数字、字母的字面量不查。
+        """
+        for scope in root.traverse():
+            for node in walk_in_scope(scope.expression):
+                for column, value in _literal_comparisons(node):
+                    if not is_chinese_name(value):
+                        continue
+                    resolution = resolver.resolve_column(scope, column)
+                    if resolution.kind != "passthrough" or len(resolution.sources) != 1:
+                        continue
+                    (ref,) = resolution.sources
+                    message = self._code_literal_message(ref, value.strip())
+                    if message:
+                        run.error("R9", message)
+
+    def _code_literal_message(self, ref: FieldRef, value: str) -> str:
+        """R9 的问题文字：改用同表的名称字段、按码值说明写代码、或者关联码值表；不能确定是代码字段时返回空串"""
+        columns = self._catalog.columns(ref.table)
+        meta = next((column for column in columns if column.column_name == ref.column), None)
+        if meta is None or not is_code_column(meta):
+            return ""
+        enum = parse_enum(meta.enum_values)
+        if value in enum or value in enum_segments(meta.enum_values):     # 码值说明里登记的取值就是这个中文
+            return ""
+        codes = [code for code, name in enum.items() if name == value]
+        head = f"{ref.table}.{ref.column}（{meta.column_cn}）是代码字段，拿名称「{value}」去比查不出数据"
+        code_hint = f"按码值说明应写成 '{codes[0]}'" if codes else ""
+        name = name_column(meta, columns)
+        if name:
+            named = next((column.column_cn for column in columns if column.column_name == name), "")
+            return f"{head}；按名称过滤请改用同表的 {ref.table}.{name}" + (f"（{named}）" if named else "") + \
+                (f"，或者{code_hint}" if code_hint else "")
+        if code_hint:
+            return f"{head}；{code_hint}"
+        found = [f"{table}.{column}" for table, column in self._code_tables.get(ref.column.lower(), [])
+                 if table != ref.table][:MAX_SUGGESTIONS]
+        if found:
+            return f"{head}；名称在码值表里（{_join(found)}），请关联码值表、按名称字段过滤"
+        return ""
+
+
+def _literal_comparisons(node: exp.Expression) -> list[tuple[exp.Column, str]]:
+    """一个比较节点里「字段与字符串字面量」的组合：=、<>、IN 的列表、LIKE / ILIKE（去掉通配符后的文字）"""
+    if isinstance(node, (exp.EQ, exp.NEQ)):
+        left, right = unwrap(node.left), unwrap(node.right)
+        for column, literal in ((left, right), (right, left)):
+            if isinstance(column, exp.Column) and isinstance(literal, exp.Literal) and literal.is_string:
+                return [(column, literal.this)]
+        return []
+    if isinstance(node, exp.In):
+        column = unwrap(node.this)
+        if not isinstance(column, exp.Column):
+            return []
+        return [(column, item.this) for item in node.expressions if isinstance(item, exp.Literal) and item.is_string]
+    if isinstance(node, (exp.Like, exp.ILike)):
+        column, pattern = unwrap(node.this), unwrap(node.expression)
+        if isinstance(column, exp.Column) and isinstance(pattern, exp.Literal) and pattern.is_string:
+            return [(column, pattern.this.replace("%", "").replace("_", ""))]
+    return []

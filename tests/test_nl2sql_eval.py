@@ -133,9 +133,11 @@ def make_result(*, question="q", status="ok", sql=GOLD_SQL, requirement="完整�
         elapsed_ms=elapsed_ms)
 
 
-def make_clarify() -> QueryResult:
-    return make_result(status="need_clarify", validated=False, clarify=Clarify(
-        question="要不要含保证金？", options=[ClarifyOption(label="不含保证金"), ClarifyOption(label="含保证金")]))
+def make_clarify(*, by_parser: bool = False) -> QueryResult:
+    """④ 的反问（带方案）；by_parser 为真时是 ① 的反问（还没有方案）"""
+    clarify = Clarify(question="要不要含保证金？", options=[ClarifyOption(label="不含保证金"), ClarifyOption(label="含保证金")])
+    result = make_result(status="need_clarify", validated=False, clarify=clarify)
+    return result if by_parser else result.model_copy(update={"plan": QueryPlan(decision="need_clarify", clarify=clarify)})
 
 
 def sql_question(qid="Q1", *, turns=("查贷款余额",), category="基础时点余额", ordered=False, alternatives=(),
@@ -423,6 +425,7 @@ def attribution_cases():
                                               validated=False, candidates=[ORG_DEP]),
                   "停在 plan：方案两次不合格"),
         "2-多余的反问": (sql_question(), make_clarify(), "④ 多余的反问"),
+        "2-① 多余的反问": (sql_question(), make_clarify(by_parser=True), "① 多余的反问"),
         "2-该问没问": (clarify_question(), make_result(), "④ 该反问没有反问"),
         "3-召回漏表": (sql_question(), make_result(sql=OTHER_SQL, candidates=[ORG_DEP]), "② 召回漏表"),
         "4-选表不对": (sql_question(), make_result(sql=OTHER_SQL, tables=(LOAN, CUST_DEP)), "④ 选表不对"),

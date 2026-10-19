@@ -88,6 +88,7 @@ class ParsedRequest(BaseModel):
     caliber_hints: list[str] = Field(default_factory=list)    # 原文里的口径限定词：「不含保证金」「折人民币」
     sub_questions: list[str] = Field(default_factory=list)    # 一句话里有几个问题时逐个列出；只有一个时为空
     assumptions: list[str] = Field(default_factory=list)      # 按默认处理的地方：「「最新」按上一自然日 2026-10-12」
+    clarify: Clarify | None = None            # 是查数需求、但缺了没法默认的要素（哪个对象、看哪些指标）时的反问；口径分岔归 ④
 
 
 # ── ③ 证据 ────────────────────────────────────
@@ -103,6 +104,8 @@ class EvidenceColumn(BaseModel):
     enum_values: str = ""
     kind: str = ""                            # 加工脚本里的表达式类别（COLUMN_KINDS）；A 组和没有脚本时为空
     hit_terms: list[str] = Field(default_factory=list)        # 命中这个字段的检索词
+    name_column: str = ""                     # 代码字段在同表的名称字段（industry_cd → industry_nm），见 metadata.codes
+    code_table: str = ""                      # 同表没有名称字段时，证据里码值表的名称字段：「模式.表.字段」
 
 
 class EvidenceTable(BaseModel):
@@ -279,6 +282,7 @@ class QueryPlan(BaseModel):
     clarify: Clarify | None = None            # need_clarify
     missing: list[str] = Field(default_factory=list)          # need_upstream：缺什么，写成字段的叫法
     reason: str = ""                          # cannot_answer 的原因；need_upstream 的补充说明
+    dropped_tables: list[str] = Field(default_factory=list)   # 代码精简时去掉的表（prune_plan），⑤ 不能再用，模型不填
 
 
 # ── 记录与结果 ────────────────────────────────

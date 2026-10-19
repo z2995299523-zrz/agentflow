@@ -7,7 +7,8 @@
 B 组加血缘；C 组再加样例。
 
 做法：
-1. 候选表：按召回的先后，列出全部字段；命中的字段、粒度字段、数据日期字段、主键保留较长的说明，其余字段说明截短
+1. 候选表：按召回的先后，列出全部字段；命中的字段、粒度字段、数据日期字段、主键保留较长的说明，其余字段说明截短。
+   代码字段标上同表的名称字段，同表没有时标上证据里码值表的名称字段（metadata.codes）
 2. 指标命中字段：命中词是指标检索词的字段，按得分从高到低排，只展开前 MAX_LINEAGE_FIELDS 个
 3. 加工链路：沿血缘往上走 LINEAGE_DEPTH 跳，同一个目标字段的几个来源并成一步，带上脚本表达式和该字段经过的加工条件
 4. 同源对比：同一个指标检索词命中的字段两两比较，是上下游关系、同源口径相同还是同源口径不同；
@@ -23,6 +24,7 @@ from dataclasses import dataclass, replace
 from itertools import combinations
 
 from lineage.graph import Hop, LineageGraph, SourceDiff
+from metadata.codes import code_tables, name_column
 from metadata.models import FieldRef, Mart, TableMeta
 from metadata.relations import structural_relations
 from metadata.store import MetadataStore
@@ -138,19 +140,41 @@ def _evidence_table(store: MetadataStore, meta: TableMeta, hits: list[FieldHit],
             terms.append(item.term)
     important = {*meta.grain_columns, *([meta.date_column] if meta.date_column else [])}
     kinds = _column_kinds(store, meta.table_id) if use_lineage else {}
+    metas = store.columns(meta.table_id)
     columns = []
-    for column in store.columns(meta.table_id):
+    for column in metas:
         terms = hit_terms.get(column.column_name, [])
         full = bool(terms) or column.is_pk or column.column_name in important
         columns.append(EvidenceColumn(
             name=column.column_name, cn=column.column_cn, data_type=column.data_type, is_pk=column.is_pk,
             description=_cut(column.description, FULL_DESC_CHARS if full else SHORT_DESC_CHARS),
             enum_values=_cut(column.enum_values, ENUM_CHARS), kind=kinds.get(column.column_name, ""),
-            hit_terms=list(terms)))
+            hit_terms=list(terms), name_column=name_column(column, metas)))
     return EvidenceTable(
         table_id=meta.table_id, table_cn=meta.table_cn, layer=meta.layer, table_type=meta.table_type,
         grain_columns=list(meta.grain_columns), date_column=meta.date_column,
         description=_cut(meta.description, FULL_DESC_CHARS), reason=reason, score=score, columns=columns)
+
+
+def _mark_code_tables(store: MetadataStore, tables: list[EvidenceTable]) -> list[EvidenceTable]:
+    """同表没有名称字段的代码字段，名称在证据里的码值表时标上「码值表.名称字段」
+
+    码值表只在证据里的表中找（④ 只能用证据里的表）；码值表自己的粒度字段不标。
+    """
+    index = code_tables((store.table(table.table_id) for table in tables), store.columns)
+    marked = []
+    for table in tables:
+        columns = []
+        for column in table.columns:
+            found = [(dict_table, name) for dict_table, name in index.get(column.name.lower(), [])
+                     if dict_table != table.table_id]
+            if column.name_column or not found:
+                columns.append(column)
+                continue
+            dict_table, name = found[0]
+            columns.append(column.model_copy(update={"code_table": _field_id(dict_table, name)}))
+        marked.append(table.model_copy(update={"columns": columns}))
+    return marked
 
 
 # ── 加工链路 ──────────────────────────────────────
@@ -463,6 +487,7 @@ def build_evidence(store: MetadataStore, graph: LineageGraph, recall: RecallResu
 
     hints, middles = _join_hints(store, join_graph if join_graph is not None else graph, table_ids, notes)
     tables += [_evidence_table(store, store.table(middle), [], REASON_JOIN, 0.0, use_lineage) for middle in middles]
+    tables = _mark_code_tables(store, tables)
 
     options = []
     if use_lineage and not all_layers:

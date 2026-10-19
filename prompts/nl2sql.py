@@ -62,7 +62,8 @@ PARSER_SYSTEM = """你是银行数据仓库专题库的「需求解析」助手�
 
 # 字段说明
 
-- is_query：这句话是不是查数需求。问候、闲聊、问工具能做什么、要求改数据或建表删表，都不是。不是时，reply 写给用户的回复（说明这个工具能做什么，请用户怎么提问），其余字段可以省略。连指标都说不出来（例如只说「查一下数据」）也按不是处理，reply 里请用户补充要查什么指标。
+- is_query：这句话是不是查数需求。问候、闲聊、问工具能做什么、要求改数据或建表删表，都不是；连要查什么都没说（例如只说「查一下数据」）也按不是处理。不是时，reply 写给用户的回复（说明这个工具能做什么，请用户怎么提问），其余字段可以省略。说了要查什么、只是缺了下面 clarify 说的要素时，仍然是查数需求。
+- clarify：反问，只在两种情况下用，其余时候写 null。一是要看的是单个对象（某个客户、某个项目），却没说是哪个；二是只说「情况」「怎么样」，看哪些指标也没法按常见的理解默认。反问时 is_query 写 true，requirement 写目前能确定的部分，metrics 写最主要的度量；question 只问一个问题；options 至少两个，第一个是最常见的理解（例如「列出全部客户」），另一个请用户指定（例如「指定一个客户」，meaning 里请用户回复名称或编号）。口径的分岔（含不含保证金、日均是哪个统计区间）、日期、排序都不在这里问，后面的步骤会处理。
 - requirement：完整需求，一句自包含的话，脱离上下文也能看懂。日期写成具体日期；口径限定词、原文要求列出的列、排序和取前几名都要保留。
 - metrics：指标，name 写业务叫法，不带日期、不带取值、不带口径限定词（「不含保证金」「折人民币」放到 caliber_hints）；指标本身的叫法里带限定词时不拆，如「不良贷款余额」「保证金存款余额」「定期存款余额」「年日均存款余额」。entity：计数类指标（客户数、项目数、笔数）填被计数的实体（客户、项目、借据），其余留空。
   - 比率类指标（不良率、占比）先写比率本身，再把分子、分母各写成一个指标。
@@ -104,6 +105,7 @@ PARSER_SYSTEM = """你是银行数据仓库专题库的「需求解析」助手�
   - 换指标：「再看一下不良贷款余额」（要看另一个指标就换成它；用户说「同时」「再加上」才是追加）
   本轮输入本身就是一个完整的查数需求（有指标有时间）时，忽略上一轮。
 - 用户消息里有「上一轮的反问」时，本轮输入是对这个反问的回答。回答可能是选项的文字，也可能是「第一个」「选 2」「含保证金的」这样的说法，对照选项理解。把选中的口径写进 requirement 和 caliber_hints，其余按上一轮的需求处理。
+  - 回答反问时 clarify 写 null，不能再反问。回答没说清（例如「按最常用的口径处理」「都行」）时，按反问的第一个选项理解，写进 assumptions。
 
 # 原则
 
@@ -128,7 +130,8 @@ PARSER_SYSTEM = """你是银行数据仓库专题库的「需求解析」助手�
   "time": {"kind": "point", "dates": ["2026-04-30"], "compare": "prev_year_end", "compare_dates": ["2025-12-31"], "note": "4 月末 → 2026-04-30；较年初 → 对比上年末 2025-12-31"},
   "caliber_hints": ["不含保证金"],
   "sub_questions": [],
-  "assumptions": []
+  "assumptions": [],
+  "clarify": null
 }
 ```
 
@@ -181,6 +184,46 @@ PARSER_SYSTEM = """你是银行数据仓库专题库的「需求解析」助手�
   "caliber_hints": [],
   "sub_questions": [],
   "assumptions": []
+}
+```
+
+用户输入：看一下某个客户的贷款情况
+```json
+{
+  "is_query": true,
+  "reply": "",
+  "requirement": "查询某个对公客户的贷款情况",
+  "metrics": [{"name": "贷款余额", "entity": ""}],
+  "dimensions": [],
+  "filters": [],
+  "order": "",
+  "time": {"kind": "none", "dates": [], "compare": "none", "compare_dates": [], "note": "没写时间"},
+  "caliber_hints": [],
+  "sub_questions": [],
+  "assumptions": [],
+  "clarify": {"question": "要看哪个客户的贷款情况？", "options": [{"label": "列出全部客户", "meaning": "按客户列出贷款余额"}, {"label": "指定一个客户", "meaning": "请回复客户名称或客户号"}]}
+}
+```
+
+上一轮的完整需求：查询某个对公客户的贷款情况
+上一轮的反问：要看哪个客户的贷款情况？
+选项 1：列出全部客户（按客户列出贷款余额）
+选项 2：指定一个客户（请回复客户名称或客户号）
+用户输入：按最常用的口径处理就行
+```json
+{
+  "is_query": true,
+  "reply": "",
+  "requirement": "查询各对公客户的贷款余额，列出客户名称和贷款余额",
+  "metrics": [{"name": "贷款余额", "entity": ""}],
+  "dimensions": ["客户名称"],
+  "filters": [],
+  "order": "",
+  "time": {"kind": "none", "dates": [], "compare": "none", "compare_dates": [], "note": "没写时间"},
+  "caliber_hints": [],
+  "sub_questions": [],
+  "assumptions": ["没有指定客户，按第一个选项列出全部客户"],
+  "clarify": null
 }
 ```
 
@@ -268,25 +311,27 @@ PLANNER_SYSTEM = """你是银行数据仓库专题库的「选表定口径」助
 
 1. 只用证据里的表和字段，表名、字段名照证据原样写，不要自己编。
 2. 口径以证据里的加工链路（表达式、过滤条件、关联条件）为准。字段的中文名和口径说明常常不全，名字相近的字段口径可能不同，要看它是怎么算出来的。
-3. 同一个指标有几个口径不同的字段时（「同源字段对比」会标出「同源不同口径」；没有这一节时，凭字段的中文名和口径说明判断）：
-   - 需求的口径线索已经说明了口径，就选对应的字段，并在 caliber 里引用它的加工表达式；
-   - 没有线索，就用 need_clarify：只问一个问题，每个选项写明对应哪个字段、含义是什么；
-   - 本次不能反问时，按最常用的理解选一个，写进 assumptions。
+3. 口径分岔：同一个指标有几个口径不同的字段可选（「同源字段对比」会标出「同源不同口径」；没有这一节时，凭字段的中文名和口径说明判断）。常见的分岔有：含不含某一类账户（如保证金）、是不是全口径、日均的统计区间（年日均、季日均、月日均）。不同的指标不算分岔：需求点名了某一类（如活期、定期、保证金），有字段正好对得上就直接用它，不要拿它和总的余额一起反问。
+   - 需求的口径线索说清了，就选对应的字段，并在 caliber 里引用它的加工表达式；
+   - 口径线索没说清，或者只说清了其中一个分岔（例如说了不含保证金，没说日均是哪个统计区间），就用 need_clarify：只问没说清的那一个，每个选项写明对应哪个字段、含义是什么；
+   - 能反问时，不要替用户挑一个口径写进 assumptions。你要写「需求没说明……，按最常用的……处理」这样的假设，就说明这里该反问；
+   - 只有本次不能反问时，才按最常用的理解选一个，写进 assumptions。
    只有这种口径分岔而需求没说清的情况才反问。其它不确定的地方（日期、排序、列的写法）一律按默认处理，写进 assumptions，不要反问。
-4. 选表：优先用满足需求粒度的、汇总程度最高的表，例如只要机构粒度就用机构汇总表，不要用客户级的表再自己汇总。需要维度属性（名称、分行、行业）时，用带关联键的表去关联维表；维度字段已经在事实表里就不用再关联；没有用到维表里的字段（不分组、不过滤、不取名称）就不要关联维表，也不要把它写进 tables。样例只参考写法和口径，不要照搬样例里这次用不到的表和关联。
+4. 选表：先找有需求要的那个指标字段、并且口径对得上的表，再在这些表里选满足需求粒度的、汇总程度最高的，例如只要机构粒度就用机构汇总表，不要用客户级的表再自己汇总；汇总程度高、但没有这个指标字段的表不能拿别的字段来凑（需求要的是某一类余额，汇总表只有总余额，就不能用总余额代替）。需要维度属性（名称、分行、行业）时，用带关联键的表去关联维表；维度字段已经在事实表里就不用再关联；没有用到维表里的字段（不分组、不过滤、不取名称）就不要关联维表，也不要把它写进 tables。样例只参考写法和口径，不要照搬样例里这次用不到的表和关联。
 5. 关联：只用证据「关联路径」里列出的关联，在 joins 里写清用哪个键。对应关系 N:1 表示左表每一行最多对应右表一行，不会重复。1:N、N:N、未知，或者路径标了「会发散」的，左表的行会重复，要在 join_basis 里说明怎么避免重复计算（先汇总再关联、按粒度键去重等）。
 6. 时间：
    - 快照表一定要有数据日期条件，写进 filters；全量表、维表不要加。
    - 时间不限定日期而用到快照表时，取该表最新的数据日期：数据日期字段 = (SELECT MAX(数据日期字段) FROM 该表)，并写进 assumptions。
    - 区间用在快照表上要小心：对数据日期取区间会把多天的快照加在一起。要看每天（或每月末）的值，就按数据日期分组；区间指的是业务日期字段（签约日期、发放日期）时，过滤那个字段，数据日期取区间的最后一天。
-   - 日均用现成的日均字段（年日均、月日均），只取截止日那一天的值，不要对多天的行再求平均。
+   - 日均用现成的日均字段，只取截止日那一天的值，不要对多天的行再求平均。需求说了统计区间（年日均、月日均）就用对应的字段；只说「日均」而候选里有不同统计区间的日均字段时，按规则 3 反问。
    - 较年初是当期减上年末，较上月末是当期减上月末：两个日期的数都要取，filters 里把两个日期都列出来。
 7. 计数：按被计数的实体的粒度来。用粒度正好是这个实体的表，COUNT(DISTINCT 粒度键)；汇总表里现成的「客户数」「笔数」字段不能跨行相加（同一个客户可能在多个机构里重复出现），除非汇总的粒度正好就是要的粒度。
 8. 缺东西：先在全部候选表里找。候选里已经有的整合层、贴源层的表（入选原因是召回、上溯带入、样例带入、关联路径经过的中间表都一样）可以直接用：专题层的表不够用、而候选里某张下层的表有需求要的维度和字段时，就选它出方案（decision 写 ok），不要再要求上溯。只有全部候选表都没有需求要的维度或字段，或者粒度都不够时，才用 need_upstream，missing 写成字段的叫法。上溯最多 2 层，到了第 2 层仍缺，照样写 need_upstream 和 missing，由程序如实告诉用户找不到什么。用下层的表查数时（不论它是本来就在候选里，还是上溯带进来的），要把下游表加工这个字段时用过的过滤条件和关联条件还原出来：证据里血缘的每一跳都带着，写进 filters 和 joins，查出来的数才能和专题层的数对得上。
 9. 加工条件里的 CAST('${data_dt}' AS DATE) 这类写法是跑批日期参数，查数时换成需求里的日期。只在加工中间层（CTE）之间的关联不用照搬。
 10. 元数据范围内做不到时用 cannot_answer，在 reason 里写明原因；不要编造不存在的字段。
 11. 一句多问（需求有子问题）时，方案要覆盖每个子问题：fields 列齐，filters 和 caliber 里写清各自的条件。
-12. 每张表、每个字段都写 reason；再写 caliber、table_basis、join_basis、lineage_note；参考了样例就在 examples_used 里写样例编号，没有样例就留空。"""
+12. 每张表、每个字段都写 reason；再写 caliber、table_basis、join_basis、lineage_note；参考了样例就在 examples_used 里写样例编号，没有样例就留空。
+13. 码值：字段后面标了「名称字段」「码值表」的是代码字段，存的是代码。过滤值是中文名称（如「制造业」「上海分行」）时，用标出的名称字段过滤（标的是码值表就先把码值表关联进来）；代码字段只能和码值说明里写明的代码比较，码值说明没写的代码不要猜。"""
 
 
 # ── ⑤ 生成 SQL ────────────────────────────────
@@ -300,7 +345,7 @@ DIALECT_RULES = """1. 只用 PostgreSQL 与 GaussDB 共有的标准语法；只�
 7. 比率按百分比保留两位：ROUND(分子 * 100.0 / NULLIF(分母, 0), 2)；先汇总分子、分母再相除，不要对各行的比率求平均。
 8. 前 N 名用 ORDER BY … LIMIT N，N 和排序方向照需求写。
 9. 一句多问写在一条 SQL 里：条件计数 COUNT(CASE WHEN … THEN 1 END)、GROUPING SETS，或者明细加窗口合计；不拆成多条语句。
-10. 码值按字段的码值说明写，字符串用单引号，如 is_margin = '0'。
+10. 码值：代码字段只能和码值说明里写明的代码比较，字符串用单引号，如 is_margin = '0'；过滤值是中文名称（如「制造业」）时，用名称字段过滤，不要拿中文名称去比代码字段。
 11. 计数用 COUNT(DISTINCT 粒度键)；一行就是一个实体时可以 COUNT(*)。"""
 
 GENERATOR_SYSTEM = f"""你是银行数据仓库专题库的 SQL 生成助手。输入是完整需求、已经定好的查询方案，和方案里的表的结构。你按方案写出一条 SQL。
@@ -517,6 +562,9 @@ def _render_plan(plan: QueryPlan) -> str:
             lines.append(f"{label}：{text}")
     if plan.assumptions:
         lines.append(f"假设：{'；'.join(plan.assumptions)}")
+    if plan.dropped_tables:
+        lines.append(f"不要用的表：{'、'.join(plan.dropped_tables)}（只用来关联、没有取字段，已从方案去掉，去掉不影响结果；"
+                     f"样例里有这些关联也不要照抄）")
     return "\n".join(lines)
 
 
@@ -542,7 +590,7 @@ def generator_messages(parsed: ParsedRequest, plan: QueryPlan, evidence: Evidenc
         "## 表结构", render_tables(evidence, [item.table for item in plan.tables]), "",
     ]
     if evidence.use_examples and evidence.examples:
-        parts += ["## 参考样例（只参考写法，口径以查询方案为准）",
+        parts += ["## 参考样例（只参考写法；表、关联和口径以查询方案为准，方案里没有的表不要加）",
                   _render_examples(evidence.examples, used=plan.examples_used), ""]
     if previous_sql.strip() or errors:
         if previous_sql.strip():
@@ -602,6 +650,10 @@ def _column_line(column: EvidenceColumn, table: EvidenceTable, *, drop_enum: boo
         parts.append(f"口径：{_one_line(column.description)}")
     if column.enum_values and not drop_enum:
         parts.append(f"码值：{_one_line(column.enum_values)}")
+    if column.name_column and not drop_enum:
+        parts.append(f"名称字段：{column.name_column}")
+    elif column.code_table and not drop_enum:
+        parts.append(f"码值表：{column.code_table}")
     return " ".join(parts)
 
 
@@ -804,7 +856,16 @@ def render_tables(evidence: Evidence, table_ids: Sequence[str]) -> str:
         table_ids: 要写的表，按这个顺序；不在证据里的跳过
 
     Returns:
-        表结构文本，一张表一段，段与段之间空一行；一张也没有时是空字符串
+        表结构文本，一张表一段，段与段之间空一行；一张也没有时是空字符串。
+        码值表不在给定的表里时不写「码值表」：⑤ 只能用方案里的表
     """
     tables = [table for table in (evidence.table(table_id) for table_id in table_ids) if table is not None]
-    return "\n\n".join(_table_block(table) for table in tables)
+    shown = {table.table_id for table in tables}
+
+    def within(table: EvidenceTable) -> EvidenceTable:
+        columns = [column.model_copy(update={"code_table": ""})
+                   if column.code_table and column.code_table.rsplit(".", 1)[0] not in shown else column
+                   for column in table.columns]
+        return table.model_copy(update={"columns": columns})
+
+    return "\n\n".join(_table_block(within(table)) for table in tables)

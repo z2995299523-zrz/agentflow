@@ -120,6 +120,8 @@ def test_parser_examples_are_valid_parsed_requests():
     assert any(item.time.compare == "prev_year_end" for item in parsed)           # 较年初
     assert any(metric.entity for item in parsed for metric in item.metrics)       # 计数类带被计数的实体
     assert any(len(item.sub_questions) >= 2 for item in parsed)                   # 一句多问
+    assert any(item.clarify is not None for item in parsed)                       # 缺对象时 ① 反问
+    assert any(item.assumptions and item.clarify is None and "第一个选项" in item.assumptions[0] for item in parsed)
 
 
 def test_planner_examples_are_valid_plans_covering_the_four_decisions():
@@ -442,6 +444,57 @@ def test_column_notes_show_description_and_enum_values(mock_store):
 
     assert "口径：折人民币" in table_block(text, ORG_BAL)
     assert "- is_margin 是否保证金 varchar(1) 码值：1=是;0=否" in table_block(text, DWD_ACCT)
+
+
+def test_code_columns_show_their_name_column_or_code_table(mock_store):
+    evidence = make_evidence(mock_store)
+    by_name = {column.name: column for column in evidence.tables[0].columns}
+    by_name["org_no"].code_table = "dim.org.org_nm"
+    by_name["dep_bal_rmb"].name_column = "dep_nm"
+
+    block = table_block(render_evidence(evidence), ORG_BAL)
+
+    assert "- org_no 开户机构号 varchar(10) 〔粒度〕〔主键〕〔命中：机构〕 码值表：dim.org.org_nm" in block.splitlines()
+    assert "名称字段：dep_nm" in block
+
+
+def test_level_one_drops_the_name_hints_of_columns_that_were_not_hit(mock_store, monkeypatch):
+    evidence = heavy_evidence(mock_store)
+    by_name = {column.name: column for column in evidence.tables[0].columns}
+    by_name["margin_bal_rmb"].name_column = "margin_nm"                  # 没命中
+    by_name["org_no"].code_table = "dim.org.org_nm"                      # 命中
+    texts = shrunk_texts(evidence, monkeypatch, levels=1)
+
+    assert "名称字段：margin_nm" in table_block(texts[0], ORG_BAL)
+    assert "名称字段：margin_nm" not in table_block(texts[1], ORG_BAL)
+    assert "码值表：dim.org.org_nm" in table_block(texts[1], ORG_BAL)
+
+
+def test_the_generator_is_told_not_to_use_the_tables_the_plan_dropped(evidence):
+    plan = make_plan(dropped_tables=["dim.corp_cust"])
+
+    user = generator_messages(make_parsed(), plan, evidence)[1]["content"]
+
+    assert "不要用的表：dim.corp_cust" in user.split("## 表结构")[0]
+    assert "不要用的表" not in generator_messages(make_parsed(), make_plan(), evidence)[1]["content"]
+
+
+def test_clarify_rules_name_the_usual_splits_and_forbid_choosing_a_caliber_by_default():
+    assert "日均的统计区间" in PLANNER_SYSTEM and "只说清了其中一个分岔" in PLANNER_SYSTEM
+    assert "不同的指标不算分岔" in PLANNER_SYSTEM
+    assert "就说明这里该反问" in PLANNER_SYSTEM
+    assert "按规则 3 反问" in PLANNER_SYSTEM                                       # 只说「日均」时
+    assert "汇总程度高、但没有这个指标字段的表不能拿别的字段来凑" in PLANNER_SYSTEM
+
+
+def test_the_parser_asks_back_only_for_a_missing_object_or_metric_and_never_while_answering():
+    assert "要看的是单个对象" in PARSER_SYSTEM and "口径的分岔" in PARSER_SYSTEM
+    assert "回答反问时 clarify 写 null" in PARSER_SYSTEM
+
+
+def test_code_value_rules_tell_both_model_steps_to_filter_names_with_the_name_column():
+    assert "「名称字段」「码值表」的是代码字段" in PLANNER_SYSTEM
+    assert "不要拿中文名称去比代码字段" in DIALECT_RULES
 
 
 def test_script_kinds_mark_empty_etl_time_and_constant_columns(mock_store):
@@ -827,6 +880,14 @@ def test_render_tables_lists_only_the_given_tables_in_the_given_order(evidence):
 
     assert text.index(f"### {DIM_ORG} ") < text.index(f"### {ORG_BAL} ")
     assert f"### {CUST_BAL} " not in text and not text.startswith("## ")
+
+
+def test_render_tables_points_only_to_code_tables_among_the_given_tables(evidence):
+    copy = evidence.model_copy(deep=True)
+    next(column for column in copy.tables[0].columns if column.name == "org_no").code_table = f"{DIM_ORG}.org_nm"
+
+    assert "码值表" not in render_tables(copy, [ORG_BAL])
+    assert f"码值表：{DIM_ORG}.org_nm" in render_tables(copy, [ORG_BAL, DIM_ORG])
 
 
 def test_render_tables_skips_tables_outside_the_evidence(evidence):

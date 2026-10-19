@@ -16,6 +16,7 @@ from nl2sql.schemas import (
     Metric,
     ParsedRequest,
     PlanField,
+    PlanJoin,
     PlanTable,
     QueryPlan,
     QueryRequest,
@@ -255,6 +256,81 @@ def test_validation_compares_the_sql_with_the_plans_tables_and_metric_columns(ma
     assert [step.summary for step in result.trace if step.step == "validate"] == ["通过，警告 1 条"]
 
 
+def test_a_dimension_joined_only_by_its_key_is_dropped_before_generating(make):
+    cust = "dim.corp_cust"
+    plan = plan_json(
+        tables=[PlanTable(table=LOAN), PlanTable(table=cust)],
+        fields=[PlanField(table=LOAN, column="loan_bal_rmb", usage="metric"),
+                PlanField(table=LOAN, column="data_dt", usage="filter"),
+                PlanField(table=LOAN, column="cust_no", usage="join"), PlanField(table=cust, column="cust_no", usage="join")],
+        joins=[PlanJoin(left_table=LOAN, left_columns=["cust_no"], right_table=cust, right_columns=["cust_no"])])
+    pipeline, llm, _ = make([parsed_json(), plan, sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.validation.warnings == []           # 精简后的方案和 SQL 一致，没有 R8
+    assert [item.table for item in result.plan.tables] == [LOAN] and result.plan.joins == []
+    assert [step.summary for step in result.trace if step.step == "plan"] == \
+        [f"结论 ok：用表 {LOAN}；去掉用不到的表 {cust}"]
+    generate = llm.calls[2]["messages"][1]["content"]
+    structure = generate.split("## 表结构", 1)[1].split("\n## ", 1)[0]
+    assert f"### {cust} " not in structure and cust not in structure          # ⑤ 的表结构里没有这张维表，也不指向它
+
+
+def test_sql_that_joins_a_dropped_table_again_is_sent_back_for_repair(make):
+    cust = "dim.corp_cust"
+    plan = plan_json(
+        tables=[PlanTable(table=LOAN), PlanTable(table=cust)],
+        fields=[PlanField(table=LOAN, column="loan_bal_rmb", usage="metric"),
+                PlanField(table=LOAN, column="data_dt", usage="filter"), PlanField(table=cust, column="cust_no", usage="join")],
+        joins=[PlanJoin(left_table=LOAN, left_columns=["cust_no"], right_table=cust, right_columns=["cust_no"])])
+    rejoined = (f"SELECT SUM(l.loan_bal_rmb) AS loan_bal_rmb FROM {LOAN} l JOIN {cust} c ON l.cust_no = c.cust_no "
+                f"WHERE l.data_dt = DATE '2026-09-30'")
+    pipeline, llm, _ = make([parsed_json(), plan, sql_reply(rejoined), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.repair_rounds == 1 and result.first_pass_ok is False
+    assert result.plan.dropped_tables == [cust]
+    assert "不要用的表：dim.corp_cust" in llm.calls[2]["messages"][1]["content"]
+    assert "已经去掉了 dim.corp_cust" in llm.calls[3]["messages"][1]["content"]       # 修正轮带着 R8 错误
+
+
+AVG_REQUIREMENT = "查询 2026-09-30 全行不含保证金的对公存款日均余额"
+ORG_DEP = "ads.org_corp_dep_bal_d"
+
+
+def avg_replies() -> list[str]:
+    """① 解析出没说统计区间的日均，④ 挑了机构汇总表的年日均"""
+    parsed = parsed_json(requirement=AVG_REQUIREMENT, metrics=[Metric(name="对公存款日均余额")],
+                         caliber_hints=["不含保证金"])
+    plan = plan_json(tables=[PlanTable(table=ORG_DEP)],
+                     fields=[PlanField(table=ORG_DEP, column="ytd_avg_bal_rmb", usage="metric"),
+                             PlanField(table=ORG_DEP, column="data_dt", usage="filter")],
+                     filters=[f"{ORG_DEP}.data_dt = DATE '2026-09-30'"])
+    return [parsed, plan]
+
+
+def test_an_unqualified_daily_average_is_asked_back_instead_of_guessed(make):
+    pipeline, llm, _ = make(avg_replies())
+
+    result = pipeline.run(QueryRequest(question="查 2026 年 9 月末全行不含保证金的对公存款日均余额", today=TODAY))
+
+    assert result.status == "need_clarify" and result.llm_calls == 2 and result.sql == ""
+    assert [option.label for option in result.clarify.options] == ["年日均", "月日均"]
+    assert [step.summary for step in result.trace if step.step == "plan"][0].startswith("需要反问：需求里的「日均」")
+
+
+def test_when_answering_a_clarify_the_daily_average_guard_stays_quiet(make):
+    prev = Clarify(question="要不要含保证金？", options=[ClarifyOption(label="含"), ClarifyOption(label="不含")])
+    pipeline, _, _ = make([*avg_replies(), sql_reply(f"SELECT SUM(ytd_avg_bal_rmb) AS ytd_avg_bal_rmb FROM {ORG_DEP} "
+                                                     "WHERE data_dt = DATE '2026-09-30'")])
+
+    result = pipeline.run(QueryRequest(question="不含", prev_clarify=prev, today=TODAY))
+
+    assert result.status == "ok"
+
+
 # ── 失败 ──────────────────────────────────────────
 
 def test_requirement_unparseable_twice_fails_at_parse(make):
@@ -285,6 +361,20 @@ def test_not_a_query_fails_with_the_models_reply(make):
 
     assert result.status == "failed" and result.failed_step == "parse" and result.message == reply
     assert result.llm_calls == 1 and result.requirement == ""        # 不是需求，调用方不该把它当作上一轮需求
+
+
+def test_the_parser_asks_back_before_recall_when_the_object_is_missing(make):
+    clarify = Clarify(question="要看哪个客户的贷款情况？", options=[
+        ClarifyOption(label="列出全部客户"), ClarifyOption(label="指定一个客户", meaning="请回复客户名称或客户号")])
+    asking = ParsedRequest(is_query=True, requirement="查询某个对公客户的贷款情况", clarify=clarify)
+    pipeline, llm, spy = make([asking.model_dump_json()])
+
+    result = pipeline.run(QueryRequest(question="看一下某个客户的贷款情况", today=TODAY))
+
+    assert result.status == "need_clarify" and result.clarify == clarify and result.plan is None
+    assert result.requirement == "查询某个对公客户的贷款情况"          # 调用方拿它和 clarify 作为下一轮的上下文
+    assert [step.step for step in result.trace] == ["parse", "output"] and spy.calls == [] and result.llm_calls == 1
+    assert result.trace[0].summary == "需要反问：要看哪个客户的贷款情况？"
 
 
 # ── 追问与反问的回答 ──────────────────────────────
