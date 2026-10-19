@@ -17,6 +17,7 @@
 | 旧模拟会话库 | `/var/lib/agentflow/history.db`，保留 |
 | 模型缓存 | `/var/lib/agentflow/huggingface` |
 | 配置 | `/etc/agentflow/app.env`，root:agentflow 0640，不进入 Git |
+| 站点配置 | `/etc/agentflow/site.json`：公网地址、服务器名、证书目录、uv 路径、验收时要保持运行的同机服务；root 所有，不进入 Git |
 | 备份 | `/var/backups/agentflow`，每日 UTC 04:25，在线备份并隔离恢复核对行数 |
 | 证据 | `/opt/agentflow/deployments/<SHA>`，Linux 测试、依赖清单、发布及验收记录 |
 
@@ -47,7 +48,7 @@ SQL_DIALECT=postgres
 LLM_TIMEOUT=120
 ```
 
-服务器拉取指定提交后，使用该提交内的 `deploy/release.py`。代码使用同机已有且重新核验摘要的 `<uv 路径>`；先安装官方 CPU 版 torch，再安装与本地一致的直接依赖，记录实际 Linux 依赖版本。该工具不会修改其它网站的运行环境。
+服务器拉取指定提交后，使用该提交内的 `deploy/release.py`。代码使用 `site.json` 里登记的同机已有 uv，并重新核验摘要；先安装官方 CPU 版 torch，再安装与本地一致的直接依赖，记录实际 Linux 依赖版本。该工具不会修改其它网站的运行环境。
 
 ```bash
 sudo python3 /opt/agentflow/releases/git-<SHA>/deploy/release.py <SHA> prepare --frontend /tmp/agentflow-frontend-<SHA>.tar.gz --mart-dir /var/lib/agentflow/datasets/real-20261019-v1 --executor none

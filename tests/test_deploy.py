@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from deploy.backup_history import backup_history
-from deploy.release import unpack_frontend
+from deploy.release import load_site, render_nginx, unpack_frontend
 from deploy.runtime_profile import make_profile, metadata_contract, read_environment, write_profile
 from deploy.dataset import package_dataset, unpack_dataset
 
@@ -32,6 +32,36 @@ def test_frontend_must_match_source_commit(tmp_path: Path) -> None:
     with pytest.raises(AssertionError, match="提交不匹配"):
         unpack_frontend(archive, tmp_path / "release", "b" * 40)
     assert not (tmp_path / "release").exists()
+
+
+_SITE = {"public_url": "https://example.test:8447", "server_name": "example.test",
+         "cert_dir": "/etc/letsencrypt/live/example", "uv": "/opt/tools/uv", "watch_units": ["other-site"]}
+
+
+def test_site_config_must_exist_and_be_complete(tmp_path: Path) -> None:
+    """服务器上没有站点配置或缺键时，发布在动手前就停下。"""
+    path = tmp_path / "site.json"
+    with pytest.raises(RuntimeError, match="缺少"):
+        load_site(path)
+    path.write_text(json.dumps({k: v for k, v in _SITE.items() if k != "cert_dir"}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="cert_dir"):
+        load_site(path)
+    path.write_text(json.dumps(_SITE), encoding="utf-8")
+    assert load_site(path)["watch_units"] == ["other-site"]
+
+
+def test_nginx_template_is_filled_from_site_config() -> None:
+    """仓库里的模板只有变量，填好后不留变量；旧版本写死的配置原样通过，没填的变量拦下。"""
+    template = (Path(__file__).parent.parent / "deploy/nginx.conf").read_bytes()
+    rendered = render_nginx(template, _SITE)
+    assert b"server_name example.test;" in rendered
+    assert b"ssl_certificate /etc/letsencrypt/live/example/fullchain.pem;" in rendered
+    assert b"error_page 497 =308 https://example.test:8447$request_uri;" in rendered
+    assert b"__" not in rendered
+    literal = b"server {\n    server_name 192.0.2.1;\n}\n"
+    assert render_nginx(literal, _SITE) == literal
+    with pytest.raises(ValueError, match="__UNKNOWN__"):
+        render_nginx(b"server_name __UNKNOWN__;", _SITE)
 
 
 @pytest.mark.parametrize("name", ["../outside", "/etc/cron.d/test", "web/dist/../../../outside"])

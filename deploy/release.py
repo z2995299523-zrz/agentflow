@@ -19,8 +19,35 @@ else:
 BASE = Path("/opt/agentflow")
 REPO = BASE / "repo.git"
 DATA = Path("/var/lib/agentflow")
-UV = Path("<uv 路径>")
+# 服务器专属的值（公网地址、证书目录、uv 路径、同机要保持运行的服务）只放在服务器上，不进入 Git。
+SITE_PATH = Path("/etc/agentflow/site.json")
+SITE_KEYS = ("public_url", "server_name", "cert_dir", "uv", "watch_units")
+NGINX_SITE = Path("/etc/nginx/sites-available/agentflow")
 REMOTE = "https://github.com/z2995299523-zrz/agentflow.git"
+
+
+def load_site(path: Path = SITE_PATH) -> dict:
+    """读服务器上的站点配置，缺文件、缺键或格式不对时在动手前报错。"""
+    if not path.is_file():
+        raise RuntimeError(f"缺少 {path}，先按部署交接在服务器上建好站点配置")
+    site = json.loads(path.read_text(encoding="utf-8"))
+    missing = [key for key in SITE_KEYS if key not in site]
+    if missing:
+        raise RuntimeError(f"{path} 缺少：{', '.join(missing)}")
+    if not str(site["public_url"]).startswith("https://") or not isinstance(site["watch_units"], list):
+        raise RuntimeError(f"{path} 的 public_url 必须是 https 地址，watch_units 必须是列表")
+    return site
+
+
+def render_nginx(template: bytes, site: dict) -> bytes:
+    """把 Nginx 模板里的站点变量换成服务器上的值；旧版本里写死的配置原样返回。"""
+    content = (template.replace(b"__SERVER_NAME__", site["server_name"].encode())
+               .replace(b"__CERT_DIR__", site["cert_dir"].encode())
+               .replace(b"__PUBLIC_URL__", site["public_url"].encode()))
+    left = sorted({name.decode() for name in re.findall(rb"__[A-Z_]+__", content)})
+    if left:
+        raise ValueError(f"Nginx 模板还有没填的变量：{', '.join(left)}")
+    return content
 
 
 def run(*arguments: str, cwd: Path | None = None, capture: bool = False) -> str:
@@ -74,6 +101,7 @@ def prepare(commit: str, frontend: Path, mart_dir: str | None = None, executor: 
     evidence = BASE / "deployments" / commit
     if (evidence / "prepared.json").exists():
         raise RuntimeError("该提交已经准备完成，请直接执行 activate 或 verify")
+    uv = Path(load_site()["uv"])
     run("install", "-d", "-m", "755", str(BASE), str(BASE / "releases"), str(evidence))
     if not REPO.exists():
         run("git", "clone", "--mirror", REMOTE, str(REPO))
@@ -87,15 +115,15 @@ def prepare(commit: str, frontend: Path, mart_dir: str | None = None, executor: 
             source.extractall(release, filter="data")
     unpack_frontend(frontend, release, commit)
     # uv 是同机已有项目安装的工具，使用前重新核对其登记摘要。
-    assert hashlib.sha256(UV.read_bytes()).hexdigest() == UV.with_suffix(".sha256").read_text().split()[0]
+    assert hashlib.sha256(uv.read_bytes()).hexdigest() == uv.with_suffix(".sha256").read_text().split()[0]
     if not (release / ".venv").exists():
-        run(str(UV), "venv", "--python", "/usr/bin/python3", str(release / ".venv"))
+        run(str(uv), "venv", "--python", "/usr/bin/python3", str(release / ".venv"))
     python = str(release / ".venv/bin/python")
-    run(str(UV), "pip", "install", "--python", python, "--index-url",
+    run(str(uv), "pip", "install", "--python", python, "--index-url",
         "https://download.pytorch.org/whl/cpu", "torch==2.7.1+cpu")
-    run(str(UV), "pip", "install", "--python", python, "--index-url", "https://pypi.org/simple",
+    run(str(uv), "pip", "install", "--python", python, "--index-url", "https://pypi.org/simple",
         "-r", str(release / "deploy/requirements-server.txt"))
-    freeze = run(str(UV), "pip", "freeze", "--python", python, capture=True)
+    freeze = run(str(uv), "pip", "freeze", "--python", python, capture=True)
     (evidence / "requirements-linux.lock").write_text(freeze + "\n", encoding="utf-8")
     with (evidence / "tests.log").open("w") as output:
         subprocess.run([python, "-m", "pytest", "tests", "-q", "--tb=short", "-p", "no:cacheprovider"],
@@ -176,6 +204,8 @@ def activate(commit: str, profile_override: dict | None = None) -> None:
     evidence = BASE / "deployments" / commit
     assert (evidence / "prepared.json").is_file(), "必须先完成 prepare"
     assert Path("/etc/agentflow/app.env").is_file(), "必须先配置仓库外的 app.env"
+    site = load_site()
+    nginx_site = render_nginx((release / "deploy/nginx.conf").read_bytes(), site)
     old = (BASE / "current").resolve() if (BASE / "current").exists() else None
     prepared = json.loads((evidence / "prepared.json").read_text())
     profile = profile_override or prepared.get("profile") or make_profile("./data/mock_mart", "duckdb", release)
@@ -193,7 +223,7 @@ def activate(commit: str, profile_override: dict | None = None) -> None:
         Path("/etc/systemd/system/agentflow.service"): release / "deploy/agentflow.service",
         Path("/etc/systemd/system/agentflow-backup.service"): release / "deploy/agentflow-backup.service",
         Path("/etc/systemd/system/agentflow-backup.timer"): release / "deploy/agentflow-backup.timer",
-        Path("/etc/nginx/sites-available/agentflow"): release / "deploy/nginx.conf",
+        NGINX_SITE: release / "deploy/nginx.conf",
     }
     previous = {str(path): path.read_bytes() if path.exists() else None for path in targets}
     save(evidence / "previous.json", {"release": str(old) if old else None, "profile": old_profile,
@@ -207,9 +237,9 @@ def activate(commit: str, profile_override: dict | None = None) -> None:
         write_profile(ENV_PATH, profile)
         switch(release)
         for target, source in targets.items():
-            content = source.read_bytes()
+            content = nginx_site if target == NGINX_SITE else source.read_bytes()
             # 回退到历史模板时也保留现有密码保护，不因旧代码模板缺少 include 而公开站点。
-            if (target == Path("/etc/nginx/sites-available/agentflow")
+            if (target == NGINX_SITE
                     and Path("/etc/nginx/agentflow-access.conf").is_file() and b"agentflow-access" not in content):
                 content = content.replace(b"    server_tokens off;", b"    server_tokens off;\n"
                                           b"    include /etc/nginx/agentflow-access.conf;")
@@ -236,7 +266,7 @@ def activate(commit: str, profile_override: dict | None = None) -> None:
         run("systemctl", "start", "agentflow-backup.service")
         save(evidence / "deployment.json", {"commit": commit, "previous_release": str(old) if old else None,
                                             "health": status, "profile": profile,
-                                            "url": "<站点地址>"})
+                                            "url": site["public_url"]})
     except Exception:
         ENV_PATH.write_bytes(old_env)
         if old:
@@ -267,7 +297,7 @@ def verify(commit: str) -> None:
     manifest = json.loads((release / "frontend-manifest.json").read_text())
     for name, digest in manifest["files"].items():
         assert hashlib.sha256((release / name).read_bytes()).hexdigest() == digest
-    for unit in ("agentflow", "agentflow-backup.timer", "nginx"):
+    for unit in ("agentflow", "agentflow-backup.timer", "nginx", *load_site()["watch_units"]):
         run("systemctl", "is-active", "--quiet", unit)
     result = health()
     save(BASE / "deployments" / commit / "verification.json", {"commit": commit, "health": result,

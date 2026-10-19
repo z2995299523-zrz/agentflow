@@ -28,6 +28,8 @@
 
 2026-10-19 实际运行代码提交为 `e957221e55cbed3d2339aee679f2b18eb06bda2b`。本地与 Linux 各 1,564 项测试通过。后续文档补充提交不代表线上代码自动更新，活动版本始终用 `readlink -f /opt/agentflow/current` 核对。
 
+仓库是公开的，服务器地址、SSH 用户、私钥文件名、同机其它站点和服务的实际信息不写进仓库，本文件用 `<服务器IP>`、`<SSH用户>`、`<本机私钥文件>`、`<同机其它服务>` 代替；实际值只在本机 `.runtime-deploy/private-docs/`（不入库）。2026-10-19 为此改写过本分支历史：线上的 `e957221…` 对应改写后的 `6b3b9964033d7605738dcfa5d3cd83ffc7e4f974`，代码相同，只差文档和占位符；改写前的历史打包在本机 `.runtime-deploy/codex-before-sanitize.bundle`。
+
 SSH 登录示例：
 
 ```powershell
@@ -59,7 +61,7 @@ SSH 登录示例：
 | `/etc/nginx/sites-available/agentflow` | 本站 HTTPS 和 `/api/` 转发 |
 | `/etc/nginx/agentflow-access.conf` | 独立访问控制；Nginx 版本配置通过 include 引用 |
 | `/etc/nginx/agentflow.htpasswd` | 密码摘要，root:www-data 0640，不写进源码 |
-| `<uv 路径>` | 同机既有部署工具，使用前核对旁边 `uv.sha256`，不修改其它网站的运行环境 |
+| `/etc/agentflow/site.json` | 站点配置，root 所有、0644，不进入 Git：`public_url`、`server_name`、`cert_dir`（Nginx 模板里的变量）、`uv`（同机既有部署工具，使用前核对旁边 `uv.sha256`，不修改其它网站的运行环境）、`watch_units`（验收时要保持运行的同机服务）；实际内容见本机 `.runtime-deploy/private-docs/site.json` |
 
 本机登录凭据单独保存在 `.runtime-deploy/服务器访问凭据.txt`；程序化验证可以读取同目录的 `access-credentials.json`。这些文件已被 Git 忽略。只将本文件交给 Claude Code，不需要把密码正文贴入提示词。
 
@@ -177,6 +179,13 @@ fi
 目标目录已有文件但准备未完成时，先查看该次日志和证据，再继续；不要覆盖活动目录或随意删除失败目录。
 
 ### 准备阶段
+
+从 2026-10-19 改写历史后的版本起，`release.py` 从 `/etc/agentflow/site.json` 读站点专属的值，服务器上没有这个文件时 `prepare`、`activate`、`verify` 都会在动手前报错。线上的 `e957221…` 还不需要它；第一次用新版本发布前，把本机 `.runtime-deploy/private-docs/site.json` 用 SCP 传到 `/tmp/agentflow-site.json`，核对内容后安装：
+
+```bash
+sudo install -m 644 -o root -g root /tmp/agentflow-site.json /etc/agentflow/site.json
+sudo python3 -c "import json; print(sorted(json.load(open('/etc/agentflow/site.json'))))"
+```
 
 ```bash
 sudo python3 "$release_dir/deploy/release.py" "$release_sha" prepare \
