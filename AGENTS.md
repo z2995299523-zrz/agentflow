@@ -15,7 +15,7 @@ agentflow/
 ├── app.py              # Streamlit 界面：查数页、元数据页
 ├── main.py             # FastAPI 接口：/nl2sql/query、/metadata/tables、/metadata/lineage、/health
 ├── config.py           # 配置：模型、MART_DIR、SQL_DIALECT、EXECUTOR、LLM_TIMEOUT
-├── run_tests.py        # 单元测试入口（1475 项，不调模型）
+├── run_tests.py        # 单元测试入口（1535 项，不调模型）
 ├── run_eval.py         # 评估入口（模拟库三组对照）
 ├── metadata/           # 元数据层：模板、读取、校验、脚本解析、关联推导、向量、样例、导入、只读入口
 ├── lineage/graph.py    # 血缘图与关联图
@@ -62,4 +62,4 @@ agentflow/
 - Hermes 负责：需求理解、任务分解、写计划、进度跟进、中文沟通、代码讲解
 - Codex 负责：编码实现、代码审查、运行测试、修复 bug
 - 桥梁文件：`.hermes/bridge.md`（每次会话结束后更新）
-- 项目知识库：`notes/`（39 篇笔记，面试可直接用）
+- 项目知识库：`notes/`（40 篇笔记，面试可直接用）

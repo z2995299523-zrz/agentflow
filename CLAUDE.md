@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> 最后更新: 2026-10-18 | NL2SQL 改造的三份计划都已完成
+> 最后更新: 2026-10-19 | NL2SQL 改造的三份计划都已完成，生成质量做了第二轮改进
 
 ## 项目概述
 
@@ -17,7 +17,7 @@ AgentFlow 现在是「基于专题库模型结构与血缘的自然语言转 SQL
 # 安装依赖（国内加速加 -i https://pypi.tuna.tsinghua.edu.cn/simple）
 pip install -r requirements.txt
 
-python run_tests.py                       # 单元测试，1475 项，不调模型、不加载 BGE（--quick 效果相同）
+python run_tests.py                       # 单元测试，1535 项，不调模型、不加载 BGE（--quick 效果相同）
 python -m pytest tests/test_workflow.py -q  # 单个测试文件
 
 python -m metadata.importer               # 导入 MART_DIR 指向的资料：校验、解析脚本、补血缘、推导关联、收样例、算向量
@@ -55,19 +55,21 @@ start.bat                                 # Windows 同时启动接口和界面�
 
 - `metadata/store.py` 的 `MetadataStore` 是只读入口，构造时全部读进内存
 - `metadata/sqlscope.py` 作用域解析：字段穿过 CTE、UNION、子查询、临时表追溯到实体表
+- `metadata/codes.py` 代码字段配名称字段（「××代码」配「××名称」、`_cd` 配 `_nm`）和码值表，证据提示和 R9 共用
 - `lineage/graph.py` 血缘图与关联图：字段上游链路（每一跳带加工表达式、过滤条件、关联条件）、同源对比、表的上下游、关联路径
 
 ### 查询流水线（`nl2sql/`，七步里三步调模型）
 
 ```
 QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(模型) → ⑤ generate(模型) → ⑥ validate → ⑦ output → QueryResult
-  ④ need_upstream：上溯一层回到 ②（最多 2 层）；need_clarify、cannot_answer 直接去 ⑦
+  ① 缺对象或指标时反问，直接去 ⑦；④ need_upstream：上溯一层回到 ②（最多 2 层）；need_clarify、cannot_answer 直接去 ⑦
+  ④ ok：只说「日均」没说统计区间时 clarify_daily_average 改成反问；prune_plan 去掉用不到的表（孤立表、只用关联键关联专题层的维表，记进 dropped_tables，⑤ 再用就是 R8 错误）再去 ⑤
   ⑥ 有错误：带着错误回到 ⑤（最多修正 2 次）
 ```
 
 - `schemas.py`：各步骤的输入输出，是模块之间的契约；`llm.py`：模型调用（`ChatModelClient`、测试用的 `ScriptedLLM`、带重试的 `structured_call`）
 - `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（超过 4 万字按九级收缩）
-- `retriever.py` 候选召回（关键字加向量，三层范围）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R8；`output.py` 第 ⑦ 步的工具
+- `retriever.py` 候选召回（关键字加向量，三层范围）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
 - `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
 - `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB
 - 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`）
@@ -77,11 +79,11 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 
 - `app.py`（Streamlit）：查数页（逐步进度、反问点选、追问、新话题、执行结果）、元数据页（按层级看表和字段、字段的上下游）
 - `main.py`（FastAPI）：`POST /nl2sql/query`、`GET /metadata/tables`、`GET /metadata/lineage`、`GET /health`
-- `eval/`：40 题题库（10 题登记了其它正确答案）、结果比对、三组对照评估与错题归因、真实库静态评估。基线（2026-10-17）：执行准确率 A 82.9% / B 80.0% / C 97.1%，报告 `eval/reports/2026-10-17_nl2sql_eval.md`
+- `eval/`：40 题题库（10 题登记了其它正确答案）、结果比对、三组对照评估与错题归因、真实库静态评估。基线（2026-10-17）：执行准确率 A 82.9% / B 80.0% / C 97.1%，报告 `eval/reports/2026-10-17_nl2sql_eval.md`；第二轮改进后（2026-10-19，同一份代码跑两次）：A 85.7%、82.9% / B 100%、91.4% / C 97.1%、97.1%，选表完全一致 C 组 62.9% → 85.7%、80.0%，报告 `eval/reports/2026-10-19_nl2sql_eval.md`、`…_2.md`
 
 ### Test Infrastructure
 
-`tests/` 下全部是 pytest，1475 项，不调模型、不加载 BGE、不引用 `data/real_mart`。公共夹具在 `tests/conftest.py`：`tiny_store`、`mock_store`、`mock_graph`、`mock_retriever`、`mock_validator`、`mock_db`。
+`tests/` 下全部是 pytest，1535 项，不调模型、不加载 BGE、不引用 `data/real_mart`。公共夹具在 `tests/conftest.py`：`tiny_store`、`mock_store`、`mock_graph`、`mock_retriever`、`mock_validator`、`mock_db`。
 
 ## Tech Stack
 
@@ -142,4 +144,4 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 - Hermes 负责：需求理解、任务分解、写计划、进度跟进、中文沟通、代码讲解
 - Claude Code 负责：编码实现、代码审查、运行测试、修复 bug
 - 桥梁文件：`.hermes/bridge.md`（每次会话结束后更新）
-- 项目知识库：`notes/`（39 篇笔记，面试可直接用）
+- 项目知识库：`notes/`（40 篇笔记，面试可直接用）
