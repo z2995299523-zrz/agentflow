@@ -47,6 +47,10 @@ start.bat                                 # Windows 同时启动接口和界面�
 
 ## Architecture
 
+### 现有服务器部署
+
+接手服务器发布时先读 `deploy/CLAUDE_CODE_SERVER_DEPLOYMENT.md`。当前线上使用 Nginx + systemd + 独立 Python 环境，HTTPS 8447；真实专题库资料在 Git 外通过校验快照部署，入口有访问密码，`EXECUTOR=none`，只生成并校验 SQL。代码更新、真实资料更新、会话备份和回退的具体命令都在该文件中。Docker Compose 保留为另一种启动方式。
+
 ### 元数据层（导入时一次算好）
 
 ```

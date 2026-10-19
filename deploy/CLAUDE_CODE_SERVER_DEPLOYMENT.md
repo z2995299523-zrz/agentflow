@@ -26,6 +26,8 @@
 
 服务器约 2 GB 内存，与其它站点和服务共用，保留它们的服务、端口、配置和数据。
 
+2026-10-19 实际运行代码提交为 `e957221e55cbed3d2339aee679f2b18eb06bda2b`。本地与 Linux 各 1,564 项测试通过。后续文档补充提交不代表线上代码自动更新，活动版本始终用 `readlink -f /opt/agentflow/current` 核对。
+
 SSH 登录示例：
 
 ```powershell
@@ -48,6 +50,7 @@ SSH 登录示例：
 | `/etc/agentflow/app.env` | 运行配置，root:agentflow 0640；包含模型凭据，不展示全文 |
 | `/var/lib/agentflow/datasets/<资料版本>` | 仓库外的真实资料快照；清单、SQL、`build/metadata.db`、逐文件摘要 |
 | `/var/lib/agentflow/datasets/real-20261019-v1` | 本次真实资料快照，后续更新使用新目录，不覆盖它 |
+| `/var/lib/agentflow/packages/real-20261019-v1.tar.gz` | 保留的原始真实资料包，SHA256 为 `632ca1a805572b6761c34c72d1e2687f90056cb99806af5f0cfe5ed192b8dc14` |
 | `/var/lib/agentflow/history-real.db` | 真实资料的稳定会话库，各真实资料版本通过链接使用它 |
 | `/var/lib/agentflow/history.db` | 原模拟资料会话，保留，不与真实资料会话混用 |
 | `/var/lib/agentflow/marts/<SHA>/build` | 历史模拟库生成物，保留 |
@@ -106,6 +109,8 @@ sudo systemctl status agentflow --no-pager
 4. `dataset-manifest.json`，登记数量、向量器和逐文件 SHA256。
 
 本地 `build/history.db`、`.env`、业务数据、评估文件、`convert.ini`、源资料路径和保密词文件都不会被复制。这个操作是发布模型资料，不是迁移单位数据库。
+
+资料包内的加工 SQL 仅用于提供模型和血缘证据，不要把它们作为初始化脚本连到单位数据库执行。
 
 ```powershell
 python deploy/dataset.py package `
@@ -195,6 +200,8 @@ sudo python3 "$release_dir/deploy/release.py" "$release_sha" activate
 sudo python3 /opt/agentflow/current/deploy/release.py "$release_sha" verify
 ```
 
+如果当前指针已经指向同一 SHA，执行 `verify`，不要重复 `activate`，以免把“上一版”记录改成同一版本。
+
 激活阶段先在线备份旧资料会话，保存旧配置及其权限，然后原子更新资料相关配置与代码指针，重启本应用，按准备时登记的契约检查健康状态，检查并平滑重载 Nginx，执行当前真实会话的备份恢复。
 
 失败时恢复原来的运行配置、代码指针和系统服务文件。`runtime-before-*.env` 是仅 root 可读的敏感回退材料，不能下载到源码目录或提交 Git。
@@ -230,13 +237,21 @@ curl --fail --user agentflow https://<服务器IP>:8447/api/health
 - `/api/health` 为 `status=ok`，`executor=none`，`counts` 等于本次资料契约；真实资料当前是 833 张表，不是 14 张表。
 - 前端显示真实资料与“只生成 SQL”；表、字段、搜索及血缘图能加载。
 - 使用真实资料的典型需求调用 DeepSeek，SQL 的静态校验通过、实际用表存在于本次元数据库中。
-- `exec_result.executed=false`。界面没有业务查询结果是当前执行契约，不应捏造一组数据来演示执行成功。
+- `exec_result` 为空，或其中 `executed=false`。界面没有业务查询结果是当前执行契约，不应捏造一组数据来演示执行成功。
 - SSE 的 `step` 事件在最终 `turn` 之前分批到达，最终会话成功落库。
 - 重启本应用后，会话及结果仍然存在；不重启其它站点。
 - 对含真实问答的会话库执行备份，并检核隔离恢复的完整性和行数。
 - 同机原有站点和服务继续正常。
 
 实际问答和截图可能包含真实模型名称，只保存到被忽略的私有验收目录或 root 私有服务器证据中。入库笔记只写方法、数量、耗时和通过情况。
+
+用户已在 2026-10-19 明确允许本次问答验收向 `api.deepseek.com` 发送命中的真实表名、字段说明、加工表达式和血缘证据。范围不包含业务记录或数据库密码；访问 Key 仅按既有服务配置用于认证，不进入模型提示词。保持已确认的提供方和模型资料范围，不能据此扩展到其它服务或整库业务数据上传。
+
+### 本次真实问答的业务边界
+
+首次“2026 年立项项目数量”在约 7.03 秒生成 SQL，静态校验通过，但模型用了申报资料，把申报日期近似为立项日期，与原评估确认的项目表不一致。追加“只统计正式立项，不能用申报日期近似”的明确追问后，约 6.95 秒生成 SQL，选回已确认的项目表，静态校验通过。
+
+两次都没有执行单位数据库。这证明资料切换、模型调用、SSE 和追问链路正常，不能证明所有问法都满足业务口径。接手时保留这项偏差，后续优化应按项目评估流程处理，不能仅凭 SQL 静态通过就将立项和申报混用标为正确。
 
 ## 备份和回退
 
