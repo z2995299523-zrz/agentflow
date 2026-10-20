@@ -1,7 +1,8 @@
 """提示词：系统提示词的固定性与示例、三组消息的内容、证据文本的分节与收缩"""
 import json
 import re
-from datetime import date
+from calendar import monthrange
+from datetime import date, timedelta
 
 import pytest
 import sqlglot
@@ -207,6 +208,69 @@ def test_reference_dates_follow_the_calendar(today, expected):
 
     for fragment in expected:
         assert fragment in user, fragment
+
+
+def month_end_line(today: date) -> str:
+    """用户消息里「没写年份的月末」那一行"""
+    user = parser_messages(QueryRequest(question="查 9 月末对公贷款余额"), today)[1]["content"]
+    return next(item for item in user.splitlines() if item.startswith("没写年份的月末"))
+
+
+def month_ends_in(today: date) -> dict[int, date]:
+    """「没写年份的月末」那一行，{月份: 日期}"""
+    pairs = re.findall(r"(\d+) 月末 (\d{4}-\d{2}-\d{2})", month_end_line(today))
+    return {int(month): date.fromisoformat(day) for month, day in pairs}
+
+
+@pytest.mark.parametrize("today, expected", [
+    (date(2026, 10, 20), {9: "2026-09-30", 1: "2026-01-31", 11: "2025-11-30", 12: "2025-12-31"}),  # 线上报的：9 月末是今年的
+    (date(2026, 10, 20), {10: "2025-10-31"}),                                   # 本月的月末还没到，取去年的
+    (date(2026, 10, 31), {10: "2026-10-31", 11: "2025-11-30"}),                 # 今天就是月末，不晚于今天，取今年的
+    (date(2027, 1, 15), {1: "2026-01-31", 9: "2026-09-30", 12: "2026-12-31"}),  # 跨年：1 月中旬，全是去年的
+    (date(2027, 2, 1), {1: "2027-01-31", 2: "2026-02-28"}),                     # 跨年后第一个月末刚过
+    (date(2026, 12, 31), {1: "2026-01-31", 12: "2026-12-31"}),                  # 一年的最后一天，全是今年的
+    (date(2028, 3, 1), {2: "2028-02-29", 3: "2027-03-31"}),                     # 闰年
+])
+def test_month_ends_without_a_year_take_the_latest_one_not_after_today(today, expected):
+    ends = month_ends_in(today)
+
+    for month, day in expected.items():
+        assert ends[month].isoformat() == day, month
+
+
+def test_month_ends_without_a_year_hold_for_every_day_of_two_years():
+    today = date(2027, 1, 1)
+    while today.year < 2029:                                                    # 2028 是闰年
+        ends = month_ends_in(today)
+        assert sorted(ends) == list(range(1, 13)), today
+        for month, day in ends.items():
+            assert day.month == month and (day + timedelta(days=1)).day == 1, today   # 是那个月的最后一天
+            assert day <= today, today                                          # 不晚于今天
+            assert date(day.year + 1, month, monthrange(day.year + 1, month)[1]) > today, today   # 是最近的一个
+        today += timedelta(days=1)
+
+
+@pytest.mark.parametrize("today, months_from_last_year", [
+    (date(2026, 10, 20), [10, 11, 12]),
+    (date(2027, 1, 15), list(range(1, 13))),          # 1 月末还没到：全是去年的
+    (date(2027, 1, 31), list(range(2, 13))),
+    (date(2026, 12, 31), []),                         # 全是今年的，不写「取去年的」那一组
+])
+def test_month_ends_from_last_year_are_listed_as_their_own_group(today, months_from_last_year):
+    head, label, tail = month_end_line(today).partition("今年的还没到、取去年的：")
+
+    assert bool(label) == bool(months_from_last_year)
+    assert [int(month) for month in re.findall(r"(\d+) 月末", tail)] == months_from_last_year
+    assert all(day.startswith(f"{today.year}-") for day in re.findall(r"\d{4}-\d{2}-\d{2}", head))
+    assert all(day.startswith(f"{today.year - 1}-") for day in re.findall(r"\d{4}-\d{2}-\d{2}", tail))
+
+
+def test_parser_time_rules_send_month_ends_to_the_reference_line_instead_of_fixed_dates():
+    rules = PARSER_SYSTEM.split("# 时间的换算", 1)[1].split("# 追问", 1)[0]
+
+    # 按另一个今天写的「「9 月末」→ 2025-09-30」会被模型照抄：今天是 2026-10-20 时也换算成去年
+    assert re.search(r"「\d+ ?月[末底][^」]*」[^。；\n]*?→ ?\d{4}-", rules) is None
+    assert "「没写年份的月末」" in rules
 
 
 def test_parser_user_message_without_context_mentions_no_previous_round():

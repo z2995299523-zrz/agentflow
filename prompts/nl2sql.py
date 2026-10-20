@@ -7,6 +7,7 @@
 
 RETRY_PROMPT 由 nl2sql.llm.structured_call 使用：输出不合格时带着问题再试一次。
 """
+from calendar import monthrange
 from collections.abc import Sequence
 from datetime import date, timedelta
 
@@ -80,21 +81,22 @@ PARSER_SYSTEM = """你是银行数据仓库专题库的「需求解析」助手�
 
 # 时间的换算
 
-相对日期一律按用户消息里的「今天」换算成 YYYY-MM-DD，用户消息里附了一份已经算好的参考日期，直接用。下面的例子假设今天是 2026-05-20。
+相对日期一律按用户消息里的「今天」换算成 YYYY-MM-DD。用户消息里附了按今天算好的参考日期：上一自然日、上月末、上季末、去年末、本月初、本年初，还有「没写年份的月末」一行（1–12 月末各是哪一天），能对上的直接用，不要自己推算。下面的例子假设今天是 2026-05-20，只用来说明规则，不要照抄例子里的日期。
 - kind 取值：none（不限定日期）、point（时点）、range（区间）、daily_avg（日均）。dates：none 为空；point 和 daily_avg 正好 1 个；range 正好 2 个（起、止，含两端）。
-- 「4 月末」「4 月底」→ 当年 4 月的最后一天 2026-04-30。没写年份时取不晚于今天的最近一个：「9 月末」→ 2025-09-30。
-- 「上月末」→ 2026-04-30；「上季末」→ 2026-03-31；「去年末」→ 2025-12-31；「3 月 15 日」→ 2026-03-15。
+- 「N 月末」「N 月底」→ N 月的最后一天，当时点用的「N 月」（「9 月的贷款余额」）也一样。写了年份就用那一年。没写年份时取不晚于今天的最近一个：今年的 N 月末不晚于今天就取今年的，晚于今天（包括本月的月末还没到）就取去年的。这一天直接用参考日期里「没写年份的月末」的对应项。
+- 「上月末」→ 2026-04-30；「上季末」→ 2026-03-31；「去年末」→ 2025-12-31。没写年份的具体日期（「3 月 15 日」）也按上一条取年份。
+- 「N 月末」或具体日期没写年份、因为今年的还没到而取了去年的，在 assumptions 里写一句，写法是「今年的 N 月末还没到，按去年的 YYYY-MM-DD 处理」。
 - 「2026 年 3 月」当时点用 → 当月最后一天 2026-03-31；当区间用（「3 月份」「3 月内」）→ 2026-03-01 至 2026-03-31。
 - 「今年」→ 区间 2026-01-01 至 2026-12-31；「今年以来」「年初至今」→ 区间 2026-01-01 至今天 2026-05-20。
 - 「年初」「年初数」当时点用 → 上一年的 12 月 31 日 2025-12-31（余额类指标的年初数就是上年末的数）。
 - 「较年初」「比年初」是当期减上年末：compare 写 prev_year_end，compare_dates 写当期所在年份的上一年 12 月 31 日。当期是 2026-04-30 时写 ["2025-12-31"]。
 - 「较上月末」「比上月」：compare 写 prev_month_end，compare_dates 写当期日期的上一个月的最后一天。当期是 2026-03-31 时写 ["2026-02-28"]。
 - 「较去年同期」等其它对比：compare 写 other，compare_dates 写对比日期，note 里说明。没有对比时 compare 写 none，compare_dates 为空。
-- 「日均」：kind 写 daily_avg，dates 写要看的那一天（「9 月末的年日均」→ 2025-09-30）。「年日均」「月日均」是日均字段的叫法，写进指标名。
+- 「日均」：kind 写 daily_avg，dates 写要看的那一天（「9 月末的年日均」就写 9 月末那一天）。「年日均」「月日均」是日均字段的叫法，写进指标名。
 - 「现在」「目前」「当前」：kind 写 none，note 写「目前，不限定日期」。
 - 「最新」：取上一自然日（今天减一天）2026-05-19，kind 写 point，并在 assumptions 里写「「最新」按上一自然日 2026-05-19 处理」。
 - 没写任何时间：kind 写 none。
-- note 写原文说法和换算，如「4 月末 → 2026-04-30」。
+- note 写原文说法和换算，如「上月末 → 2026-04-30」。
 
 # 追问与对反问的回答
 
@@ -417,6 +419,30 @@ def _reference_dates(today: date) -> str:
     return "；".join(f"{name} {day.isoformat()}" for name, day in items)
 
 
+def _month_end(year: int, month: int) -> date:
+    """某年某月的最后一天"""
+    return date(year, month, monthrange(year, month)[1])
+
+
+def _month_end_dates(today: date) -> str:
+    """没写年份的 1–12 月末各是哪一天：取不晚于今天的最近一个，今年的还没到（包括本月的月末还没到）就取去年的
+
+    模型照着「今天」自己推算年份会出错（曾照抄提示词里按另一个今天写的例子），所以在代码里算好；
+    取去年的单独列一组，模型据此在 assumptions 里提示用户
+    """
+    this_year, last_year = [], []
+    for month in range(1, 13):
+        day = _month_end(today.year, month)
+        if day <= today:
+            this_year.append(day)
+        else:
+            last_year.append(_month_end(today.year - 1, month))
+    parts = ["；".join(f"{day.month} 月末 {day.isoformat()}" for day in this_year)] if this_year else []
+    if last_year:
+        parts.append("今年的还没到、取去年的：" + "；".join(f"{day.month} 月末 {day.isoformat()}" for day in last_year))
+    return "。".join(parts)
+
+
 def _clarify_lines(clarify: Clarify) -> list[str]:
     """上一轮的反问：问题加每个选项"""
     lines = [f"上一轮的反问：{clarify.question}"]
@@ -426,7 +452,7 @@ def _clarify_lines(clarify: Clarify) -> list[str]:
 
 
 def parser_messages(request: QueryRequest, today: date) -> list[dict[str, str]]:
-    """① 需求解析的消息：系统提示词是固定规则，用户消息带今天、上一轮需求、上一轮反问和本轮输入
+    """① 需求解析的消息：系统提示词是固定规则，用户消息带今天和按今天算好的参考日期、上一轮需求、上一轮反问和本轮输入
 
     Args:
         request: 本轮请求
@@ -435,7 +461,8 @@ def parser_messages(request: QueryRequest, today: date) -> list[dict[str, str]]:
     Returns:
         [{"role": "system", ...}, {"role": "user", ...}]
     """
-    lines = [f"今天：{today.isoformat()}", f"日期换算参考（已按今天算好，直接用）：{_reference_dates(today)}", ""]
+    lines = [f"今天：{today.isoformat()}", f"日期换算参考（已按今天算好，直接用）：{_reference_dates(today)}",
+             f"没写年份的月末（取不晚于今天的最近一个，已按今天算好，直接用）：{_month_end_dates(today)}", ""]
     previous = request.prev_requirement.strip()
     if previous:
         lines.append(f"上一轮的完整需求：{previous}")
