@@ -31,6 +31,7 @@ def test_a_query_needs_at_least_one_named_metric(metrics):
 
     assert len(problems) == 1
     assert "metrics" in problems[0] and "is_query" in problems[0]       # 告诉模型：说不出指标就不是查数需求
+    assert "哪类对象" in problems[0]                                    # 只列对象的信息时写对象的叫法，不能改成不是查数需求
 
 
 def test_problems_add_up():
