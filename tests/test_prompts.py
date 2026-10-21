@@ -622,6 +622,41 @@ def test_candidate_reasons_are_spelled_out(mock_store, reason, expected):
     assert expected in table_block(render_evidence(evidence), DIM_ORG)
 
 
+def test_tables_from_the_fifth_on_list_only_key_columns_and_their_name_columns(mock_store):
+    evidence = make_evidence(mock_store)
+    evidence.tables.append(evidence_table(mock_store, DWD_ACCT, reason="upstream"))
+    fifth = evidence.tables[0].model_copy(deep=True)
+    fifth.table_id = "ads.extra_05"
+    next(column for column in fifth.columns if column.name == "org_no").name_column = "org_nm"
+    fifth.columns.append(EvidenceColumn(name="org_nm", cn="开户机构名称", data_type="varchar(60)"))
+    evidence.tables.append(fifth)
+
+    text = render_evidence(evidence)
+
+    assert "另有 " not in table_block(text, DWD_ACCT)                       # 第 4 张照旧全列
+    kept = table_block(text, "ads.extra_05")
+    for name in ("data_dt", "org_no", "dep_bal_rmb", "dep_bal_tot_rmb", "org_nm"):    # 粒度、数据日期、主键、命中、名称
+        assert f"- {name} " in kept, name
+    assert "- margin_bal_rmb " not in kept and "- ytd_avg_bal_rmb " not in kept
+    assert "- （另有 3 个字段未列出）" in kept
+    assert prompts.COMPACT_NOTE in section(text, "## 说明")
+    assert prompts.COMPACT_NOTE not in render_evidence(make_evidence(mock_store))          # 三张表时不提
+
+
+@pytest.mark.parametrize("reason", ["upstream", "example"])
+def test_tables_brought_in_by_lifting_or_examples_are_listed_in_full_even_after_the_fourth(mock_store, reason):
+    """上溯、样例带入的表是模型要从里面找缺的字段的地方：压成只列关键字段，模型看不到就会一直要求上溯"""
+    evidence = make_evidence(mock_store)
+    evidence.tables.append(evidence_table(mock_store, CUST_BAL, reason="recall"))
+    evidence.tables[3].table_id = "ads.extra_04"
+    evidence.tables.append(evidence_table(mock_store, DWD_ACCT, reason=reason))
+
+    text = render_evidence(evidence)
+
+    assert "另有 " not in table_block(text, DWD_ACCT)                       # 第 5 张，但照旧全列
+    assert prompts.COMPACT_NOTE not in section(text, "## 说明")             # 一张也没压缩，不提
+
+
 def test_tables_keep_the_order_of_the_evidence(evidence):
     text = render_evidence(evidence)
 
@@ -663,6 +698,48 @@ def test_lineage_step_without_conditions_shows_only_what_it_has(mock_store):
     text = section(render_evidence(evidence), "## 指标字段的加工链路")
 
     assert "过滤条件" not in text and "关联条件" not in text and "加工表达式" not in text and "脚本：" not in text
+
+
+def test_a_hop_reached_from_two_fields_is_written_in_full_only_once(mock_store):
+    evidence = make_evidence(mock_store)
+    shared_hop = evidence.lineage[0].steps[1]                                   # 客户汇总表的 dep_bal_rmb 那一跳
+    evidence.lineage.append(FieldLineage(field=f"{CUST_BAL}.dep_bal_rmb", term="对公存款余额",
+                                         steps=[shared_hop.model_copy(update={"depth": 1})]))
+
+    text = section(render_evidence(evidence), "## 指标字段的加工链路")
+
+    assert text.count(f"SUM(CASE WHEN {DWD_ACCT}.is_margin = '0'") == 1
+    assert (f"第 1 跳：{CUST_BAL}.dep_bal_rmb ← {DWD_ACCT}.bal_rmb、{DWD_ACCT}.is_margin"
+            f"（加工表达式和条件同 {ORG_BAL}.dep_bal_rmb 的第 2 跳）") in text.splitlines()
+    assert "同样的一跳只在第一次写全" in text
+
+
+def test_a_condition_used_in_several_hops_is_written_once_with_a_number(mock_store):
+    evidence = make_evidence(mock_store)
+    condition = f"WHERE {DWD_ACCT}.data_dt = CAST('${{data_dt}}' AS DATE)"
+    first = evidence.lineage[0].steps[0]
+    evidence.lineage[0].steps[0] = first.model_copy(update={"filters": [condition]})
+
+    text = section(render_evidence(evidence), "## 指标字段的加工链路")
+
+    assert text.count(condition) == 1
+    assert f"〔条件1〕{condition}" in text.splitlines()
+    assert text.count("  过滤条件：〔条件1〕") == 2
+    assert text.index("几跳共用的条件") < text.index(f"### {ORG_BAL}.dep_bal_rmb")       # 先列共用的，再列各字段
+
+
+def test_conditions_used_once_or_too_short_stay_in_their_hop(mock_store):
+    text = section(render_evidence(make_evidence(mock_store)), "## 指标字段的加工链路")
+    assert "几跳共用的条件" not in text and "〔条件" not in text                       # 两跳的条件不一样
+
+    evidence = make_evidence(mock_store)
+    evidence.lineage[0].steps = [step.model_copy(update={"filters": ["WHERE a = 1"]}) for step in evidence.lineage[0].steps]
+    text = section(render_evidence(evidence), "## 指标字段的加工链路")
+    assert "〔条件" not in text and text.count("  过滤条件：WHERE a = 1") == 2         # 太短，编号不省字
+
+
+def test_the_planner_is_told_how_to_read_the_shortened_lineage():
+    assert "同某字段的第 N 跳" in PLANNER_SYSTEM and "几跳共用的条件" in PLANNER_SYSTEM
 
 
 def test_comparison_section_names_the_three_relations(mock_store):
@@ -738,11 +815,17 @@ def test_an_empty_evidence_still_renders(mock_store):
 # ── render_evidence：超过上限时按四级收缩 ──────
 
 def heavy_evidence(mock_store) -> Evidence:
-    """十三张表、长的码值和条件、长的样例 SQL，每一级收缩都能省下字数"""
+    """十三张表、长的码值和条件、长的样例 SQL，每一级收缩都能省下字数
+
+    后十张是机构汇总表的副本，多一个和 org_no 配对的名称字段 org_nm：第 5 张以后的表不收缩时也只列关键字段
+    和它们的名称字段，收缩第 2 级再去掉名称字段，这一级才省得下字数。
+    """
     evidence = make_evidence(mock_store)
     for number in range(10):
         table = evidence.tables[0].model_copy(deep=True)
         table.table_id = f"ads.extra_{number:02d}"
+        next(column for column in table.columns if column.name == "org_no").name_column = "org_nm"
+        table.columns.append(EvidenceColumn(name="org_nm", cn="开户机构名称", data_type="varchar(60)"))
         evidence.tables.append(table)
     for table in evidence.tables:
         for column in table.columns:
@@ -808,12 +891,12 @@ def test_level_two_lists_only_hit_and_grain_columns_from_the_ninth_table_on(mock
     texts = shrunk_texts(evidence, monkeypatch)
     eighth, ninth = evidence.tables[7].table_id, evidence.tables[8].table_id
 
-    assert "- margin_bal_rmb " in table_block(texts[2], eighth)               # 第 8 张照旧
+    assert "- org_nm " in table_block(texts[2], eighth)                      # 第 8 张照旧：关键字段加名称字段
     kept = table_block(texts[2], ninth)
-    assert "- margin_bal_rmb " not in kept and "- ytd_avg_bal_rmb " not in kept
+    assert "- org_nm " not in kept and "- margin_bal_rmb " not in kept
     assert "- dep_bal_rmb " in kept and "- org_no " in kept and "- data_dt " in kept     # 命中、粒度（含数据日期）
     assert "另有 " in kept and " 个字段未列出" in kept
-    assert "- margin_bal_rmb " in table_block(texts[1], ninth)               # 上一级还是全列的
+    assert "- org_nm " in table_block(texts[1], ninth)                       # 上一级还列着名称字段
 
 
 def test_level_three_clips_the_conditions_of_each_hop_to_120_characters(mock_store, monkeypatch):

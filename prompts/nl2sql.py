@@ -8,6 +8,7 @@
 RETRY_PROMPT 由 nl2sql.llm.structured_call 使用：输出不合格时带着问题再试一次。
 """
 from calendar import monthrange
+from collections import Counter
 from collections.abc import Sequence
 from datetime import date, timedelta
 
@@ -37,6 +38,12 @@ SHRINK_EXPRESSION_CHARS = 200                 # 收缩第 6 级：加工表达�
 SHRINK_CONDITION_CHARS_MIN = 60               # 收缩第 6 级：每跳的每条条件再截短到多少字
 KEY_TABLES = 3                                # 收缩第 7 级：第几张表以后只列关键字段
 LINEAGE_FIELD_CHARS = 1500                    # 收缩第 8 级：每个字段的加工链路最多写多少字（至少写第一跳）
+# 不收缩时也做的两件事：前几张候选表以后只列关键字段；加工链路里重复的跳和条件只写一次
+FULL_FIELD_TABLES = 4                         # 前几张候选表列全部字段，后面召回的表和关联中间表只列关键字段和名称字段
+COMPACT_REASONS = ("recall", "join")          # 上溯、样例带入的表照旧全列：模型正要从这些表里找缺的字段
+SHARED_CONDITION_MIN_CHARS = 20               # 加工链路里出现两次以上、至少这么长的条件，提到本节开头编号共用
+COMPACT_NOTE = (f"第 {FULL_FIELD_TABLES + 1} 张以后召回的表和关联路径经过的中间表只列命中、粒度、数据日期、主键字段，"
+                "以及这些字段的名称字段；上溯、样例带入的表照旧全列")
 SHRINK_ACTIONS = (                            # 收缩的顺序，先轻后重，每级在「说明」里记一句
     "去掉非命中字段的码值",
     f"第 {FULL_TABLES + 1} 张以后的表只列命中字段和粒度字段",
@@ -375,7 +382,7 @@ PLANNER_SYSTEM = """你是银行数据仓库专题库的「选表定口径」助
    - 日均用现成的日均字段，只取截止日那一天的值，不要对多天的行再求平均。需求说了统计区间（年日均、月日均）就用对应的字段；只说「日均」而候选里有不同统计区间的日均字段时，按规则 3 反问。
    - 较年初是当期减上年末，较上月末是当期减上月末：两个日期的数都要取，filters 里把两个日期都列出来。
 7. 计数：按被计数的实体的粒度来。用粒度正好是这个实体的表，COUNT(DISTINCT 粒度键)；汇总表里现成的「客户数」「笔数」字段不能跨行相加（同一个客户可能在多个机构里重复出现），除非汇总的粒度正好就是要的粒度。
-8. 缺东西：先在全部候选表里找。候选里已经有的整合层、贴源层的表（入选原因是召回、上溯带入、样例带入、关联路径经过的中间表都一样）可以直接用：专题层的表不够用、而候选里某张下层的表有需求要的维度和字段时，就选它出方案（decision 写 ok），不要再要求上溯。只有全部候选表都没有需求要的维度或字段，或者粒度都不够时，才用 need_upstream，missing 写成字段的叫法。上溯最多 2 层，到了第 2 层仍缺，照样写 need_upstream 和 missing，由程序如实告诉用户找不到什么。用下层的表查数时（不论它是本来就在候选里，还是上溯带进来的），要把下游表加工这个字段时用过的过滤条件和关联条件还原出来：证据里血缘的每一跳都带着，写进 filters 和 joins，查出来的数才能和专题层的数对得上。
+8. 缺东西：先在全部候选表里找。候选里已经有的整合层、贴源层的表（入选原因是召回、上溯带入、样例带入、关联路径经过的中间表都一样）可以直接用：专题层的表不够用、而候选里某张下层的表有需求要的维度和字段时，就选它出方案（decision 写 ok），不要再要求上溯。只有全部候选表都没有需求要的维度或字段，或者粒度都不够时，才用 need_upstream，missing 写成字段的叫法。上溯最多 2 层，到了第 2 层仍缺，照样写 need_upstream 和 missing，由程序如实告诉用户找不到什么。用下层的表查数时（不论它是本来就在候选里，还是上溯带进来的），要把下游表加工这个字段时用过的过滤条件和关联条件还原出来：证据里血缘的每一跳都带着，写进 filters 和 joins，查出来的数才能和专题层的数对得上。加工链路里只写一行、注明「同某字段的第 N 跳」的跳，表达式和条件与那一跳相同；条件写成〔条件N〕的，原文是这一节开头「几跳共用的条件」里同编号的那一条。
 9. 加工条件里的 CAST('${data_dt}' AS DATE) 这类写法是跑批日期参数，查数时换成需求里的日期。只在加工中间层（CTE）之间的关联不用照搬。
 10. 元数据范围内做不到时用 cannot_answer，在 reason 里写明原因；不要编造不存在的字段。
 11. 一句多问（需求有子问题）时，方案要覆盖每个子问题：fields 列齐，filters 和 caliber 里写清各自的条件。
@@ -732,16 +739,24 @@ def _column_line(column: EvidenceColumn, table: EvidenceTable, *, drop_enum: boo
     return " ".join(parts)
 
 
+def _compact_columns(table: EvidenceTable) -> set[str]:
+    """排在后面的候选表要列的字段：关键字段（命中、粒度、数据日期、主键），加上它们在同表的名称字段"""
+    key = {column.name for column in table.columns if _is_key_column(column, table)}
+    return key | {column.name_column for column in table.columns if column.name in key and column.name_column}
+
+
 def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bool = False,
-                 bare: bool = False) -> str:
+                 bare: bool = False, compact: bool = False) -> str:
     """一张表一段：标题、层级类型粒度、说明、字段清单
 
     Args:
         table: 证据里的表
         drop_enums: 去掉非命中字段的码值（收缩第 1 级）
-        key_only: 只列命中字段、粒度字段和数据日期字段（收缩第 2、7 级）
+        key_only: 只列命中字段、粒度字段和数据日期字段（收缩第 2、7 级），比 compact 列得还少
         bare: 关键字段以外的字段不写口径说明（收缩第 5 级）
+        compact: 只列关键字段和它们的名称字段（不收缩时第 FULL_FIELD_TABLES 张以后召回的表、关联中间表）
     """
+    listed = _compact_columns(table) if compact else None
     grain = ", ".join(table.grain_columns) or "无"
     lines = [
         f"### {table.table_id} {table.table_cn}",
@@ -755,6 +770,8 @@ def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bo
     for column in table.columns:
         if key_only and not (column.hit_terms or column.name in table.grain_columns or column.name == table.date_column):
             continue
+        if listed is not None and column.name not in listed:
+            continue
         shown += 1
         lines.append(_column_line(column, table, drop_enum=drop_enums and not column.hit_terms,
                                   drop_description=bare and not _is_key_column(column, table)))
@@ -763,9 +780,18 @@ def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bo
     return "\n".join(lines)
 
 
+def _step_key(step: LineageStep) -> tuple:
+    """一跳的内容，不含跳数：几个字段往上追到同一个上游字段时，这一跳的内容完全一样"""
+    return (step.target, tuple(step.sources), step.expression, tuple(step.filters), tuple(step.joins),
+            tuple(step.unknown_sources), step.script_name)
+
+
 def _render_lineage(items: list[FieldLineage], condition_chars: int | None, *, expression_chars: int | None = None,
                     field_chars: int | None = None) -> list[str]:
     """指标字段的加工链路：每个字段一段，每跳写来源、表达式、过滤条件、关联条件、脚本
+
+    重复的只写一次：同样的一跳第二次出现时只写「目标 ← 来源」一行，注明同哪个字段的第几跳；
+    在几跳里都出现、又不太短的条件提到本节开头编号列一次，各跳里只写编号（见 _share_conditions）。
 
     Args:
         items: 证据里的加工链路
@@ -773,7 +799,10 @@ def _render_lineage(items: list[FieldLineage], condition_chars: int | None, *, e
         expression_chars: 加工表达式最多留多少字，None 不截
         field_chars: 每个字段的链路最多写多少字，写满就停，但至少写第一跳；None 不限
     """
-    lines: list[str] = ["（每跳写成「目标字段 ← 来源字段」：目标字段由来源字段加工而来；跳数越大越靠近源头）"] if items else []
+    if not items:
+        return []
+    lines: list[str] = []
+    written: dict[tuple, tuple[str, int]] = {}            # 一跳的内容 → 第一次写全时在哪个字段的第几跳
     for item in items:
         lines.append(f"### {item.field}（指标「{item.term}」）")
         if not item.steps:
@@ -781,16 +810,50 @@ def _render_lineage(items: list[FieldLineage], condition_chars: int | None, *, e
         cut, used = item.truncated, 0
         for step in item.steps:
             step_lines = _lineage_step(step, condition_chars, expression_chars)
+            first = written.get(_step_key(step))
+            if first is not None and len(step_lines) > 1:
+                step_lines = [f"{step_lines[0]}（加工表达式和条件同 {first[0]} 的第 {first[1]} 跳）"]
             size = sum(len(line) + 1 for line in step_lines)
             if field_chars is not None and used and used + size > field_chars:
                 cut = True
                 break
             lines += step_lines
             used += size
+            written.setdefault(_step_key(step), (item.field, step.depth))
         if cut:
             lines.append("（链路较长，后面的几跳没有列出）")
         lines.append("")
-    return lines[:-1] if lines else lines
+    shared, body = _share_conditions(lines[:-1])
+    head = ["（每跳写成「目标字段 ← 来源字段」：目标字段由来源字段加工而来；跳数越大越靠近源头。"
+            "同样的一跳只在第一次写全，后面只写一行并注明同哪一跳）"]
+    if shared:
+        head.append("几跳共用的条件（各跳里写的〔条件N〕就是这里同编号的那一条）：")
+        head += [f"〔条件{number}〕{text}" for number, text in enumerate(shared, 1)]
+        head.append("")
+    return head + body
+
+
+_CONDITION_PREFIXES = ("  过滤条件：", "  关联条件：")
+
+
+def _share_conditions(lines: list[str]) -> tuple[list[str], list[str]]:
+    """出现两次以上、不短于 SHARED_CONDITION_MIN_CHARS 的过滤条件和关联条件按出现顺序编号
+
+    Returns:
+        (编号顺序的条件原文, 改写后的各行：这些条件换成〔条件N〕)
+    """
+    texts = [line.split("：", 1)[1] for line in lines if line.startswith(_CONDITION_PREFIXES)]
+    counts = Counter(texts)
+    shared = [text for text in dict.fromkeys(texts) if counts[text] >= 2 and len(text) >= SHARED_CONDITION_MIN_CHARS]
+    numbers = {text: number for number, text in enumerate(shared, 1)}
+    rewritten = []
+    for line in lines:
+        if line.startswith(_CONDITION_PREFIXES):
+            label, text = line.split("：", 1)
+            if text in numbers:
+                line = f"{label}：〔条件{numbers[text]}〕"
+        rewritten.append(line)
+    return shared, rewritten
 
 
 def _lineage_step(step: LineageStep, condition_chars: int | None, expression_chars: int | None = None) -> list[str]:
@@ -876,9 +939,11 @@ def _render(evidence: Evidence, level: int) -> str:
     """证据文本，收缩到第 level 级（0 是不收缩），收缩了什么写在「说明」里"""
     tables = []
     full_tables = KEY_TABLES if level >= 7 else FULL_TABLES
+    compacted = [index >= FULL_FIELD_TABLES and table.reason in COMPACT_REASONS
+                 for index, table in enumerate(evidence.tables)]
     for index, table in enumerate(evidence.tables):
         tables.append(_table_block(table, drop_enums=level >= 1, key_only=level >= 2 and index >= full_tables,
-                                   bare=level >= 5))
+                                   bare=level >= 5, compact=compacted[index]))
     condition_chars = (SHRINK_CONDITION_CHARS_MIN if level >= 6 else SHRINK_CONDITION_CHARS if level >= 3 else None)
     sections = [_section("## 候选表", ["\n\n".join(tables)] if tables else [])]
     if evidence.use_lineage:
@@ -896,8 +961,9 @@ def _render(evidence: Evidence, level: int) -> str:
     if evidence.use_examples:
         examples = _render_examples(evidence.examples, sql_chars=SHRINK_EXAMPLE_SQL_CHARS if level >= 4 else None)
         sections.append(_section("## 相似样例", [examples] if examples else []))
+    compact_note = [f"- {COMPACT_NOTE}"] if any(compacted) else []
     limit_note = [f"- 证据文本超过 {EVIDENCE_CHAR_LIMIT} 字，已{action}" for action in SHRINK_ACTIONS[:level]]
-    sections.append(_section("## 说明", [f"- {note}" for note in evidence.notes] + limit_note))
+    sections.append(_section("## 说明", [f"- {note}" for note in evidence.notes] + compact_note + limit_note))
     return "\n\n".join(sections)
 
 
@@ -905,7 +971,8 @@ def render_evidence(evidence: Evidence) -> str:
     """把证据写成给模型看的文本
 
     分节：候选表；B、C 组的指标字段加工链路、同源字段对比、表之间的上下游、还可以上溯到的表；
-    关联路径；C 组的相似样例；最后是「说明」。超过 EVIDENCE_CHAR_LIMIT 时按 SHRINK_ACTIONS 的顺序逐级收缩，
+    关联路径；C 组的相似样例；最后是「说明」。不收缩时也做两件事：第 FULL_FIELD_TABLES 张以后召回的表和关联中间表
+    只列关键字段和它们的名称字段（上溯、样例带入的表照旧全列）；加工链路里重复的跳和条件只写一次。超过 EVIDENCE_CHAR_LIMIT 时按 SHRINK_ACTIONS 的顺序逐级收缩，
     装下就停，每收缩一级在「说明」里记一句；九级都收完仍超过上限时就用第九级的文本。
     同样的证据必然得到同样的文本。
 
