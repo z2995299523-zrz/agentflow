@@ -16,7 +16,7 @@ SQL_LABELS = frozenset({"sql", "postgresql", "postgres", "pgsql", "psql"})
 
 
 def generate_sql(llm: LLMClient, parsed: ParsedRequest, plan: QueryPlan, evidence: Evidence, *,
-                 previous_sql: str = "", errors: Sequence[str] = ()) -> tuple[str, CallRecord]:
+                 previous_sql: str = "", errors: Sequence[str] = (), base_sql: str = "") -> tuple[str, CallRecord]:
     """调模型生成一条 SQL
 
     回复里取不出 SQL 不算调用失败：返回空串，交给静态校验报错、进入修正回路。
@@ -28,6 +28,7 @@ def generate_sql(llm: LLMClient, parsed: ParsedRequest, plan: QueryPlan, evidenc
         evidence: ③ 的结果
         previous_sql: 修正时上一次生成的 SQL
         errors: 修正时上一次的校验错误（「R4：…」）
+        base_sql: 追问时上一轮的 SQL，本轮在它的基础上改；不是追问时为空
 
     Returns:
         (SQL，已用 extract_sql 取出, 调用记录)
@@ -35,7 +36,7 @@ def generate_sql(llm: LLMClient, parsed: ParsedRequest, plan: QueryPlan, evidenc
     Raises:
         StepError: 模型调用失败
     """
-    messages = generator_messages(parsed, plan, evidence, previous_sql=previous_sql, errors=errors)
+    messages = generator_messages(parsed, plan, evidence, previous_sql=previous_sql, errors=errors, base_sql=base_sql)
     text, record = text_call(llm, "generate", messages)
     return extract_sql(text), record
 

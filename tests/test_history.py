@@ -6,7 +6,7 @@ import pytest
 
 from nl2sql import history as history_module
 from nl2sql.history import TITLE_CHARS, ConversationContext, ConversationStore
-from nl2sql.schemas import CallRecord, Clarify, ClarifyOption, ParsedRequest, QueryResult
+from nl2sql.schemas import CallRecord, Clarify, ClarifyOption, ParsedRequest, QueryResult, ValidationSummary
 
 CLARIFY = Clarify(question="对公存款余额按哪个口径？", options=[ClarifyOption(label="含保证金"), ClarifyOption(label="不含保证金")])
 REQUIREMENT = "查询 2026-09-30 全行对公存款余额"
@@ -86,8 +86,31 @@ def test_context_follows_the_latest_turn_that_has_a_requirement(store):
     store.add_turn(conversation.id, "你好", not_a_query())                    # 没有完整需求：上下文不动，反问还能回答
     assert store.context(conversation.id) == waiting and store.get(conversation.id).context == waiting
 
-    store.add_turn(conversation.id, "不含保证金", ok_result("查询 2026-09-30 全行不含保证金的对公存款余额"))
-    answered = ConversationContext(prev_requirement="查询 2026-09-30 全行不含保证金的对公存款余额")
+    answered_result = ok_result("查询 2026-09-30 全行不含保证金的对公存款余额")
+    answered_result.validation = ValidationSummary(ok=True, tables=["ads.org_corp_dep_bal_d"])
+    store.add_turn(conversation.id, "不含保证金", answered_result)
+    answered = ConversationContext(prev_requirement="查询 2026-09-30 全行不含保证金的对公存款余额", prev_sql="SELECT 1",
+                                   prev_tables=["ads.org_corp_dep_bal_d"])           # 校验通过：带上 SQL 和用到的表
     assert store.context(conversation.id) == answered and store.get(conversation.id).context == answered
     with pytest.raises(LookupError, match="会话不存在"):
         store.context("nope")
+
+
+def test_next_context_carries_the_sql_and_tables_only_after_a_validated_turn():
+    validated = ok_result()
+    validated.validation = ValidationSummary(ok=True, tables=["ads.org_corp_dep_bal_d", "dim.org"])
+
+    assert validated.next_context() == {"prev_requirement": REQUIREMENT, "prev_sql": "SELECT 1",
+                                        "prev_tables": ["ads.org_corp_dep_bal_d", "dim.org"]}
+    assert clarify_result().next_context() == {"prev_requirement": REQUIREMENT, "prev_clarify": CLARIFY}
+    assert ok_result().model_copy(update={"status": "unvalidated"}).next_context() == {"prev_requirement": REQUIREMENT}
+
+
+def test_context_carries_no_sql_from_a_turn_that_did_not_pass_validation(store):
+    conversation = store.create()
+    unvalidated = ok_result().model_copy(update={"status": "unvalidated"})
+
+    store.add_turn(conversation.id, "查存款", unvalidated)
+
+    context = store.context(conversation.id)
+    assert context.prev_requirement == REQUIREMENT and context.prev_sql == "" and context.prev_tables == []

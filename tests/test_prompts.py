@@ -468,6 +468,39 @@ def test_generator_repair_round_shares_its_prefix_with_the_first_round(evidence)
     assert common >= len(first.split("## 要求")[0])             # 表结构、样例都在共同的前缀里，前缀缓存才能命中
 
 
+BASE_SQL = "SELECT SUM(b.dep_bal_rmb) AS dep_bal FROM ads.org_corp_dep_bal_d AS b WHERE b.data_dt = DATE '2026-08-31'"
+
+
+def test_a_follow_up_hands_the_previous_sql_to_the_planner_and_the_generator(evidence):
+    planner = planner_messages(make_parsed(), evidence, allow_clarify=True, allow_upstream=True,
+                               base_sql=BASE_SQL)[1]["content"]
+    generator = generator_messages(make_parsed(), make_plan(), evidence, base_sql=BASE_SQL)[1]["content"]
+
+    assert BASE_SQL in planner and planner.index("# 上一轮的 SQL") < planner.index("# 证据")
+    assert BASE_SQL in generator and generator.index("## 上一轮的 SQL") < generator.index("## 要求")
+    plain = planner_messages(make_parsed(), evidence, allow_clarify=True, allow_upstream=True)[1]["content"]
+    assert "上一轮的 SQL" not in plain and "上一轮的 SQL" not in generator_messages(make_parsed(), make_plan(), evidence)[1]["content"]
+
+
+def test_a_follow_up_repair_round_still_shares_its_prefix_with_the_first_round(evidence):
+    first = generator_messages(make_parsed(), make_plan(), evidence, base_sql=BASE_SQL)[1]["content"]
+    repair = generator_messages(make_parsed(), make_plan(), evidence, base_sql=BASE_SQL, previous_sql="SELECT 1",
+                                errors=["R1：错"])[1]["content"]
+
+    assert repair.startswith(first.split("## 要求")[0])                 # 上一轮的 SQL 也在共同的前缀里
+
+
+def test_the_two_model_steps_are_told_how_to_build_on_the_previous_round():
+    assert "14. 追问" in PLANNER_SYSTEM and "上一轮限定的范围" in PLANNER_SYSTEM and "缺的东西单独召回" in PLANNER_SYSTEM
+    assert "追问时，用户消息里会给出上一轮的 SQL" in GENERATOR_SYSTEM
+
+
+def test_the_parser_examples_show_both_a_follow_up_and_a_new_question_after_a_previous_round():
+    parsed = [ParsedRequest.model_validate(json.loads(block)) for block in json_blocks(PARSER_SYSTEM)]
+
+    assert {item.follows_up for item in parsed if "follows_up" in item.model_fields_set} == {True, False}
+
+
 # ── render_evidence：分节 ─────────────────────
 
 @pytest.mark.parametrize("use_lineage, use_examples, all_layers", [
@@ -614,6 +647,7 @@ def test_script_kinds_mark_empty_etl_time_and_constant_columns(mock_store):
 @pytest.mark.parametrize("reason, expected", [
     ("recall", "入选原因：召回"), ("upstream", "入选原因：上溯带入"),
     ("example", "入选原因：样例带入"), ("join", "入选原因：关联路径经过的中间表"),
+    ("previous", "入选原因：上一轮用过"), ("missing", "入选原因：缺的东西单独召回"),
 ])
 def test_candidate_reasons_are_spelled_out(mock_store, reason, expected):
     evidence = make_evidence(mock_store)
@@ -643,7 +677,7 @@ def test_tables_from_the_fifth_on_list_only_key_columns_and_their_name_columns(m
     assert prompts.COMPACT_NOTE not in render_evidence(make_evidence(mock_store))          # 三张表时不提
 
 
-@pytest.mark.parametrize("reason", ["upstream", "example"])
+@pytest.mark.parametrize("reason", ["upstream", "example", "previous", "missing"])
 def test_tables_brought_in_by_lifting_or_examples_are_listed_in_full_even_after_the_fourth(mock_store, reason):
     """上溯、样例带入的表是模型要从里面找缺的字段的地方：压成只列关键字段，模型看不到就会一直要求上溯"""
     evidence = make_evidence(mock_store)

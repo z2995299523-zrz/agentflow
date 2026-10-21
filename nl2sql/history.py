@@ -1,6 +1,7 @@
 """
 会话历史：每个会话的每一轮（提问和流水线结果）存进 SQLite，界面左侧的会话列表、刷新后恢复对话都靠它
-- 流水线本身无状态；追问、反问要的上下文（上一轮的完整需求、还没回答的反问）由 context 从存下的轮次里算出来
+- 流水线本身无状态；追问、反问要的上下文（上一轮的完整需求、还没回答的反问，上一轮校验通过时它的 SQL 和用到的表）
+  由 context 从存下的轮次里算出来
 - 每套资料一个库文件：资料目录/build/history.db，和元数据库放在一起，不入库
 - 每个操作单独开一个连接，多线程同时用没有问题；只用标准 SQL，以后换别的数据库只换这个类
 """
@@ -72,6 +73,8 @@ class ConversationContext(BaseModel):
     prev_requirement: str = ""
     prev_clarify: Clarify | None = None
     clarify_turn_id: int | None = None        # 还没回答的反问出自哪一轮；界面上只有这一轮的选项能点
+    prev_sql: str = ""                        # 那一轮校验通过的 SQL；下一轮是追问时以它为底
+    prev_tables: list[str] = Field(default_factory=list)      # 那条 SQL 用到的表
 
 
 class ConversationDetail(ConversationSummary):
@@ -96,7 +99,8 @@ def _context_from(row: sqlite3.Row | None) -> ConversationContext:
 
     和原来界面的规则一样：解析成功（结果里有完整需求）的轮次才算数，解析失败、不是查数需求的轮次不动上下文，
     用户可以接着上一个话题问，也可以重新点上一次反问的选项；这一轮是反问时带上它的反问，
-    下一轮是在回答它还是问了新问题，由流水线的 ① 判断。
+    下一轮是在回答它还是问了新问题，由流水线的 ① 判断。这一轮校验通过时带上它的 SQL 和用到的表
+    （规则同 QueryResult.next_context），下一轮是不是在它上面追问，也由 ① 判断。
     """
     if row is None:
         return ConversationContext()
@@ -104,7 +108,9 @@ def _context_from(row: sqlite3.Row | None) -> ConversationContext:
         return ConversationContext(prev_requirement=row["requirement"],
                                    prev_clarify=Clarify.model_validate_json(row["clarify"]),
                                    clarify_turn_id=row["id"])
-    return ConversationContext(prev_requirement=row["requirement"])
+    carried = QueryResult.model_validate_json(row["result"]).next_context()
+    return ConversationContext(prev_requirement=row["requirement"], prev_sql=carried.get("prev_sql", ""),
+                               prev_tables=carried.get("prev_tables", []))
 
 
 class ConversationStore:
@@ -204,7 +210,8 @@ class ConversationStore:
         return Turn(id=cursor.lastrowid, question=question, created_at=now, result=public)
 
     def context(self, conversation_id: str) -> ConversationContext:
-        """下一轮要带给流水线的上下文：最近一个有完整需求的轮次的需求，以及它还没被回答的反问
+        """下一轮要带给流水线的上下文：最近一个有完整需求的轮次的需求，以及它还没被回答的反问；
+        那一轮校验通过时，还有它的 SQL 和用到的表
 
         Raises:
             LookupError: 会话不存在
@@ -212,7 +219,7 @@ class ConversationStore:
         with self._connect() as conn:
             if conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone() is None:
                 raise LookupError(f"会话不存在：{conversation_id}")
-            row = conn.execute("SELECT id, status, requirement, clarify FROM turns"
+            row = conn.execute("SELECT id, status, requirement, clarify, result FROM turns"
                                " WHERE conversation_id = ? AND requirement <> '' ORDER BY id DESC LIMIT 1",
                                (conversation_id,)).fetchone()
         return _context_from(row)

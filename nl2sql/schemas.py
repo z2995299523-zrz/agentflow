@@ -4,7 +4,8 @@
 这里的结构是各模块之间的契约，写定后冻结：要改先改契约，再改实现。
 
 流水线本身无状态：追问、反问的上下文由调用方放进 QueryRequest 传进来，
-上一轮结果里的 requirement、clarify 就是下一轮的 prev_requirement、prev_clarify。
+上一轮结果里的 requirement、clarify 就是下一轮的 prev_requirement、prev_clarify；
+上一轮校验通过时，它的 sql 和 validation.tables 就是下一轮的 prev_sql、prev_tables（见 QueryResult.next_context）。
 """
 from datetime import date
 from typing import Any, Literal
@@ -43,6 +44,8 @@ class QueryRequest(BaseModel):
     question: str                             # 本轮输入
     prev_requirement: str = ""                # 上一轮的完整需求
     prev_clarify: Clarify | None = None       # 上一轮提出、还没回答的反问；本轮是在回答它还是问了新问题，由 ① 判断
+    prev_sql: str = ""                        # 上一轮校验通过的 SQL；① 判断本轮是在上一轮上追问时，④ ⑤ 以它为底增量修改
+    prev_tables: list[str] = Field(default_factory=list)      # 上一轮 SQL 用到的表；追问时直接放进候选
     today: date | None = None                 # None 时用系统日期
     use_lineage: bool = True                  # 对照开关：A 组 False/False，B 组 True/False，C 组 True/True
     use_examples: bool = True
@@ -81,6 +84,8 @@ class ParsedRequest(BaseModel):
     reply: str = ""                           # 不是查数需求时给用户的回复，说明工具能做什么
     answers_clarify: bool = False             # 本轮输入是不是在回答上一轮的反问；是回答时 ① ④ 都不能再反问，
                                               # 没理会反问、问了新问题时照常能反问。没有上一轮的反问时一律为 False
+    follows_up: bool = False                  # 本轮是不是在上一轮的完整需求上追问（增加、修改）；是的话 ② ④ ⑤
+                                              # 带上上一轮的 SQL 和表增量修改。没有上一轮的需求时一律为 False
     requirement: str = ""                     # 完整需求复述，一句自包含的话
     metrics: list[Metric] = Field(default_factory=list)
     dimensions: list[str] = Field(default_factory=list)
@@ -121,7 +126,9 @@ class EvidenceTable(BaseModel):
     grain_columns: list[str] = Field(default_factory=list)
     date_column: str | None = None
     description: str = ""
-    reason: Literal["recall", "upstream", "example", "join"]   # join：关联路径经过、证据组装时补进来的中间表
+    # join：关联路径经过、证据组装时补进来的中间表；previous：追问时上一轮 SQL 用到的表；
+    # missing：④ 说缺东西时，拿缺的每一样单独在第 0 层召回到的表
+    reason: Literal["recall", "upstream", "example", "join", "previous", "missing"]
     score: float = 0.0
     columns: list[EvidenceColumn] = Field(default_factory=list)
 
@@ -376,3 +383,16 @@ class QueryResult(BaseModel):
             call.pop("messages", None)
             call.pop("reply", None)
         return data
+
+    def next_context(self) -> dict[str, Any]:
+        """下一轮要带给 QueryRequest 的上下文：完整需求；停在反问上时带反问；校验通过时带 SQL 和它用到的表
+
+        只有 status 是 ok 的 SQL 才带：校验没过的 SQL 不能当下一轮的底稿。
+        """
+        context: dict[str, Any] = {"prev_requirement": self.requirement}
+        if self.status == "need_clarify" and self.clarify is not None:
+            context["prev_clarify"] = self.clarify
+        if self.status == "ok" and self.sql:
+            context["prev_sql"] = self.sql
+            context["prev_tables"] = list(self.validation.tables) if self.validation else []
+        return context

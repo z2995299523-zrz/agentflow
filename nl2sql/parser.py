@@ -5,6 +5,7 @@
 是查数需求、但缺了没法默认的要素（要看的单个对象没说是哪个、没说看哪些指标）时，① 自己反问一次。
 上一轮停在反问上时，模型还要判断本轮输入是不是在回答它（answers_clarify）：是回答就不能再问；
 没理会反问、问了新问题时照常能问，④ 也一样（见 workflow）。
+有上一轮的完整需求时，模型还要判断本轮是不是在它的基础上追问（follows_up）：是追问时，后面几步以上一轮的 SQL 为底增量修改。
 """
 import re
 from collections.abc import Iterable, Sequence
@@ -34,7 +35,7 @@ def parse_request(llm: LLMClient, request: QueryRequest, today: date) -> tuple[P
     """调模型解析需求，输出经 check_parsed 核对，不合格带着问题重试一次
 
     上一轮停在反问上（请求里有 prev_clarify）时，本轮是不是在回答它由模型判断（answers_clarify）；
-    没有上一轮的反问时谈不上回答，answers_clarify 一律改成 False。
+    没有上一轮的反问时谈不上回答，answers_clarify 一律改成 False。follows_up 同理：没有上一轮的完整需求时一律改成 False。
 
     Args:
         llm: 模型
@@ -48,10 +49,13 @@ def parse_request(llm: LLMClient, request: QueryRequest, today: date) -> tuple[P
         StepError: 模型调用失败，或者两次输出都不合格
     """
     pending = request.prev_clarify is not None
+    previous = bool(request.prev_requirement.strip())
     parsed, calls = structured_call(llm, "parse", parser_messages(request, today), ParsedRequest,
-                                    lambda parsed: check_parsed(parsed, pending_clarify=pending))
+                                    lambda parsed: check_parsed(parsed, pending_clarify=pending, has_previous=previous))
     if parsed.answers_clarify and not pending:
         parsed = parsed.model_copy(update={"answers_clarify": False})
+    if parsed.follows_up and not previous:
+        parsed = parsed.model_copy(update={"follows_up": False})
     return parsed, calls
 
 
@@ -106,17 +110,18 @@ def _check_clarify(parsed: ParsedRequest, allow_clarify: bool) -> list[str]:
     return problems
 
 
-def check_parsed(parsed: ParsedRequest, *, pending_clarify: bool = False) -> list[str]:
+def check_parsed(parsed: ParsedRequest, *, pending_clarify: bool = False, has_previous: bool = False) -> list[str]:
     """核对解析结果，返回能直接告诉模型怎么改的问题；合格时返回空列表
 
     是查数需求时：完整需求非空，日期合法、个数与时间类型相符，有对比时对比日期非空；上一轮停在反问上时
-    answers_clarify 要写明；没有反问时至少一个指标，有反问时要能反问（不是在回答上一轮的反问）、
-    有问题、至少两个带 label 的选项（指标可以还没说清）。
+    answers_clarify 要写明，有上一轮的完整需求、又没有反问在等回答时 follows_up 要写明；没有反问时至少一个指标，
+    有反问时要能反问（不是在回答上一轮的反问）、有问题、至少两个带 label 的选项（指标可以还没说清）。
     不是查数需求时：回复非空。
 
     Args:
         parsed: ① 的结果
         pending_clarify: 上一轮是不是停在反问上（请求里有 prev_clarify）；是的话本轮在回答它时不能再反问
+        has_previous: 请求里有没有上一轮的完整需求（prev_requirement）
     """
     if not parsed.is_query:
         if parsed.reply.strip():
@@ -129,6 +134,9 @@ def check_parsed(parsed: ParsedRequest, *, pending_clarify: bool = False) -> lis
     if pending_clarify and "answers_clarify" not in parsed.model_fields_set:
         problems.append("用户消息里有「上一轮的反问」，请在 answers_clarify 里写明本轮输入是不是在回答这个反问："
                         "是回答写 true，没理会反问、问了一个新问题写 false")
+    if has_previous and not pending_clarify and "follows_up" not in parsed.model_fields_set:
+        problems.append("用户消息里有「上一轮的完整需求」，请在 follows_up 里写明本轮是不是在它的基础上追问："
+                        "在上一轮需求上增加或修改写 true，按新需求解析、忽略上一轮写 false")
     if parsed.clarify is not None:
         allow_clarify = not (pending_clarify and parsed.answers_clarify)
         return problems + _check_clarify(parsed, allow_clarify) + _check_time(parsed.time)

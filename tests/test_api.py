@@ -106,12 +106,14 @@ def test_query_hands_the_previous_turn_to_the_pipeline(api):
 
     response = client.post("/nl2sql/query", json={
         "question": " 不含票据贴现 ", "prev_requirement": "查询 2026-09-30 全行对公贷款余额", "prev_clarify": clarify,
+        "prev_sql": "SELECT 1", "prev_tables": ["ads.corp_cust_loan_bal_d"],
         "today": "2020-01-01"})                              # 今天用系统日期，请求体里的 today 不收
 
     assert response.status_code == 200
     sent = pipeline.requests[0]
     assert sent.question == "不含票据贴现"                    # 首尾空白去掉了
     assert sent.prev_requirement == "查询 2026-09-30 全行对公贷款余额"
+    assert sent.prev_sql == "SELECT 1" and sent.prev_tables == ["ads.corp_cust_loan_bal_d"]
     assert sent.prev_clarify == Clarify(question="要不要含票据贴现？", options=[
         ClarifyOption(label="含票据贴现", meaning="全口径"), ClarifyOption(label="不含票据贴现")])
     assert sent.today is None and sent.use_lineage and sent.use_examples
@@ -173,7 +175,7 @@ def test_conversations_can_be_created_listed_renamed_and_deleted(api):
 
     detail = client.get(f"/conversations/{first['id']}").json()
     assert detail["turns"] == [] and detail["context"] == {"prev_requirement": "", "prev_clarify": None,
-                                                           "clarify_turn_id": None}
+                                                           "clarify_turn_id": None, "prev_sql": "", "prev_tables": []}
     renamed = client.patch(f"/conversations/{first['id']}", json={"title": " 存款 "})
     assert renamed.status_code == 200 and renamed.json()["title"] == "存款"
     assert client.patch(f"/conversations/{first['id']}", json={"title": " "}).status_code == 422
@@ -198,7 +200,7 @@ def test_turns_stream_the_steps_save_the_turn_and_carry_the_context(api):
     turn, context = events[-1][1]["turn"], events[-1][1]["context"]
     assert turn["question"] == "查 9 月末的对公贷款余额" and turn["result"] == pipeline.result.public()
     assert context == {"prev_requirement": "查询 2026-09-30 全行对公贷款余额", "prev_clarify": CLARIFY.model_dump(),
-                       "clarify_turn_id": turn["id"]}
+                       "clarify_turn_id": turn["id"], "prev_sql": "", "prev_tables": []}
     assert pipeline.requests[0].prev_requirement == "" and pipeline.requests[0].prev_clarify is None
 
     pipeline.result = sample_result()                             # 点了反问的选项：服务端带上反问和上一轮的需求
@@ -206,7 +208,9 @@ def test_turns_stream_the_steps_save_the_turn_and_carry_the_context(api):
                                       json={"question": "不含票据贴现"}).text)
     assert pipeline.requests[1].prev_clarify == CLARIFY
     assert pipeline.requests[1].prev_requirement == "查询 2026-09-30 全行对公贷款余额"
+    assert pipeline.requests[1].prev_sql == "" and pipeline.requests[1].prev_tables == []    # 反问那一轮没有 SQL
     assert answered[-1][1]["context"]["prev_clarify"] is None
+    assert answered[-1][1]["context"]["prev_sql"] == "SELECT 1"            # 这一轮校验通过：下一轮追问以它为底
 
     detail = client.get(f"/conversations/{conversation_id}").json()
     assert detail["title"] == "查 9 月末的对公贷款余额" and detail["turn_count"] == 2

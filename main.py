@@ -200,16 +200,21 @@ class QuestionBody(BaseModel):
 
 
 class QueryBody(QuestionBody):
-    """查数请求。追问、反问的上下文由调用方带来：把上一轮结果里的 requirement、clarify 原样放回来"""
+    """查数请求。追问、反问的上下文由调用方带来：把上一轮结果里的 requirement、clarify 原样放回来，
+    上一轮 status 是 ok 时再带上它的 sql 和 validation.tables"""
 
     prev_requirement: str = Field("", description="上一轮的完整需求（上一轮结果里的 requirement）；追问时带上", max_length=4000)
     prev_clarify: Clarify | None = Field(None, description="上一轮提出、还没回答的反问；本轮的 question 是在回答它"
                                                            "还是问了新问题，由流水线判断")
+    prev_sql: str = Field("", description="上一轮校验通过的 SQL（上一轮结果里的 sql，status 是 ok 时）；"
+                                          "本轮是在它上面追问时，流水线以它为底增量修改", max_length=20000)
+    prev_tables: list[str] = Field(default_factory=list, description="上一轮 SQL 用到的表（上一轮结果里的 validation.tables）",
+                                   max_length=50)
 
     def to_request(self) -> QueryRequest:
         """转成流水线的请求；今天按系统日期，请求体里不收"""
         return QueryRequest(question=self.question, prev_requirement=self.prev_requirement,
-                            prev_clarify=self.prev_clarify)
+                            prev_clarify=self.prev_clarify, prev_sql=self.prev_sql, prev_tables=self.prev_tables)
 
 
 @app.post("/nl2sql/query", summary="自然语言查数")
@@ -317,7 +322,7 @@ def ask_in_conversation(conversation_id: str, body: QuestionBody, pipeline: Pipe
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
     request = QueryRequest(question=body.question, prev_requirement=context.prev_requirement,
-                           prev_clarify=context.prev_clarify)
+                           prev_clarify=context.prev_clarify, prev_sql=context.prev_sql, prev_tables=context.prev_tables)
 
     def finish(result: QueryResult) -> tuple[str, Any]:
         turn = history.add_turn(conversation_id, body.question, result)

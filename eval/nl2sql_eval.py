@@ -181,14 +181,12 @@ def evaluate_question(pipeline: PipelineLike, question: EvalQuestion, config: st
 
 def _run_turns(pipeline: PipelineLike, question: EvalQuestion, use_lineage: bool, use_examples: bool,
                today: date) -> list[QueryResult]:
-    """按轮跑流水线：下一轮带上上一轮的完整需求，上一轮反问了的话再带上反问"""
+    """按轮跑流水线：下一轮带上上一轮的完整需求，上一轮反问了的话再带上反问，上一轮校验通过的话再带上 SQL 和用到的表
+    （和界面、接口一样，见 QueryResult.next_context）"""
     results: list[QueryResult] = []
     for turn in question.turns:
-        previous = results[-1] if results else None
-        request = QueryRequest(
-            question=turn, today=today, use_lineage=use_lineage, use_examples=use_examples,
-            prev_requirement=previous.requirement if previous is not None else "",
-            prev_clarify=previous.clarify if previous is not None and previous.status == "need_clarify" else None)
+        context = results[-1].next_context() if results else {}
+        request = QueryRequest(question=turn, today=today, use_lineage=use_lineage, use_examples=use_examples, **context)
         results.append(_run_request(pipeline, request))
     return results
 
@@ -866,10 +864,8 @@ def run_static_eval(pipeline: PipelineLike, questions: Sequence[StaticQuestion],
 
 
 def _static_request(text: str, previous: QueryResult | None, today: date) -> QueryRequest:
-    return QueryRequest(
-        question=text, today=today, use_lineage=True, use_examples=True,
-        prev_requirement=previous.requirement if previous is not None else "",
-        prev_clarify=previous.clarify if previous is not None and previous.status == "need_clarify" else None)
+    context = previous.next_context() if previous is not None else {}
+    return QueryRequest(question=text, today=today, use_lineage=True, use_examples=True, **context)
 
 
 def _static_outcome(pipeline: PipelineLike, question: StaticQuestion) -> StaticOutcome:

@@ -178,6 +178,34 @@ def test_a_pending_clarify_needs_an_explicit_answers_clarify():
     assert check_parsed(ParsedRequest(is_query=False, reply="你好"), pending_clarify=True) == []
 
 
+def test_with_a_previous_requirement_the_parser_must_say_whether_it_follows_up():
+    parsed = ParsedRequest.model_validate({"is_query": True, "requirement": "x", "metrics": [{"name": "对公贷款余额"}]})
+
+    (problem,) = check_parsed(parsed, has_previous=True)
+
+    assert "follows_up" in problem and "true" in problem and "false" in problem
+    assert check_parsed(parsed) == []                                                 # 没有上一轮时不用写
+    pending = check_parsed(parsed, has_previous=True, pending_clarify=True)           # 有反问在等回答时写 answers_clarify
+    assert len(pending) == 1 and "answers_clarify" in pending[0]
+
+
+def test_follows_up_is_turned_off_when_there_is_no_previous_requirement():
+    llm = ScriptedLLM([make_parsed(follows_up=True).model_dump_json()])
+
+    parsed, _ = parse_request(llm, REQUEST, TODAY)
+
+    assert parsed.follows_up is False
+
+
+def test_follows_up_is_kept_when_there_is_a_previous_requirement():
+    request = QueryRequest(question="按一级分行拆开", prev_requirement="查询 2026-09-30 全行对公存款余额")
+    llm = ScriptedLLM([make_parsed(follows_up=True).model_dump_json()])
+
+    parsed, _ = parse_request(llm, request, TODAY)
+
+    assert parsed.follows_up is True and "follows_up" in llm.calls[0]["messages"][1]["content"]
+
+
 # ── to_recall_query ───────────────────────────
 
 def test_to_recall_query_collects_metrics_entities_dimensions_and_filters():

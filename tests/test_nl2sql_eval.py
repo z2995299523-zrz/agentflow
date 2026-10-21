@@ -397,6 +397,7 @@ def test_second_turn_receives_the_requirement_of_the_first(mock_store):
     one, two = pipeline.requests
     assert (one.question, one.prev_requirement, one.prev_clarify) == ("查贷款余额", "", None)
     assert (two.question, two.prev_requirement, two.prev_clarify) == ("换成上月末的", "查 2026 年 9 月末贷款余额", None)
+    assert two.prev_sql == first.sql and two.prev_tables == first.next_context()["prev_tables"]    # 和界面一样带上一轮的 SQL
     assert all(request.today == TODAY for request in pipeline.requests)
     assert CONFIGS["B"] == (True, False)
     assert all((request.use_lineage, request.use_examples) == (True, False) for request in pipeline.requests)

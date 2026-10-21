@@ -19,7 +19,7 @@ DIM_TABLE_TYPE = "维表"
 
 
 def plan_query(llm: LLMClient, parsed: ParsedRequest, evidence: Evidence, *, allow_clarify: bool,
-               allow_upstream: bool) -> tuple[QueryPlan, list[CallRecord]]:
+               allow_upstream: bool, base_sql: str = "") -> tuple[QueryPlan, list[CallRecord]]:
     """调模型定查询方案，输出经 check_plan 核对，不合格带着问题重试一次
 
     Args:
@@ -28,6 +28,7 @@ def plan_query(llm: LLMClient, parsed: ParsedRequest, evidence: Evidence, *, all
         evidence: ③ 的结果
         allow_clarify: 本轮能不能反问（本轮已经是对反问的回答时不能）
         allow_upstream: 能不能要求上溯（A 组不能）
+        base_sql: 追问时上一轮的 SQL，方案以它为底增量修改；不是追问时为空
 
     Returns:
         (查询方案, 调用记录)
@@ -35,7 +36,8 @@ def plan_query(llm: LLMClient, parsed: ParsedRequest, evidence: Evidence, *, all
     Raises:
         StepError: 模型调用失败，或者两次输出都不合格
     """
-    messages = planner_messages(parsed, evidence, allow_clarify=allow_clarify, allow_upstream=allow_upstream)
+    messages = planner_messages(parsed, evidence, allow_clarify=allow_clarify, allow_upstream=allow_upstream,
+                                base_sql=base_sql)
     return structured_call(llm, "plan", messages, QueryPlan,
                            lambda plan: check_plan(plan, evidence, allow_clarify=allow_clarify,
                                                    allow_upstream=allow_upstream))

@@ -81,10 +81,12 @@ class SpyRetriever:
         self._inner = inner
         self.calls: list[dict] = []
 
-    def recall(self, query, scope_level=0, base_tables=(), *, all_layers=False):
-        result = self._inner.recall(query, scope_level, base_tables, all_layers=all_layers)
+    def recall(self, query, scope_level=0, base_tables=(), *, all_layers=False, carry_tables=(), missing_terms=()):
+        result = self._inner.recall(query, scope_level, base_tables, all_layers=all_layers, carry_tables=carry_tables,
+                                    missing_terms=missing_terms)
         self.calls.append({"query": query, "scope_level": scope_level, "base_tables": list(base_tables),
-                           "all_layers": all_layers, "result": result})
+                           "all_layers": all_layers, "carry_tables": list(carry_tables),
+                           "missing_terms": list(missing_terms), "result": result})
         return result
 
 
@@ -177,9 +179,22 @@ def test_upstream_one_level_then_ok(make):
     assert [call["scope_level"] for call in spy.calls] == [0, 1]
     first, second = spy.calls
     assert "还款方式" in second["query"].metrics and "还款方式" not in first["query"].metrics
+    assert first["missing_terms"] == [] and second["missing_terms"] == ["还款方式"]     # 缺的东西也单独补召回
     assert second["base_tables"] == [table.table_id for table in first["result"].tables]    # 以第一次的候选为起点
     assert "② 候选召回（上溯第 1 层）" in labels(result) and "④ 选表定口径（上溯第 1 层）" in labels(result)
     assert labels(result)[:4] == ["① 需求解析", "② 候选召回", "③ 血缘展开", "④ 选表定口径"]    # 第 0 层的标签不带后缀
+
+
+def test_each_lift_recalls_only_what_the_planner_says_is_missing_this_time(make):
+    pipeline, _, spy = make([parsed_json(), upstream_json("还款方式"), upstream_json("担保方式"), plan_json(),
+                             sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.scope_level == 2
+    third = spy.calls[2]
+    assert third["missing_terms"] == ["担保方式"]                                  # 单独补召回只用最近一次说缺的
+    assert {"还款方式", "担保方式"} <= set(third["query"].metrics)                   # 整体排名用累积的
 
 
 def test_upstream_to_the_top_still_missing_fails(make):
@@ -398,6 +413,36 @@ def test_follow_up_sends_the_previous_requirement_to_the_parser(make):
 
     assert REQUIREMENT in llm.calls[0]["messages"][-1]["content"]
     assert result.status == "ok" and result.requirement == REQUIREMENT + "，按机构分组"
+
+
+PREV_SQL = f"SELECT SUM(loan_bal_rmb) AS loan_bal_rmb FROM {LOAN} WHERE data_dt = DATE '2026-08-31'"
+DUEBILL = "dwd.corp_loan_duebill_d"            # 整合层的表：第 0 层召回不到，只能靠上一轮带进来
+
+
+def test_a_follow_up_builds_on_the_sql_and_tables_of_the_previous_round(make):
+    pipeline, llm, spy = make([parsed_json(follows_up=True), plan_json(), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request(prev_requirement=REQUIREMENT, prev_sql=PREV_SQL, prev_tables=[DUEBILL]))
+
+    assert result.status == "ok" and result.llm_calls == 3                          # 不多调模型
+    assert spy.calls[0]["carry_tables"] == [DUEBILL]
+    assert [table.reason for table in spy.calls[0]["result"].tables if table.table_id == DUEBILL] == ["previous"]
+    planner, generator = llm.calls[1]["messages"][-1]["content"], llm.calls[2]["messages"][-1]["content"]
+    assert "# 上一轮的 SQL" in planner and PREV_SQL in planner
+    assert "## 上一轮的 SQL" in generator and PREV_SQL in generator
+    assert "入选原因：上一轮用过" in planner
+    assert result.trace[0].summary.startswith("在上一轮的基础上追问，以上一轮的 SQL 为底；完整需求：")
+
+
+@pytest.mark.parametrize("follows_up, prev_sql", [(False, PREV_SQL), (True, "")])
+def test_a_new_question_or_a_round_without_sql_carries_nothing(make, follows_up, prev_sql):
+    pipeline, llm, spy = make([parsed_json(follows_up=follows_up), plan_json(), sql_reply(GOOD_SQL)])
+
+    result = pipeline.run(request(prev_requirement=REQUIREMENT, prev_sql=prev_sql, prev_tables=[DUEBILL]))
+
+    assert result.status == "ok" and spy.calls[0]["carry_tables"] == []
+    assert all("上一轮的 SQL" not in call["messages"][-1]["content"] for call in llm.calls[1:])
+    assert not result.trace[0].summary.startswith("在上一轮的基础上追问")
 
 
 def test_answering_a_clarify_cannot_trigger_another_one(make):

@@ -19,11 +19,13 @@ from metadata.importer import enrich_mart, load_mart
 from metadata.index import HashEmbedder, build_vectors
 from metadata.models import ColumnMeta, Example, LineageEdge, Mart, ScriptColumn, TableMeta
 from metadata.store import MetadataStore
+from nl2sql import retriever as retriever_module
 from nl2sql.retriever import (
     MAX_EXAMPLES,
     MAX_HITS_PER_TABLE,
     MAX_TABLES,
     MAX_UPSTREAM_TABLES,
+    MISSING_TABLES_PER_TERM,
     RecallQuery,
     Retriever,
 )
@@ -182,6 +184,57 @@ def test_at_most_eight_tables_and_upstream_and_example_tables_take_no_slot():
     assert [(item.table_id, item.score) for item in result.tables[:MAX_TABLES]] == [
         (item.table_id, item.score) for item in level0.tables if item.reason == "recall"]
     assert result.scope_size == 11 and result.scope_level == 1
+
+
+def test_tables_of_the_previous_round_are_carried_in_without_taking_a_slot():
+    retriever = make_retriever(ten_table_mart())
+    query = RecallQuery("存款金额汇总统计", ["存款金额"])
+    recalled = [item.table_id for item in retriever.recall(query).tables if item.reason == "recall"]
+
+    result = retriever.recall(query, carry_tables=["dwd.src", recalled[0], "ads.nope", "dwd.src"])
+
+    reasons = [item.reason for item in result.tables]
+    assert [item.table_id for item in result.tables if item.reason == "previous"] == ["dwd.src"]  # 已在候选里的、没有的、重复的跳过
+    assert reasons.count("recall") == MAX_TABLES and reasons.index("previous") == MAX_TABLES      # 不占名额，紧跟召回的表
+    assert next(item for item in result.tables if item.table_id == "dwd.src").hits == []          # 第 0 层范围外，没有命中
+
+
+def bridge_mart() -> Mart:
+    """十张客户经理统计表把召回的 8 个名额占满；贷款合同和客户之间的关系表，靠「客户经理数」检索不到"""
+    tables = [(f"ads.m{number:02d}", "客户经理统计", [("cnt", "客户经理数")]) for number in range(1, 11)]
+    tables += [("ads.rel", "贷款合同客户关系", [("contract_no", "合同号"), ("cust_no", "客户号")]),
+               ("ads.ctr", "贷款合同", [("contract_no", "合同号")]),
+               ("ads.cst", "客户信息", [("cust_no", "客户号")])]
+    return make_mart(tables)
+
+
+def test_each_missing_item_is_recalled_on_its_own_and_takes_no_slot():
+    retriever = make_retriever(bridge_mart())
+    query = RecallQuery("各客户的客户经理数", ["客户经理数"])
+    assert "ads.rel" not in [item.table_id for item in retriever.recall(query).tables]
+
+    result = retriever.recall(query, missing_terms=["合同与客户的关联关系"])
+
+    missing = [item for item in result.tables if item.reason == "missing"]
+    assert missing[0].table_id == "ads.rel" and len(missing) == MISSING_TABLES_PER_TERM
+    assert missing[0].hits and missing[0].hits[0].term == "合同与客户的关联关系"          # 标出是哪一样缺的东西召回来的
+    assert [item.reason for item in result.tables].count("recall") == MAX_TABLES
+
+
+def test_missing_items_are_capped_never_repeat_and_are_skipped_for_group_a(monkeypatch):
+    monkeypatch.setattr(retriever_module, "MAX_MISSING_TABLES", 2)
+    retriever = make_retriever(bridge_mart())
+    query = RecallQuery("各客户的客户经理数", ["客户经理数"])
+    many = ["合同与客户的关联关系", "贷款合同", "客户信息", "合同号", "客户号"]
+
+    result = retriever.recall(query, missing_terms=many)
+
+    ids = [item.table_id for item in result.tables]
+    missing = [item for item in result.tables if item.reason == "missing"]
+    assert len(missing) == 2 and len(ids) == len(set(ids))
+    assert [item.hits[0].term for item in missing] == many[:2]          # 轮流取：前两条各补一张，不是第一条补两张
+    assert not [item for item in retriever.recall(query, all_layers=True, missing_terms=many).tables
+                if item.reason == "missing"]
 
 
 def upstream_mart(strong: int, weak: int, unrelated: int) -> Mart:

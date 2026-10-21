@@ -39,6 +39,8 @@ from metadata.store import MetadataStore
 
 MAX_TABLES = 8
 MAX_UPSTREAM_TABLES = 8                       # 上溯加入的上游表最多留几张，真实库上第 2 层的上游闭包有几十张
+MISSING_TABLES_PER_TERM = 2                   # ④ 说缺的每一样单独召回时取前几张
+MAX_MISSING_TABLES = 6                        # 单独召回补进来的表最多几张
 MAX_EXAMPLES = 3
 PER_TERM_K = 30
 RRF_K = 60
@@ -55,6 +57,7 @@ BOILERPLATE_MIN_TABLES = 10                  # 样本太小时比例没有意义
 SCORE_DIGITS = 10                            # 比较得分时保留的小数位：浮点误差不能打乱同分的先后
 UPSTREAM_LAYERS = {1: ("整合层",), 2: ("整合层", "贴源层")}    # 上溯层数 → 上游表的层级
 REASON_RECALL, REASON_UPSTREAM, REASON_EXAMPLE = "recall", "upstream", "example"
+REASON_PREVIOUS, REASON_MISSING = "previous", "missing"
 VIA_VECTOR, VIA_KEYWORD = "vector", "keyword"
 
 
@@ -85,7 +88,7 @@ class TableCandidate:
     """一张候选表"""
 
     table_id: str
-    reason: str                          # recall、example 或 upstream
+    reason: str                          # recall、previous、missing、upstream 或 example
     score: float
     hits: list[FieldHit]
 
@@ -329,14 +332,20 @@ class Retriever:
     # ── 召回 ──
 
     def recall(self, query: RecallQuery, scope_level: int = 0, base_tables: Sequence[str] = (), *,
-               all_layers: bool = False) -> RecallResult:
+               all_layers: bool = False, carry_tables: Sequence[str] = (),
+               missing_terms: Sequence[str] = ()) -> RecallResult:
         """召回候选表和相似样例
 
-        候选表分三类，按 recall、upstream、example 的顺序排列：recall 是范围内（第 0 层）得分最高的前 MAX_TABLES 张；
+        候选表分五类，按 recall、previous、missing、upstream、example 的顺序排列：
+        recall 是范围内（第 0 层）得分最高的前 MAX_TABLES 张；
+        previous 是追问时上一轮 SQL 用到的表（carry_tables），原样带进来；
+        missing 是 ④ 最近一次说缺的东西（missing_terms）逐条单独在第 0 层排名，轮流各取一张，每条最多
+        MISSING_TABLES_PER_TERM 张、总共最多 MAX_MISSING_TABLES 张：缺的东西混在全部检索词里一起加总得分时，
+        会被原来的检索词冲淡；
         upstream 是上溯加入的表，只留有命中字段的前 MAX_UPSTREAM_TABLES 张，都没命中时取最近的前 MAX_UPSTREAM_TABLES 张；
-        example 是相似样例用到的、前两类里还没有的表。后两类不占名额。
+        example 是相似样例用到的表。除 recall 以外都不占名额，前面几类里已经有的表不重复。
 
-        all_layers 是对照实验 A 组用的：排名池是全部层级的全部表，没有上溯，所以没有 upstream 一类，
+        all_layers 是对照实验 A 组用的：排名池是全部层级的全部表，没有上溯，所以没有 upstream、missing 两类，
         scope_size 是全部表数，scope_level 只能是 0。
 
         Args:
@@ -344,6 +353,8 @@ class Retriever:
             scope_level: 上溯层数，0、1 或 2
             base_tables: 上溯的起点，scope_level 大于 0 时必须给出
             all_layers: 全部表一起排名，不上溯
+            carry_tables: 追问时上一轮 SQL 用到的表；元数据里没有的跳过
+            missing_terms: ④ 说缺的东西（上溯时才有）
 
         Returns:
             召回结果，说明里记着走了哪几路
@@ -374,12 +385,19 @@ class Retriever:
         ranked = sorted((table_id for table_id, item in scored.items() if item.score > 0),
                         key=lambda table_id: self._order_key(table_id, scored.get(table_id)))
         tables = [self._candidate(table_id, REASON_RECALL, scored) for table_id in ranked[:MAX_TABLES]]
-        tables += [self._candidate(table_id, REASON_UPSTREAM, upstream_scored) for table_id in kept]
+        have = {candidate.table_id for candidate in tables}
+        for table_id in carry_tables:
+            if table_id in self._tables and table_id not in have:
+                have.add(table_id)
+                tables.append(self._candidate(table_id, REASON_PREVIOUS, {**upstream_scored, **scored}))
+        if not all_layers:
+            tables += self._missing_candidates(missing_terms, have)
+        tables += [self._candidate(table_id, REASON_UPSTREAM, upstream_scored) for table_id in kept if table_id not in have]
+        have.update(kept)
 
         examples = self._similar_examples(query.requirement, requirement_vector)
         if self._examples and self._vector_note is None and self._example_index is None:
             notes.append("元数据库里没有样例向量，样例只按文字相似度排序")
-        have = {candidate.table_id for candidate in tables}
         for example in examples:
             for table_id in example.tables:
                 if table_id in self._tables and table_id not in have:
@@ -387,6 +405,36 @@ class Retriever:
                     tables.append(self._candidate(table_id, REASON_EXAMPLE, {**upstream_scored, **scored}))
         return RecallResult(scope_level=scope_level, scope_size=len(scope), tables=tables, examples=examples,
                             notes=notes)
+
+    def _missing_candidates(self, missing_terms: Sequence[str], have: set[str]) -> list[TableCandidate]:
+        """④ 说缺的东西逐条单独在第 0 层排名，每条最多补 MISSING_TABLES_PER_TERM 张还不在候选里的表
+
+        轮流取：先给每一条补它排第一的表，再补排第二的，免得前面几条把名额用光；总共最多 MAX_MISSING_TABLES 张。
+        补进来的表登记进 have。没有缺的东西时返回空列表。
+        """
+        terms = _prepare_terms(RecallQuery(requirement="", metrics=list(missing_terms)))
+        if not terms:
+            return []
+        vectors, _ = self._embed(terms, "")
+        pool = [table_id for table_id in self._level0 if table_id not in have]
+        rankings = []                                           # 每条缺的东西：(按得分排好的表, 得分)
+        for position, term in enumerate(terms):
+            scored, _ = self._score_tables([term], vectors[position:position + 1] if vectors is not None else None, pool)
+            rankings.append((sorted((table_id for table_id, item in scored.items() if item.score > 0),
+                                    key=lambda table_id: self._order_key(table_id, scored[table_id])), scored))
+        picked: list[TableCandidate] = []
+        taken = [0] * len(rankings)                             # 每条已经补了几张
+        for _ in range(MISSING_TABLES_PER_TERM):
+            for index, (ranked, scored) in enumerate(rankings):
+                table_id = next((table_id for table_id in ranked if table_id not in have), None)
+                if table_id is None or taken[index] == MISSING_TABLES_PER_TERM:
+                    continue
+                if len(picked) == MAX_MISSING_TABLES:
+                    return picked
+                have.add(table_id)
+                taken[index] += 1
+                picked.append(self._candidate(table_id, REASON_MISSING, scored))
+        return picked
 
     def _keep_upstream(self, upstream: list[str], scored: dict[str, _TableScore]) -> list[str]:
         """上溯加入的表里留下的，已排好先后

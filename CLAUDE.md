@@ -52,7 +52,7 @@ start.bat                                 # Windows 同时起接口和界面（h
 
 ```
 QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(模型) → ⑤ generate(模型) → ⑥ validate → ⑦ output → QueryResult
-  ① 缺对象或指标时反问，直接去 ⑦；④ need_upstream：上溯一层回到 ②（最多 2 层）；need_clarify、cannot_answer 直接去 ⑦
+  ① 缺对象或指标时反问，直接去 ⑦；④ need_upstream：上溯一层回到 ②（最多 2 层），② 还拿 ④ 说缺的东西逐条单独补召回第 0 层的表；need_clarify、cannot_answer 直接去 ⑦
   ④ ok：只说「日均」没说统计区间时 clarify_daily_average 改成反问；prune_plan 去掉用不到的表（孤立表、只用关联键关联专题层的维表，记进 dropped_tables，⑤ 再用就是 R8 错误）再去 ⑤
   ⑥ 有错误：带着错误回到 ⑤（最多修正 2 次）
 ```
@@ -62,7 +62,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 - `retriever.py` 候选召回（关键字加向量，三层范围）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
 - `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
 - `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB
-- 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`）
+- 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`，上一轮校验通过时还有 `prev_sql`、`prev_tables`，规则见 `QueryResult.next_context`）。① 判断本轮是在上一轮上追问（`follows_up`）时，② 把上一轮的表放进候选，④ ⑤ 以上一轮的 SQL 为底增量修改，不多调模型
 - 对照实验开关 `use_lineage`、`use_examples`：A 组 False/False（全部层级召回、只给表结构推得出的关联、不上溯），B 组 True/False，C 组 True/True
 
 ### 接口、界面与评估
@@ -72,7 +72,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 - `main.py`（FastAPI）：查数 `POST /nl2sql/query`、`/nl2sql/stream`（SSE）；会话 `/conversations`、`/conversations/{id}`、`/conversations/{id}/turns`（SSE）；元数据 `tables`、`columns`、`search`、`lineage`、`examples`；`GET /health`
   - SSE：流水线在后台线程跑，事件循环等队列，15 秒没有新事件发一行注释保活；浏览器断开时后台照样跑完、照样存历史
   - 启动时在后台线程预热（`service.warm_up`：装配流水线、加载 BGE）
-- `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问
+- `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问；那一轮校验通过时还有它的 SQL 和用到的表
 - `web/`：查数页（七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
 - `eval/`：43 题题库（11 题登记了其它正确答案；「反问之后」3 题测上一轮停在反问上的下一轮，第一轮没反问按答错计）、结果比对、三组对照评估与错题归因、真实库静态评估；报告在 `eval/reports/`
 

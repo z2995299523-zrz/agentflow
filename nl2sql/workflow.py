@@ -1,7 +1,8 @@
 """
 查询流水线的 LangGraph 编排
 七个节点：parse → recall → evidence → plan → generate → validate → output，三条回路：
-- ④ 说缺东西（need_upstream）时上溯一层，带着缺的东西回到 ②，最多上溯 MAX_SCOPE_LEVEL 层
+- ④ 说缺东西（need_upstream）时上溯一层，带着缺的东西回到 ②，最多上溯 MAX_SCOPE_LEVEL 层；
+  ② 除了沿血缘往下层找，还拿缺的东西逐条单独在第 0 层补召回（专题层里横向的表，沿血缘找不到）
 - ⑥ 校验有错误时带着错误回到 ⑤，最多修正 MAX_REPAIRS 次
 - ① 反问（缺了没法默认的要素）、④ 反问（口径分岔）、④ 做不到（cannot_answer）时直接去 ⑦
 - ④ 结论是 ok 时先由 prune_plan 去掉用不到的表，再去 ⑤
@@ -9,6 +10,8 @@
 流水线本身无状态，不带检查点：追问、反问的上下文由调用方放进 QueryRequest。
 上一轮停在反问上时，① 判断本轮是不是在回答它（ParsedRequest.answers_clarify）：是回答就 ① ④ 都不能再反问，
 免得来回反问；没理会反问、问了新问题时，新问题照常能反问。
+① 判断本轮是在上一轮的需求上追问（ParsedRequest.follows_up）、请求里又有上一轮校验通过的 SQL 时，以那条 SQL 为底：
+② 把它用到的表直接放进候选，④ ⑤ 拿它当底稿增量修改，上一轮限定的范围不会在追问里丢掉。
 Pipeline.run 不向外抛异常，节点里没接住的程序错误也包成 failed（停在 internal）。
 
 对照实验的开关在这里生效（use_lineage 为假就是 A 组）：
@@ -96,7 +99,8 @@ class PipelineState(TypedDict, total=False):
     parsed: ParsedRequest
     scope_level: int
     base_tables: list[str]
-    extra_terms: list[str]
+    extra_terms: list[str]                    # ④ 每次说缺的东西，累积起来并进检索词
+    missing_terms: list[str]                  # ④ 最近一次说缺的东西，② 拿它们逐条单独补召回
     recall: RecallResult
     evidence: Evidence
     plan: QueryPlan
@@ -123,6 +127,17 @@ def _node_name(step: str) -> str:
 def _unique(items: Iterable[str]) -> list[str]:
     """去掉首尾空白和空串，保序去重"""
     return list(dict.fromkeys(text for text in (item.strip() for item in items) if text))
+
+
+def _base_sql_of(request: QueryRequest, parsed: ParsedRequest | None) -> str:
+    """追问的底稿：① 判断本轮是在上一轮的需求上追问、请求里又有上一轮校验通过的 SQL 时，就是那条 SQL；否则为空"""
+    sql = request.prev_sql.strip()
+    return sql if parsed is not None and parsed.follows_up and sql else ""
+
+
+def _base_sql(state: PipelineState) -> str:
+    """同 _base_sql_of，取状态里的请求和 ① 的结果"""
+    return _base_sql_of(state["request"], state.get("parsed"))
 
 
 def _short(text: str, limit: int) -> str:
@@ -230,6 +245,8 @@ class _Steps:
         lead = ""
         if state["request"].prev_clarify is not None:
             lead = "回答上一轮的反问；" if parsed.answers_clarify else "上一轮的反问没有回答，按新问题处理；"
+        elif _base_sql_of(state["request"], parsed):
+            lead = "在上一轮的基础上追问，以上一轮的 SQL 为底；"
         if parsed.clarify is not None and not parsed.answers_clarify:
             updates["status"] = STATUS_CLARIFY
             return updates, f"{lead}需要反问：{parsed.clarify.question}"
@@ -239,11 +256,14 @@ class _Steps:
 
     # ② 候选召回
     def recall(self, state: PipelineState) -> tuple[dict[str, Any], str]:
-        """召回候选表；A 组在全部层级里排名；不用样例时先去掉样例；一张候选也没有时流程结束"""
+        """召回候选表；A 组在全部层级里排名；不用样例时先去掉样例；一张候选也没有时流程结束。
+        追问时带上上一轮 SQL 用到的表；上溯时把 ④ 说缺的东西逐条单独补召回"""
         request = state["request"]
         query = to_recall_query(state["parsed"], state["extra_terms"])
         all_layers = not request.use_lineage
-        recall = self._deps.retriever.recall(query, state["scope_level"], state["base_tables"], all_layers=all_layers)
+        carry = request.prev_tables if _base_sql(state) else []
+        recall = self._deps.retriever.recall(query, state["scope_level"], state["base_tables"], all_layers=all_layers,
+                                             carry_tables=carry, missing_terms=state.get("missing_terms", []))
         if not request.use_examples:
             recall = drop_examples(recall)
         updates: dict[str, Any] = {"recall": recall}
@@ -274,8 +294,8 @@ class _Steps:
         能反问（本轮不是在回答上一轮的反问）而需求只说「日均」时改成反问；结论是 ok 时先去掉用不到的表"""
         request = state["request"]
         allow_clarify = not state["parsed"].answers_clarify
-        plan, calls = plan_query(self._deps.llm, state["parsed"], state["evidence"],
-                                 allow_clarify=allow_clarify, allow_upstream=request.use_lineage)
+        plan, calls = plan_query(self._deps.llm, state["parsed"], state["evidence"], allow_clarify=allow_clarify,
+                                 allow_upstream=request.use_lineage, base_sql=_base_sql(state))
         if allow_clarify:
             plan = clarify_daily_average(state["parsed"], state["evidence"], plan)
         plan, removed = prune_plan(plan, state["evidence"])
@@ -293,7 +313,7 @@ class _Steps:
                 updates.update(status=STATUS_FAILED, failed_step="plan", message=upstream_failure_message(plan, level))
                 return updates, f"需要上溯，但已经上溯到第 {level} 层：缺 {missing}"
             updates.update(scope_level=level + 1, base_tables=[table.table_id for table in state["recall"].tables],
-                           extra_terms=_unique([*state["extra_terms"], *plan.missing]))
+                           extra_terms=_unique([*state["extra_terms"], *plan.missing]), missing_terms=_unique(plan.missing))
             return updates, f"需要上溯：缺 {missing}"
         summary = f"结论 ok：用表 {_names(item.table for item in plan.tables)}"
         return updates, summary + (f"；去掉用不到的表 {_names(removed)}" if removed else "")
@@ -305,7 +325,7 @@ class _Steps:
         previous = state.get("sql", "") if rounds else ""
         errors = state["validation"].errors if rounds and "validation" in state else []
         sql, record = generate_sql(self._deps.llm, state["parsed"], state["plan"], state["evidence"],
-                                   previous_sql=previous, errors=errors)
+                                   previous_sql=previous, errors=errors, base_sql=_base_sql(state))
         if rounds == 0:
             summary = "第 1 次生成"
         else:
@@ -540,7 +560,7 @@ class Pipeline:
         started = time.perf_counter()
         state: PipelineState = {
             "request": request, "today": request.today or date.today(), "scope_level": 0, "base_tables": [],
-            "extra_terms": [], "repair_rounds": 0, "trace": [], "calls": [], "started": started,
+            "extra_terms": [], "missing_terms": [], "repair_rounds": 0, "trace": [], "calls": [], "started": started,
         }
         trace: list[TraceStep] = []
         calls: list[CallRecord] = []
