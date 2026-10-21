@@ -20,19 +20,32 @@ KNOWN_COLUMNS = {(column.table_id, column.column_name) for column in MART.column
 ALTERNATIVES = [(question, index) for question in QUESTIONS for index in range(len(question.alternatives))]
 ORG_TABLE = "ads.org_corp_dep_bal_d"
 CUST_TABLE = "ads.corp_cust_dep_bal_d"
+AFTER_CLARIFY = "反问之后"
 
 
 # ── 题库结构 ──────────────────────────────────────────────
 
-def test_forty_questions_in_the_planned_categories():
-    assert len(QUESTIONS) == 40
+def test_forty_three_questions_in_the_planned_categories():
+    assert len(QUESTIONS) == 43
     assert Counter(question.category for question in QUESTIONS) == CATEGORY_COUNTS
 
 
 def test_turns_and_expectation_follow_the_category():
     for question in QUESTIONS:
-        assert len(question.turns) == (2 if question.category == "追问" else 1), question.id
-        assert question.expect == ("clarify" if question.category == "反问" else "sql"), question.id
+        assert len(question.turns) == (2 if question.category in ("追问", AFTER_CLARIFY) else 1), question.id
+        if question.category != AFTER_CLARIFY:
+            assert question.expect == ("clarify" if question.category == "反问" else "sql"), question.id
+        # 只有「反问之后」的题要求第一轮停在反问上；追问题的第一轮不计分
+        assert question.first_expect == ("clarify" if question.category == AFTER_CLARIFY else None), question.id
+
+
+def test_questions_after_a_clarify_cover_a_new_question_and_real_answers():
+    after = {question.id: question.expect for question in QUESTIONS if question.category == AFTER_CLARIFY}
+
+    # 新问题照常反问（N01），真正的回答不再反问、给出 SQL（N02 回答 ④ 的口径反问，N03 回答 ① 的反问）
+    assert after == {"N01": "clarify", "N02": "sql", "N03": "sql"}
+    first_turns = {question.turns[0] for question in QUESTIONS if question.id in ("N01", "N02")}
+    assert first_turns == {next(item for item in QUESTIONS if item.id == "A01").turns[0]}
 
 
 def test_clarify_questions_carry_no_gold_answer():
@@ -99,6 +112,15 @@ def test_clarify_question_must_not_have_alternatives():
     with pytest.raises(ValueError, match="不应有其它写法"):
         EvalQuestion(id="X03", category="反问", turns=["查余额"], expect="clarify",
                      alternatives=[Alternative(sql="SELECT 1")])
+
+
+def test_first_turn_expectation_needs_two_turns():
+    with pytest.raises(ValueError, match="只有两轮的题"):
+        EvalQuestion(id="X05", category="反问之后", turns=["查存款余额"], expect="clarify", first_expect="clarify")
+    question = EvalQuestion(id="X06", category="反问之后", turns=["查存款余额", "含保证金的"], expect="sql",
+                            gold_sql="SELECT 1", first_expect="clarify")
+    assert question.first_expect == "clarify"
+    assert EvalQuestion(id="X07", category="追问", turns=["甲", "乙"], expect="sql", gold_sql="SELECT 1").first_expect is None
 
 
 def test_alternative_needs_sql_and_columns_default_to_empty():
@@ -305,6 +327,12 @@ PLAUSIBLE_WRONG_ANSWERS = {
     # 日均：对 9 月每天的行直接求平均，是各行的平均值，不是每天合计后的日均
     "T04": "SELECT AVG(dep_bal_rmb) FROM ads.corp_cust_dep_bal_d "
            "WHERE data_dt BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'",
+    # 反问之后：没按回答的口径，用了反问的第一个选项（不含保证金）
+    "N02": "SELECT org_no, dep_bal_rmb FROM ads.org_corp_dep_bal_d WHERE data_dt = DATE '2026-09-30'",
+    # 反问之后：没用回答的客户号，算成了全行合计
+    "N03": "SELECT SUM(loan_bal_rmb) FROM ads.corp_cust_loan_bal_d WHERE data_dt = DATE '2026-09-30'",
+    # 反问之后：按反问的第一个选项列出了全部客户
+    "N03-all-customers": "SELECT cust_no, loan_bal_rmb FROM ads.corp_cust_loan_bal_d WHERE data_dt = DATE '2026-09-30'",
 }
 
 

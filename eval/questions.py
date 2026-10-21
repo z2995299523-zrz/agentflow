@@ -20,6 +20,7 @@ CATEGORY_COUNTS: dict[str, int] = {
     "向上溯源": 5,
     "反问": 5,
     "追问": 5,
+    "反问之后": 3,
 }
 
 
@@ -51,6 +52,9 @@ class EvalQuestion(BaseModel):
     category: str
     turns: list[str] = Field(min_length=1, max_length=2)    # 一轮或两轮用户输入
     expect: Literal["sql", "clarify"]                       # 期望得到 SQL，还是期望被反问
+    # 两轮的题第一轮应该停在哪里：clarify 表示第一轮必须反问。没停在那里时第二轮测的不是题目要测的情形，
+    # 这道题按答错计；不写表示第一轮不计分（追问题）
+    first_expect: Literal["sql", "clarify"] | None = None
     gold_sql: str = ""                                      # 标准 SQL，目标库方言
     gold_tables: list[str] = Field(default_factory=list)    # 标准用表
     gold_columns: list[str] = Field(default_factory=list)   # 关键字段，写成 表.字段
@@ -66,6 +70,8 @@ class EvalQuestion(BaseModel):
             raise ValueError(f"{self.id}: 期望被反问的题不应有标准 SQL")
         if self.expect == "clarify" and self.alternatives:
             raise ValueError(f"{self.id}: 期望被反问的题不应有其它写法")
+        if self.first_expect is not None and len(self.turns) != 2:
+            raise ValueError(f"{self.id}: 只有两轮的题才能写第一轮的期望（first_expect）")
         return self
 
 

@@ -31,7 +31,7 @@ from nl2sql.retriever import (
 ROOT = Path(__file__).resolve().parents[1]
 MOCK_MART_DIR = ROOT / "data" / "mock_mart"
 RECALL_TERMS = Path(__file__).parent / "data" / "recall_terms.yaml"
-MIN_RECALLED_QUESTIONS = 32          # 35 道出 SQL 的题里，标准用表全部进了候选的题数不能低于它
+MIN_RECALLED_QUESTIONS = 34          # 37 道出 SQL 的题里，标准用表全部进了候选的题数不能低于它
 SCHEMA_LAYER = {"ads": "专题层", "zt": "专题层", "dwd": "整合层", "dim": "整合层", "ods": "贴源层"}
 
 # 子进程里跑的脚本：在模拟库上召回两次，把结果打印成 JSON。换 PYTHONHASHSEED 重复跑，结果必须逐字相同

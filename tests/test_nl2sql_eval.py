@@ -36,6 +36,7 @@ from nl2sql.schemas import (
     CallRecord,
     Clarify,
     ClarifyOption,
+    ParsedRequest,
     QueryPlan,
     QueryRequest,
     QueryResult,
@@ -149,6 +150,21 @@ def sql_question(qid="Q1", *, turns=("查贷款余额",), category="基础时点
 
 def clarify_question(qid="A1") -> EvalQuestion:
     return EvalQuestion(id=qid, category="反问", turns=["查存款余额"], expect="clarify")
+
+
+def after_clarify_question(qid="N1", *, expect="sql", first_expect="clarify", turns=None) -> EvalQuestion:
+    """「反问之后」的题：第一轮必须反问，第二轮是回答（期望 SQL）或新问题（期望反问）"""
+    if expect == "clarify":
+        return EvalQuestion(id=qid, category="反问之后", turns=list(turns or ("查存款余额", "查日均余额")),
+                            expect="clarify", first_expect=first_expect)
+    return EvalQuestion(id=qid, category="反问之后", turns=list(turns or ("查存款余额", "含保证金的")), expect="sql",
+                        gold_sql=GOLD_SQL, gold_tables=[LOAN], gold_columns=[f"{LOAN}.loan_bal_rmb"],
+                        first_expect=first_expect)
+
+
+def judged(result: QueryResult, answers_clarify: bool) -> QueryResult:
+    """给结果加上 ① 的解析：本轮是不是在回答上一轮的反问"""
+    return result.model_copy(update={"parsed": ParsedRequest(is_query=True, answers_clarify=answers_clarify)})
 
 
 def score(question, *results, config="C", executor=None, store):
@@ -404,6 +420,7 @@ def test_the_last_turn_is_the_one_that_is_scored(mock_store):
     outcome, _ = score(question, first, make_result(), store=mock_store)
 
     assert outcome.exec_ok is True and outcome.attribution == ""
+    assert outcome.premise_ok is None                               # 追问题的第一轮不计分
 
 
 def test_time_calls_and_tokens_add_up_over_the_turns(mock_store):
@@ -414,6 +431,67 @@ def test_time_calls_and_tokens_add_up_over_the_turns(mock_store):
     outcome, _ = score(question, first, second, store=mock_store)
 
     assert (outcome.elapsed_ms, outcome.llm_calls, outcome.tokens) == (4000, 5, 2 * 150 + 3 * 15)
+
+
+# ── 反问之后：第一轮必须反问 ─────────────────────────────
+
+def test_after_a_clarify_the_answer_is_scored_on_the_second_turn(mock_store):
+    outcome, pipeline = score(after_clarify_question(), make_clarify(), make_result(), store=mock_store)
+
+    assert pipeline.requests[1].prev_clarify is not None
+    assert (outcome.premise_ok, outcome.exec_ok, outcome.clarify_ok, outcome.attribution) == (True, True, True, "")
+
+
+def test_a_first_turn_that_does_not_ask_breaks_the_premise_and_counts_as_wrong(mock_store):
+    executor = FakeExecutor()
+
+    # 第二轮的 SQL 和标准答案一样，但第一轮没有反问，第二轮测的就不是「回答反问」
+    outcome, _ = score(after_clarify_question(), make_result(), make_result(), executor=executor, store=mock_store)
+
+    assert (outcome.premise_ok, outcome.exec_ok, outcome.clarify_ok) == (False, False, False)
+    assert outcome.attribution == "第一轮没有反问（状态 ok），题目前提不成立"
+    assert executor.calls == [] and outcome.exec_error == ""              # 不算数的结果不再执行
+    assert (outcome.recall_ok, outcome.table_ok, outcome.column_ok) == (True, True, True)   # 选表、字段照常诊断
+
+
+@pytest.mark.parametrize("first, second, clarify_ok, attribution", [
+    (make_clarify(), make_clarify(), True, ""),                                     # 新问题照常反问
+    (make_result(), make_clarify(), False, "第一轮没有反问（状态 ok），题目前提不成立"),
+    (make_result(status="failed", failed_step="parse", message="x", validated=False), make_clarify(), False,
+     "第一轮没有反问（状态 failed），题目前提不成立"),
+    (make_clarify(), make_result(), False, "④ 该反问没有反问"),
+])
+def test_a_new_question_after_a_clarify_must_be_asked_in_both_turns(first, second, clarify_ok, attribution,
+                                                                     mock_store):
+    outcome, _ = score(after_clarify_question(expect="clarify"), first, second, store=mock_store)
+
+    assert (outcome.clarify_ok, outcome.attribution) == (clarify_ok, attribution)
+    assert outcome.exec_ok is None
+
+
+def test_a_first_turn_expected_to_give_sql_breaks_the_premise_when_it_asks(mock_store):
+    outcome, _ = score(after_clarify_question(first_expect="sql"), make_clarify(), make_result(), store=mock_store)
+
+    assert (outcome.premise_ok, outcome.exec_ok) == (False, False)
+    assert outcome.attribution == "第一轮没有给出 SQL（状态 need_clarify），题目前提不成立"
+
+
+@pytest.mark.parametrize("question, second, expected", [
+    # 新问题被当成了回答：① 不许再问，④ 也就没问
+    (after_clarify_question(expect="clarify"), judged(make_result(), True), "① 把新问题当成了对上一轮反问的回答"),
+    (after_clarify_question(expect="clarify"), judged(make_result(), False), "④ 该反问没有反问"),
+    # 回答没被认出来，又反问了一次
+    (after_clarify_question(), judged(make_clarify(), False), "① 没认出本轮是在回答上一轮的反问"),
+    (after_clarify_question(), judged(make_clarify(by_parser=True), False), "① 没认出本轮是在回答上一轮的反问"),
+    (after_clarify_question(), judged(make_clarify(), True), "④ 多余的反问"),
+    (after_clarify_question(), make_clarify(), "④ 多余的反问"),                    # 没有解析结果时按原来的规则
+    # 追问题不看 ① 的这项判断
+    (sql_question("F1", turns=("甲", "乙"), category="追问"), judged(make_clarify(), False), "④ 多余的反问"),
+], ids=["新问题当成回答", "新问题没反问", "回答没认出", "回答没认出-①问的", "认出了还问", "没有解析结果", "追问题"])
+def test_attribution_points_at_the_parser_when_it_misjudges_an_answer(question, second, expected, mock_store):
+    outcome, _ = score(question, make_clarify(), second, store=mock_store)
+
+    assert outcome.attribution == expected
 
 
 # ── 归因 ─────────────────────────────────────────────────
@@ -785,6 +863,33 @@ def test_report_by_category_marks_the_clarify_category(small_summary):
     assert "| 反问（按反问准确率） | 0/2（0.0%） | 2/2（100.0%） | 2/2（100.0%） |" in section
 
 
+def test_report_counts_a_mixed_category_by_what_each_question_expects(tmp_path, mock_store):
+    questions = [after_clarify_question("N1", expect="clarify", turns=("甲", "甲二")),
+                 after_clarify_question("N2", turns=("乙", "乙二")),
+                 after_clarify_question("N3", turns=("丙", "丙二")),
+                 after_clarify_question("N4", turns=("丁", "丁二"))]
+    pipeline = FakePipeline(by_text({
+        "甲": make_clarify(), "甲二": make_clarify(),                            # 新问题照常反问：对
+        "乙": make_clarify(), "乙二": make_result(),                             # 回答之后给出 SQL：对
+        "丙": make_result(requirement="丙的完整需求"), "丙二": make_result(),      # 第一轮没反问：前提不成立
+        "丁": make_clarify(), "丁二": make_result(sql=OTHER_SQL),                # 回答之后 SQL 不对
+    }))
+    summary = run_eval(pipeline, questions, ["C"], store=mock_store, executor=FakeExecutor(), today=TODAY,
+                       run_dir=tmp_path)
+
+    report = render_report(summary, questions)
+
+    assert "题目前提不成立" in report.split("## 一、")[1].split("## 二、")[0]       # 分母的说明里写了这条规则
+    section = report.split("## 三、")[1].split("## 四、")[0]
+    assert "| 反问之后（期望反问的题按反问准确率） | 2/4（50.0%） |" in section
+    wrong = report.split("## 五、")[1].split("## 六、")[0]
+    premise = wrong.split("#### N3")[1].split("####")[0]
+    assert "- 归因：第一轮没有反问（状态 ok），题目前提不成立" in premise
+    assert "- 第一轮：给出了 SQL，没有反问（完整需求：丙的完整需求）" in premise
+    answered = wrong.split("#### N4")[1].split("####")[0]
+    assert "- 第一轮：反问「要不要含保证金？」（不含保证金；含保证金）" in answered
+
+
 def test_report_details_for_wrong_answers_have_requirement_sql_gold_and_attribution(small_summary):
     summary, questions = small_summary
 
@@ -1093,14 +1198,25 @@ def test_load_outcomes_skips_records_it_cannot_read_and_keeps_the_last_of_duplic
     assert found[("C", "Q1")].attribution == "后来重跑的"
 
 
+def test_load_outcomes_reads_old_records_without_the_premise(tmp_path):
+    record = nl2sql_eval.outcome_to_record(make_outcome())
+    del record["premise_ok"]                                        # 加这一项之前写的记录
+    (tmp_path / "C.jsonl").write_text(json.dumps(record, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+
+    done = load_outcomes(tmp_path, ["C"])
+
+    assert done[("C", "Q1")].premise_ok is None
+
+
 # ── 用真实题库、真实库和校验器走一遍 ──────────────────────
 
 def perfect_responses(questions, validator, use_alternatives: bool):
     """一个完美的流水线：每道题都给出标准 SQL（或登记的另一种写法），反问题都反问"""
     mapping = {}
-    for question in questions:                                      # 追问题的第一轮先放一个占位结果
+    for question in questions:                                      # 两轮的题的第一轮先放一个占位结果
         if len(question.turns) == 2:
-            mapping[question.turns[0]] = make_result(requirement=f"{question.id} 的第一轮")
+            first = make_clarify() if question.first_expect == "clarify" else make_result()
+            mapping[question.turns[0]] = first.model_copy(update={"requirement": f"{question.id} 的第一轮"})
     for question in questions:
         text = question.turns[-1]
         if question.expect == "clarify":
@@ -1124,9 +1240,11 @@ def test_a_perfect_pipeline_gets_every_metric_right_on_the_real_question_bank(tm
 
     for config in "ABC":
         metrics = compute_metrics([o for o in summary.outcomes if o.config == config])
-        assert (metrics.questions, metrics.sql_questions) == (40, 35)
-        assert (metrics.exec_ok, metrics.recall_ok, metrics.table_ok, metrics.column_ok) == (35, 35, 35, 35), config
-        assert (metrics.clarify_ok, metrics.follow_up_ok, metrics.follow_up) == (40, 5, 5)
+        assert (metrics.questions, metrics.sql_questions) == (43, 37)
+        assert (metrics.exec_ok, metrics.recall_ok, metrics.table_ok, metrics.column_ok) == (37, 37, 37, 37), config
+        assert (metrics.clarify_ok, metrics.follow_up_ok, metrics.follow_up) == (43, 5, 5)
+        premises = {o.question_id: o.premise_ok for o in summary.outcomes if o.config == config and o.premise_ok}
+        assert premises == {"N01": True, "N02": True, "N03": True}
         wrong = [(o.question_id, o.attribution, o.exec_error) for o in summary.outcomes
                  if o.config == config and o.attribution]
         assert wrong == [], wrong

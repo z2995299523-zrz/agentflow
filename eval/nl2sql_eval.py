@@ -62,12 +62,12 @@ class QuestionOutcome:
     category: str
     expect: str
     results: list[QueryResult]                # 每一轮一个
-    exec_ok: bool | None                      # 期望反问的题为 None
+    exec_ok: bool | None                      # 期望反问的题为 None；题目前提不成立时为 False
     exec_error: str                           # 生成 SQL 转换或执行报错
     recall_ok: bool | None
     table_ok: bool | None
     column_ok: bool | None
-    clarify_ok: bool                          # 该问的问了、不该问的没问
+    clarify_ok: bool                          # 该问的问了、不该问的没问；题目前提不成立时为 False
     first_pass_ok: bool | None
     final_ok: bool | None
     elapsed_ms: int
@@ -76,6 +76,8 @@ class QuestionOutcome:
     attribution: str                          # 对的题为空
     # SQL 用的表包含某一组标准用表（多关联一张不影响结果的维表也算）；期望反问的题、旧记录里没有这一项时为 None
     table_contains_ok: bool | None = None
+    # 题目前提成立：写了第一轮期望的题，第一轮停在了期望的地方（例如反问）；没写的题、旧记录里没有这一项时为 None
+    premise_ok: bool | None = None
 
 
 @dataclass
@@ -139,6 +141,8 @@ def evaluate_question(pipeline: PipelineLike, question: EvalQuestion, config: st
     """跑一道题并计分，不抛异常
 
     追问题跑两轮：第二轮带上第一轮的完整需求，第一轮反问了的话再带上反问；以最后一轮的结果计分。
+    题目写了第一轮的期望（first_expect）时，第一轮没停在那里就是题目前提不成立：第二轮测的不是题目要测的情形，
+    这道题按答错计，执行、反问两项都算错，生成的 SQL 不再执行。
 
     Args:
         pipeline: 流水线
@@ -206,14 +210,18 @@ def _tokens(results: Sequence[QueryResult]) -> int:
 
 def _score(question: EvalQuestion, config: str, results: list[QueryResult], groups: list[AnswerGroup],
            executor: Executor, gold_cache: _GoldResults) -> QuestionOutcome:
-    """按最后一轮的结果给一道题计分"""
+    """按最后一轮的结果给一道题计分；题目前提不成立时执行、反问两项都算错，选表、字段照常诊断最后一轮"""
     final = results[-1]
     wants_sql = question.expect == "sql"
+    premise_ok = _premise_ok(question, results)
     exec_ok: bool | None = None
     exec_error = ""
     recall_ok = table_ok = column_ok = table_contains_ok = None
     if wants_sql:
-        exec_ok, exec_error = _execute_and_compare(question, final, executor, gold_cache)
+        if premise_ok is False:
+            exec_ok = False                         # 最后一轮的结果不算数，不再执行
+        else:
+            exec_ok, exec_error = _execute_and_compare(question, final, executor, gold_cache)
         validation = final.validation
         candidates = set(final.candidate_tables)
         used = set(validation.tables) if validation is not None else set()
@@ -221,16 +229,27 @@ def _score(question: EvalQuestion, config: str, results: list[QueryResult], grou
         table_ok = validation is not None and any(used == group.tables for group in groups)
         table_contains_ok = validation is not None and any(group.tables <= used for group in groups)
         column_ok = validation is not None and any(group.columns <= set(validation.columns) for group in groups)
-    clarify_ok = (final.status == "need_clarify") == (question.expect == "clarify")
+    clarify_ok = premise_ok is not False and (final.status == "need_clarify") == (question.expect == "clarify")
     correct = exec_ok if wants_sql else clarify_ok
-    attribution = "" if correct else _attribute(question.expect, final, recall_ok, table_ok, column_ok, exec_error)
+    attribution = "" if correct else _attribute(question, results, premise_ok, recall_ok, table_ok, column_ok,
+                                                exec_error)
     return QuestionOutcome(
         config=config, question_id=question.id, category=question.category, expect=question.expect, results=results,
         exec_ok=exec_ok, exec_error=exec_error, recall_ok=recall_ok, table_ok=table_ok, column_ok=column_ok,
         clarify_ok=clarify_ok, first_pass_ok=final.first_pass_ok,
         final_ok=None if final.status not in SQL_STATUSES else final.status == "ok",
         elapsed_ms=sum(item.elapsed_ms for item in results), llm_calls=sum(item.llm_calls for item in results),
-        tokens=_tokens(results), attribution=attribution, table_contains_ok=table_contains_ok)
+        tokens=_tokens(results), attribution=attribution, table_contains_ok=table_contains_ok, premise_ok=premise_ok)
+
+
+def _premise_ok(question: EvalQuestion, results: Sequence[QueryResult]) -> bool | None:
+    """题目前提成不成立：写了第一轮期望的题，看第一轮是不是停在了那里；没写的题为 None"""
+    if question.first_expect is None:
+        return None
+    first = results[0]
+    if question.first_expect == "clarify":
+        return first.status == "need_clarify"
+    return first.status in SQL_STATUSES
 
 
 def _execute_and_compare(question: EvalQuestion, final: QueryResult, executor: Executor,
@@ -256,23 +275,33 @@ def _execute_and_compare(question: EvalQuestion, final: QueryResult, executor: E
         return False, f"比对出错：{type(error).__name__}: {error}"
 
 
-def _attribute(expect: str, final: QueryResult, recall_ok: bool | None, table_ok: bool | None,
-               column_ok: bool | None, exec_error: str) -> str:
+def _attribute(question: EvalQuestion, results: Sequence[QueryResult], premise_ok: bool | None,
+               recall_ok: bool | None, table_ok: bool | None, column_ok: bool | None, exec_error: str) -> str:
     """给一道错题归因，按顺序取第一条命中的
 
+    0. 题目前提不成立：第一轮没停在题目要求的地方
     1. 流水线失败：停在哪一步，加原因前 60 字
-    2. 多余的反问，或该反问没有反问
+    2. 多余的反问，或该反问没有反问；第一轮必须反问的题，① 把「是不是在回答上一轮的反问」判断反了的，归到 ①
     3. 召回漏表  4. 选表不对  5. 字段或口径不对
     6. 有执行或方言转换的报错（报告里单列）
     7. 修正两次仍没通过校验
     8. 其余：SQL 能跑，结果与标准答案不一致
     """
+    final = results[-1]
+    if premise_ok is False:
+        wanted = "反问" if question.first_expect == "clarify" else "给出 SQL"
+        return f"第一轮没有{wanted}（状态 {results[0].status}），题目前提不成立"
     if final.status == "failed":
         message = " ".join(final.message.split())[:60]
         return f"停在 {final.failed_step or '未知步骤'}：{message}"
-    if expect == "sql" and final.status == "need_clarify":
+    answered = _judged_as_answer(question, final)
+    if question.expect == "sql" and final.status == "need_clarify":
+        if answered is False:
+            return "① 没认出本轮是在回答上一轮的反问"
         return "④ 多余的反问" if final.plan is not None else "① 多余的反问"
-    if expect == "clarify" and final.status != "need_clarify":
+    if question.expect == "clarify" and final.status != "need_clarify":
+        if answered is True:
+            return "① 把新问题当成了对上一轮反问的回答"
         return "④ 该反问没有反问"
     if recall_ok is False:
         return "② 召回漏表"
@@ -285,6 +314,13 @@ def _attribute(expect: str, final: QueryResult, recall_ok: bool | None, table_ok
     if final.status == "unvalidated":
         return "⑥ 修正两次仍未通过校验"
     return "⑤ SQL 与标准答案的结果不一致"
+
+
+def _judged_as_answer(question: EvalQuestion, final: QueryResult) -> bool | None:
+    """第一轮必须反问的题，① 在最后一轮判断的「本轮是不是在回答上一轮的反问」；别的题、没有解析结果时为 None"""
+    if question.first_expect != "clarify" or final.parsed is None:
+        return None
+    return final.parsed.answers_clarify
 
 
 # ═══════════════ 并发运行与落盘 ═══════════════
@@ -618,7 +654,9 @@ def _report_comparison(configs: list[str], metrics: dict[str, Metrics]) -> list[
         lines.append(f"| {label}（{unit}） | " + " | ".join(getter(metrics[config]) for config in configs) + " |")
     lines += ["",
               "分母：执行、召回、选表、字段准确率是需要 SQL 的题；校验两项是流水线给出了 SQL 的题；"
-              "反问准确率是全部题；追问准确率是追问题的执行准确率。", ""]
+              "反问准确率是全部题；追问准确率是追问题的执行准确率。"
+              "两轮的题写了第一轮的期望时（「反问之后」类要求第一轮反问），第一轮没停在那里就是题目前提不成立，"
+              "执行、反问两项都按错计。", ""]
     return lines
 
 
@@ -641,6 +679,11 @@ def _report_contribution(configs: list[str], metrics: dict[str, Metrics]) -> lis
     return lines
 
 
+def _is_correct(outcome: QuestionOutcome) -> bool:
+    """一道题算不算对：期望 SQL 的题看执行结果，期望反问的题看反问判对没有"""
+    return outcome.exec_ok is True if outcome.expect == "sql" else outcome.clarify_ok
+
+
 def _report_categories(configs: list[str], outcomes: dict[str, list[QuestionOutcome]],
                        questions: Sequence[EvalQuestion]) -> list[str]:
     categories = list(dict.fromkeys([question.category for question in questions] +
@@ -651,15 +694,14 @@ def _report_categories(configs: list[str], outcomes: dict[str, list[QuestionOutc
         members = {config: [item for item in outcomes[config] if item.category == category] for config in configs}
         if not any(members.values()):
             continue
-        clarify_only = all(item.expect == "clarify" for config in configs for item in members[config])
-        cells = []
-        for config in configs:
-            items = members[config]
-            if clarify_only:
-                cells.append(_rate_text(sum(item.clarify_ok for item in items), len(items)))
-            else:
-                cells.append(_rate_text(sum(item.exec_ok is True for item in items), len(items)))
-        label = f"{category}（按反问准确率）" if clarify_only else category
+        expects = {item.expect for config in configs for item in members[config]}
+        cells = [_rate_text(sum(_is_correct(item) for item in members[config]), len(members[config]))
+                 for config in configs]
+        label = category
+        if expects == {"clarify"}:
+            label = f"{category}（按反问准确率）"
+        elif "clarify" in expects:
+            label = f"{category}（期望反问的题按反问准确率）"
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     lines.append("")
     return lines
@@ -698,6 +740,8 @@ def _report_wrong_answers(configs: list[str], outcomes: dict[str, list[QuestionO
 def _wrong_answer_block(item: QuestionOutcome, question: EvalQuestion | None) -> list[str]:
     final = item.results[-1] if item.results else None
     lines = [f"#### {item.question_id} {item.category}", "", f"- 归因：{item.attribution}"]
+    if len(item.results) > 1:
+        lines.append(f"- 第一轮：{_turn_text(item.results[0])}")
     if final is not None:
         lines.append(f"- 状态：{final.status}" + (f"（停在 {final.failed_step}）" if final.status == "failed" else ""))
         lines.append(f"- 完整需求：{final.requirement or '（没有）'}")
@@ -716,6 +760,18 @@ def _wrong_answer_block(item: QuestionOutcome, question: EvalQuestion | None) ->
     if question is not None and question.gold_sql:
         lines += ["标准 SQL：", "", "```sql", question.gold_sql.strip(), "```", ""]
     return lines
+
+
+def _turn_text(result: QueryResult) -> str:
+    """一轮结果的简述：反问了什么、给出了 SQL，或者停在哪一步"""
+    if result.status == "need_clarify" and result.clarify is not None:
+        options = "；".join(option.label for option in result.clarify.options)
+        return f"反问「{result.clarify.question}」（{options}）"
+    if result.status in SQL_STATUSES:
+        return f"给出了 SQL，没有反问（完整需求：{result.requirement or '没有'}）"
+    if result.status == "failed":
+        return f"停在 {result.failed_step or '未知步骤'}：{_one_line(result.message, 60)}"
+    return f"状态 {result.status}"
 
 
 # ═══════════════ 真实库静态评估 ═══════════════

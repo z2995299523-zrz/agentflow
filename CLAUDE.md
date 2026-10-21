@@ -15,7 +15,7 @@ python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel �
 python -m data.mock_mart.build_mock       # 重新生成模拟专题库（固态盘约 15 秒，机械盘约 1.5 分钟）
 python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
 
-python run_eval.py                        # 模拟库三组对照评估（调 DeepSeek，40 题约 3 分钟），流程见 /run-eval
+python run_eval.py                        # 模拟库三组对照评估（调 DeepSeek，43 题约 3 分钟），流程见 /run-eval
 uvicorn main:app --port 8000              # 接口 → http://localhost:8000/docs，启动后在后台预热流水线
 cd web && npm install && npm run dev      # 界面开发 → http://localhost:5173，/api 转给 8000
 cd web && npm run build                   # 前端类型检查加构建；只查类型用 npm run typecheck
@@ -74,7 +74,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
   - 启动时在后台线程预热（`service.warm_up`：装配流水线、加载 BGE）
 - `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问
 - `web/`：查数页（七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
-- `eval/`：40 题题库（10 题登记了其它正确答案）、结果比对、三组对照评估与错题归因、真实库静态评估；报告在 `eval/reports/`
+- `eval/`：43 题题库（11 题登记了其它正确答案；「反问之后」3 题测上一轮停在反问上的下一轮，第一轮没反问按答错计）、结果比对、三组对照评估与错题归因、真实库静态评估；报告在 `eval/reports/`
 
 ## 约定
 

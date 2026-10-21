@@ -1016,7 +1016,7 @@ def test_gold_sql_has_no_errors(validator, question):
 
 
 def test_gold_sql_count():
-    assert len(GOLD) == 35
+    assert len(GOLD) == 37
 
 
 @pytest.mark.parametrize("script, sql", mock_selects(), ids=[name for name, _ in mock_selects()])

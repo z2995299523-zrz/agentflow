@@ -110,7 +110,7 @@ Docker：`docker-compose up -d` 起两个容器，接口 `api`（镜像构建时
 
 ```bash
 python run_tests.py      # 单元测试（1552 项，不调模型、不加载 BGE）
-python run_eval.py       # 模拟库三组对照评估（调用 DeepSeek，40 题，几分钟）
+python run_eval.py       # 模拟库三组对照评估（调用 DeepSeek，43 题，几分钟）
 ```
 
 ### 评估基线（模拟库，2026-10-17，deepseek-chat）

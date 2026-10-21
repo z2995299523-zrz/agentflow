@@ -1025,7 +1025,7 @@ def question_recall(retriever, question) -> tuple[RecallQuery, RecallResult]:
 
 @pytest.fixture(scope="module")
 def mock_recalls(mock_retriever) -> dict[str, tuple[RecallQuery, RecallResult]]:
-    """35 道 SQL 题各自的检索词和召回结果"""
+    """37 道 SQL 题各自的检索词和召回结果"""
     return {question.id: question_recall(mock_retriever, question) for question in SQL_QUESTIONS}
 
 
@@ -1034,17 +1034,17 @@ def build_all(mock_store, mock_graph, mock_recalls, **options) -> dict[str, Evid
             for qid, (query, recall) in mock_recalls.items()}
 
 
-def test_gold_tables_of_all_35_questions_reach_the_evidence(mock_store, mock_graph, mock_recalls):
+def test_gold_tables_of_all_37_questions_reach_the_evidence(mock_store, mock_graph, mock_recalls):
     evidences = build_all(mock_store, mock_graph, mock_recalls, use_lineage=True, use_examples=True)
 
-    assert len(evidences) == 35
+    assert len(evidences) == 37
     for question in SQL_QUESTIONS:
         ids = set(evidences[question.id].table_ids())
         assert set(question.gold_tables) <= ids, question.id
         assert {item.table_id for item in mock_recalls[question.id][1].tables} <= ids, question.id    # 证据的表包含召回的表
 
 
-def test_the_evidence_of_35_questions_takes_under_two_seconds(mock_store, mock_graph, mock_recalls):
+def test_the_evidence_of_37_questions_takes_under_two_seconds(mock_store, mock_graph, mock_recalls):
     timings = []
     for _ in range(2):                                                          # 取较快的一遍，别让别的进程抢 CPU 影响判断
         started = time.perf_counter()
@@ -1054,7 +1054,7 @@ def test_the_evidence_of_35_questions_takes_under_two_seconds(mock_store, mock_g
     assert min(timings) < 2.0, timings
 
 
-def test_every_evidence_of_the_35_questions_is_consistent(mock_store, mock_graph, mock_recalls):
+def test_every_evidence_of_the_37_questions_is_consistent(mock_store, mock_graph, mock_recalls):
     for qid, evidence in build_all(mock_store, mock_graph, mock_recalls, use_lineage=True, use_examples=True).items():
         ids = evidence.table_ids()
         assert len(ids) == len(set(ids)), qid                                      # 一张表只出现一次
@@ -1103,7 +1103,7 @@ def test_the_same_input_gives_the_same_evidence_and_leaves_the_input_alone(mock_
         assert (query, recall) == before, qid
 
 
-# 子进程里跑的脚本：35 道题的证据（A 组和 C 组各一份）打印成 JSON。换 PYTHONHASHSEED 重复跑，结果必须逐字相同
+# 子进程里跑的脚本：37 道题的证据（A 组和 C 组各一份）打印成 JSON。换 PYTHONHASHSEED 重复跑，结果必须逐字相同
 CHILD_SCRIPT = """
 import json, os, sys
 os.environ["METADATA_EMBEDDER"] = "hash"
@@ -1152,4 +1152,4 @@ def test_evidence_does_not_depend_on_the_hash_seed():
         assert child.returncode == 0, stderr
         outputs.append(stdout)
     assert outputs[0] == outputs[1]
-    assert len(json.loads(outputs[0])) == 70
+    assert len(json.loads(outputs[0])) == 74

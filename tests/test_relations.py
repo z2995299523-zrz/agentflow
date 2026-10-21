@@ -1,5 +1,5 @@
 """关联关系推导的测试：对应关系判定、键域、四种来源的优先级与定向去重、各项上限、报告节，
-以及跨模块验收（推导出的关联让 35 道标准 SQL 通过 R6）"""
+以及跨模块验收（推导出的关联让 37 道标准 SQL 通过 R6）"""
 import random
 from collections import Counter
 from pathlib import Path
@@ -879,7 +879,7 @@ def test_gold_sql_has_no_errors_and_no_warnings_with_derived_relations(validator
 
 
 def test_gold_sql_count():
-    assert len(GOLD) == 35
+    assert len(GOLD) == 37
 
 
 # ── 只用表结构的关联（对照实验 A 组的关联路径） ──────────────

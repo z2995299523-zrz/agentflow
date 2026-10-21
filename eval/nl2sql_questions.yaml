@@ -6,17 +6,19 @@
 # 字段说明：
 #   id            题目编号
 #   category      类别
-#   turns         用户输入，追问题有两轮
-#   expect        sql 表示期望生成 SQL，clarify 表示期望被反问
+#   turns         用户输入，追问、反问之后的题有两轮
+#   expect        sql 表示期望生成 SQL，clarify 表示期望被反问（两轮的题指第二轮）
+#   first_expect  两轮的题第一轮的期望（可选）：clarify 表示第一轮必须反问。第一轮没停在那里，第二轮测的就不是
+#                 题目要测的情形，这道题按答错计，归因写「题目前提不成立」。不写表示第一轮不计分
 #   ordered       结果是否要求行顺序（默认 false）
 #   gold_tables   标准用表
 #   gold_columns  关键字段
-#   gold_sql      标准 SQL（追问题是第二轮的标准 SQL）
+#   gold_sql      标准 SQL（两轮的题是第二轮的标准 SQL）
 #   alternatives  其它正确写法（可选）：sql 是另一种写法，columns 是这种写法的关键字段（写成 表.字段，空表示同 gold_columns）。
 #                 评估时选表、字段按标准答案和各条其它写法中的任一组算对；每条都要在模拟库上与标准 SQL 结果一致、
 #                 能通过静态校验，由 tests/test_questions.py 保证。
 #                 用机构汇总表（ads.org_corp_dep_bal_d）答的题，客户汇总表（ads.corp_cust_dep_bal_d）按机构 GROUP BY
-#                 也能得到同样的结果，所以这 10 道题都登记了客户汇总表的写法。
+#                 也能得到同样的结果，所以这 11 道题都登记了客户汇总表的写法。
 #
 # 有涉及维度列的题目，题面里都写明了要列出哪些列，避免因为多列少列产生争议。
 # 比率类的题，题面要写明「用百分比表示并保留两位小数」：比对时数值按两位小数取整，小于 1 的比率会失去区分度。
@@ -579,3 +581,54 @@
     SELECT SUM(npl_bal_rmb) AS npl_bal_rmb
     FROM ads.corp_cust_loan_bal_d
     WHERE data_dt = DATE '2026-09-30'
+
+# ═══════════════ 反问之后：上一轮停在反问上，本轮是回答还是新问题 ═══════════════
+# 第一轮都必须反问（first_expect: clarify）：N01、N02 的第一轮是 A01 的题面，④ 反问存款含不含保证金；
+# N03 的第一轮没说是哪个客户，① 反问。
+# N01 的第二轮是一个本身需要反问的新问题，题面里恰好带了上一轮选项的词（不含保证金）：
+#     应当按新问题处理、照常反问日均的统计区间，不能当成对上一轮反问的回答。
+# N02、N03 的第二轮是真正的回答：按回答补全需求，不能再反问。
+
+- id: N01
+  category: 反问之后
+  turns:
+    - "查 2026 年 9 月末各开户机构的对公存款余额，列出机构号和余额"
+    - "查 2026 年 9 月末全行不含保证金的对公存款日均余额"
+  first_expect: clarify
+  expect: clarify
+
+- id: N02
+  category: 反问之后
+  turns:
+    - "查 2026 年 9 月末各开户机构的对公存款余额，列出机构号和余额"
+    - "含保证金的"
+  first_expect: clarify
+  expect: sql
+  gold_tables: [ads.org_corp_dep_bal_d]
+  gold_columns: [ads.org_corp_dep_bal_d.dep_bal_tot_rmb, ads.org_corp_dep_bal_d.org_no]
+  gold_sql: |
+    SELECT org_no, dep_bal_tot_rmb
+    FROM ads.org_corp_dep_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+  alternatives:
+    - columns: [ads.corp_cust_dep_bal_d.dep_bal_tot_rmb, ads.corp_cust_dep_bal_d.org_no]
+      sql: |
+        SELECT org_no, SUM(dep_bal_tot_rmb) AS dep_bal_tot_rmb
+        FROM ads.corp_cust_dep_bal_d
+        WHERE data_dt = DATE '2026-09-30'
+        GROUP BY org_no
+
+- id: N03
+  category: 反问之后
+  turns:
+    - "看一下 2026 年 9 月末某个客户的对公贷款余额"
+    - "客户号 C000008"
+  first_expect: clarify
+  expect: sql
+  gold_tables: [ads.corp_cust_loan_bal_d]
+  gold_columns: [ads.corp_cust_loan_bal_d.loan_bal_rmb, ads.corp_cust_loan_bal_d.cust_no]
+  gold_sql: |
+    SELECT SUM(loan_bal_rmb) AS loan_bal_rmb
+    FROM ads.corp_cust_loan_bal_d
+    WHERE data_dt = DATE '2026-09-30'
+      AND cust_no = 'C000008'
