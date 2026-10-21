@@ -203,7 +203,8 @@ class QueryBody(QuestionBody):
     """查数请求。追问、反问的上下文由调用方带来：把上一轮结果里的 requirement、clarify 原样放回来"""
 
     prev_requirement: str = Field("", description="上一轮的完整需求（上一轮结果里的 requirement）；追问时带上", max_length=4000)
-    prev_clarify: Clarify | None = Field(None, description="上一轮提出的反问；有值表示本轮的 question 是对它的回答")
+    prev_clarify: Clarify | None = Field(None, description="上一轮提出、还没回答的反问；本轮的 question 是在回答它"
+                                                           "还是问了新问题，由流水线判断")
 
     def to_request(self) -> QueryRequest:
         """转成流水线的请求；今天按系统日期，请求体里不收"""

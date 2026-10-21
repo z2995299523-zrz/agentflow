@@ -1,6 +1,7 @@
 /**
  * 输入框：Enter 发送，Shift+Enter 换行；输入法选字时按 Enter 不发送
- * 上面一行写明这一句会怎么理解：回答上一轮的反问、接着上一轮追问，还是一个新需求
+ * 上面一行写明这一句会怎么理解：回答上一轮的反问、接着上一轮追问，还是一个新需求。
+ * 有反问没回答时也可以直接问新问题（是不是在回答由服务端的 ① 判断），或者开新会话
  */
 import { BranchesOutlined, QuestionCircleOutlined, SendOutlined } from '@ant-design/icons'
 import { Button, Input } from 'antd'
@@ -36,7 +37,11 @@ export default function Composer({ value, onChange, onSend, busy, disabled, cont
     <div className="composer">
       {context?.prev_clarify ? (
         <div className="composer-context clarify">
-          <QuestionCircleOutlined /> 上一轮在等你确认：{context.prev_clarify.question} 点上面的选项，或者直接写你的口径
+          <QuestionCircleOutlined />
+          <span>
+            上一轮在等你确认：{context.prev_clarify.question} 点上面的选项或者直接写你的口径；不想回答，也可以直接问新的问题
+          </span>
+          <Button type="link" size="small" onClick={() => navigate('/')}>开新会话</Button>
         </div>
       ) : context?.prev_requirement ? (
         <div className="composer-context">

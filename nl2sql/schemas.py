@@ -42,7 +42,7 @@ class QueryRequest(BaseModel):
 
     question: str                             # 本轮输入
     prev_requirement: str = ""                # 上一轮的完整需求
-    prev_clarify: Clarify | None = None       # 上一轮提出的反问；有值表示本轮是对它的回答
+    prev_clarify: Clarify | None = None       # 上一轮提出、还没回答的反问；本轮是在回答它还是问了新问题，由 ① 判断
     today: date | None = None                 # None 时用系统日期
     use_lineage: bool = True                  # 对照开关：A 组 False/False，B 组 True/False，C 组 True/True
     use_examples: bool = True
@@ -79,6 +79,8 @@ class ParsedRequest(BaseModel):
 
     is_query: bool
     reply: str = ""                           # 不是查数需求时给用户的回复，说明工具能做什么
+    answers_clarify: bool = False             # 本轮输入是不是在回答上一轮的反问；是回答时 ① ④ 都不能再反问，
+                                              # 没理会反问、问了新问题时照常能反问。没有上一轮的反问时一律为 False
     requirement: str = ""                     # 完整需求复述，一句自包含的话
     metrics: list[Metric] = Field(default_factory=list)
     dimensions: list[str] = Field(default_factory=list)
@@ -89,6 +91,7 @@ class ParsedRequest(BaseModel):
     sub_questions: list[str] = Field(default_factory=list)    # 一句话里有几个问题时逐个列出；只有一个时为空
     assumptions: list[str] = Field(default_factory=list)      # 按默认处理的地方：「「最新」按上一自然日 2026-10-12」
     clarify: Clarify | None = None            # 是查数需求、但缺了没法默认的要素（哪个对象、看哪些指标）时的反问；口径分岔归 ④
+                                              # 在回答上一轮的反问（answers_clarify 为真）时不能有
 
 
 # ── ③ 证据 ────────────────────────────────────

@@ -125,6 +125,26 @@ def test_parser_examples_are_valid_parsed_requests():
     assert any(item.assumptions and item.clarify is None and "第一个选项" in item.assumptions[0] for item in parsed)
 
 
+def pending_clarify_examples() -> list[ParsedRequest]:
+    """① 的示例里上一轮停在反问上的那几个（示例前面写了「上一轮的反问」），按出现的顺序"""
+    examples = []
+    for match in re.finditer(r"((?:(?!```).)*?)```json\n(.*?)```", PARSER_SYSTEM, re.S):
+        if "上一轮的反问：" in match.group(1):
+            examples.append(ParsedRequest.model_validate(json.loads(match.group(2))))
+    return examples
+
+
+def test_the_parser_examples_show_both_an_answer_and_a_new_question_after_a_clarify():
+    """上一轮停在反问上：一个示例是回答（不能再问，按第一个选项），一个是没理会反问的新问题（照常反问）"""
+    answer, new_question = pending_clarify_examples()
+
+    assert all(check_parsed(item, pending_clarify=True) == [] for item in (answer, new_question))
+    assert answer.answers_clarify and answer.clarify is None and "第一个选项" in answer.assumptions[0]
+    assert not new_question.answers_clarify and new_question.clarify is not None
+    assert "没有回答上一轮的反问" in new_question.assumptions[0]
+    assert "保证金" not in new_question.requirement                     # 上一轮的需求和反问都不带过来
+
+
 def test_the_parser_example_lists_objects_as_a_query_even_after_an_unrelated_round():
     """只列某类对象的信息也是查数需求：指标写对象的叫法、不带被计数的实体；和上一轮接不上时按新需求解析"""
     before, _, after = PARSER_SYSTEM.partition("用户输入：查询客户经理的信息")
@@ -304,6 +324,7 @@ def test_parser_user_message_carries_the_previous_clarify_with_its_options():
     assert "选项 1：不含保证金（用存款余额字段，加工时剔除了保证金账户）" in user
     assert "选项 2：含保证金" in user
     assert "对这个反问的回答" in user and "本轮输入：含保证金的" in user
+    assert "问了一个新问题" in user and "answers_clarify" in user          # 是不是回答由模型判断
 
 
 def test_a_previous_clarify_is_shown_even_without_a_previous_requirement():
@@ -565,6 +586,8 @@ def test_clarify_rules_name_the_usual_splits_and_forbid_choosing_a_caliber_by_de
 def test_the_parser_asks_back_only_for_a_missing_object_or_metric_and_never_while_answering():
     assert "要看的是单个对象" in PARSER_SYSTEM and "口径的分岔" in PARSER_SYSTEM
     assert "回答反问时 clarify 写 null" in PARSER_SYSTEM
+    assert "没理会反问，问了一个新问题" in PARSER_SYSTEM and "照常用 clarify 反问" in PARSER_SYSTEM
+    assert "恰好带了选项里的说法，也是新问题" in PARSER_SYSTEM                   # 带了选项的词不等于在回答
 
 
 def test_code_value_rules_tell_both_model_steps_to_filter_names_with_the_name_column():

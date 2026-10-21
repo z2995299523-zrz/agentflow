@@ -39,6 +39,7 @@ export interface Clarify {
 export interface ParsedRequest {
   is_query: boolean
   reply: string
+  answers_clarify?: boolean           // 这一轮是不是在回答上一轮的反问；早先存下的轮次没有这一项
   requirement: string
 }
 

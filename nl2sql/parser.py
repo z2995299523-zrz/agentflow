@@ -2,8 +2,9 @@
 ① 需求解析
 把本轮输入（连同上一轮的完整需求、上一轮的反问）解析成结构化的需求：是不是查数需求、完整需求复述、
 指标（计数类带被计数的实体）、维度、过滤、排序与条数、时间（相对日期按「今天」换算）、口径线索、子问题、假设。
-是查数需求、但缺了没法默认的要素（要看的单个对象没说是哪个、没说看哪些指标）时，① 自己反问一次；
-本轮已经是对反问的回答时不能再问。
+是查数需求、但缺了没法默认的要素（要看的单个对象没说是哪个、没说看哪些指标）时，① 自己反问一次。
+上一轮停在反问上时，模型还要判断本轮输入是不是在回答它（answers_clarify）：是回答就不能再问；
+没理会反问、问了新问题时照常能问，④ 也一样（见 workflow）。
 """
 import re
 from collections.abc import Iterable, Sequence
@@ -32,6 +33,9 @@ _COMPARE_HINTS = {
 def parse_request(llm: LLMClient, request: QueryRequest, today: date) -> tuple[ParsedRequest, list[CallRecord]]:
     """调模型解析需求，输出经 check_parsed 核对，不合格带着问题重试一次
 
+    上一轮停在反问上（请求里有 prev_clarify）时，本轮是不是在回答它由模型判断（answers_clarify）；
+    没有上一轮的反问时谈不上回答，answers_clarify 一律改成 False。
+
     Args:
         llm: 模型
         request: 本轮请求
@@ -43,9 +47,12 @@ def parse_request(llm: LLMClient, request: QueryRequest, today: date) -> tuple[P
     Raises:
         StepError: 模型调用失败，或者两次输出都不合格
     """
-    allow_clarify = request.prev_clarify is None
-    return structured_call(llm, "parse", parser_messages(request, today), ParsedRequest,
-                           lambda parsed: check_parsed(parsed, allow_clarify=allow_clarify))
+    pending = request.prev_clarify is not None
+    parsed, calls = structured_call(llm, "parse", parser_messages(request, today), ParsedRequest,
+                                    lambda parsed: check_parsed(parsed, pending_clarify=pending))
+    if parsed.answers_clarify and not pending:
+        parsed = parsed.model_copy(update={"answers_clarify": False})
+    return parsed, calls
 
 
 def _valid_date(text: str) -> bool:
@@ -84,10 +91,11 @@ def _check_time(time: TimeSpec) -> list[str]:
 
 
 def _check_clarify(parsed: ParsedRequest, allow_clarify: bool) -> list[str]:
-    """① 的反问：本轮能反问；有问题；至少两个带 label 的选项"""
+    """① 的反问：本轮能反问（不是在回答上一轮的反问）；有问题；至少两个带 label 的选项"""
     if not allow_clarify:
-        return ["本轮是对反问的回答，不能再反问：clarify 写 null，按用户的回答补全需求；"
-                "回答没说清的（例如「按最常用的口径处理」）按上一轮反问的第一个选项理解，写进 assumptions"]
+        return ["answers_clarify 是 true，本轮是对反问的回答，不能再反问：clarify 写 null，按用户的回答补全需求；"
+                "回答没说清的（例如「按最常用的口径处理」）按上一轮反问的第一个选项理解，写进 assumptions。"
+                "如果本轮输入其实没有回答上一轮的反问、而是问了一个新问题，就把 answers_clarify 改成 false"]
     problems = []
     if not parsed.clarify.question.strip():
         problems.append("clarify 不是 null 时必须在 clarify.question 里写一个问题")
@@ -98,16 +106,17 @@ def _check_clarify(parsed: ParsedRequest, allow_clarify: bool) -> list[str]:
     return problems
 
 
-def check_parsed(parsed: ParsedRequest, *, allow_clarify: bool = True) -> list[str]:
+def check_parsed(parsed: ParsedRequest, *, pending_clarify: bool = False) -> list[str]:
     """核对解析结果，返回能直接告诉模型怎么改的问题；合格时返回空列表
 
-    是查数需求时：完整需求非空，日期合法、个数与时间类型相符，有对比时对比日期非空；
-    没有反问时至少一个指标，有反问时要能反问、有问题、至少两个带 label 的选项（指标可以还没说清）。
+    是查数需求时：完整需求非空，日期合法、个数与时间类型相符，有对比时对比日期非空；上一轮停在反问上时
+    answers_clarify 要写明；没有反问时至少一个指标，有反问时要能反问（不是在回答上一轮的反问）、
+    有问题、至少两个带 label 的选项（指标可以还没说清）。
     不是查数需求时：回复非空。
 
     Args:
         parsed: ① 的结果
-        allow_clarify: 本轮能不能反问（本轮已经是对反问的回答时不能）
+        pending_clarify: 上一轮是不是停在反问上（请求里有 prev_clarify）；是的话本轮在回答它时不能再反问
     """
     if not parsed.is_query:
         if parsed.reply.strip():
@@ -117,7 +126,11 @@ def check_parsed(parsed: ParsedRequest, *, allow_clarify: bool = True) -> list[s
     if not parsed.requirement.strip():
         problems.append("requirement 是空的，请用一句自包含的话复述完整需求"
                         "（日期写成具体日期，口径限定词和要列出的列都保留）")
+    if pending_clarify and "answers_clarify" not in parsed.model_fields_set:
+        problems.append("用户消息里有「上一轮的反问」，请在 answers_clarify 里写明本轮输入是不是在回答这个反问："
+                        "是回答写 true，没理会反问、问了一个新问题写 false")
     if parsed.clarify is not None:
+        allow_clarify = not (pending_clarify and parsed.answers_clarify)
         return problems + _check_clarify(parsed, allow_clarify) + _check_time(parsed.time)
     if not any(metric.name.strip() for metric in parsed.metrics):
         problems.append("metrics 里没有指标，至少要写一个指标（业务叫法，如「对公贷款余额」；明细查询写最主要的度量字段，"

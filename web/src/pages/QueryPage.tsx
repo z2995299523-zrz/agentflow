@@ -8,6 +8,7 @@ import type { TextAreaRef } from 'antd/es/input/TextArea'
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 
+import type { Turn } from '../api/types'
 import { AnswerCard, PendingCard } from '../components/AnswerCard'
 import Composer from '../components/Composer'
 import ConversationList from '../components/ConversationList'
@@ -24,6 +25,15 @@ function Question({ text, time }: { text: string; time?: string }) {
       {time && <div className="question-time">{formatTime(time)}</div>}
     </div>
   )
+}
+
+/**
+ * 第 index 轮的反问是不是没人回答：看后面第一个有完整需求的轮次（和服务端算上下文的规则一样），
+ * 它的 ① 判断那一句是新问题就是没回答；早先存下的轮次没有这一项，按回答过了算
+ */
+function clarifySkipped(turns: Turn[], index: number): boolean {
+  const next = turns.slice(index + 1).find((turn) => turn.result.requirement)
+  return next?.result.parsed?.answers_clarify === false
 }
 
 export default function QueryPage() {
@@ -92,12 +102,13 @@ export default function QueryPage() {
                      )} />
             )}
             {showWelcome && <Welcome onPick={(text) => { setDraft(text); inputRef.current?.focus() }} />}
-            {turns.map((turn) => (
+            {turns.map((turn, index) => (
               <div className="turn" key={turn.id}>
                 <Question text={turn.question} time={turn.created_at} />
                 <AnswerCard
                   result={turn.result}
                   clarifyActive={turn.id === chat.detail?.context.clarify_turn_id}
+                  clarifySkipped={turn.result.status === 'need_clarify' && clarifySkipped(turns, index)}
                   busy={chat.busy}
                   dialect={health?.dialect}
                   onPick={send}

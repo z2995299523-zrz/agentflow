@@ -7,11 +7,17 @@ import type { Clarify } from '../api/types'
 interface Props {
   clarify: Clarify
   active: boolean                     // 只有还没回答的那次反问能点
+  skipped: boolean                    // 不能点了，是因为用户没回答、问了新问题（不是回答过了）
   disabled: boolean                   // 有一轮正在跑
   onPick: (label: string) => void
 }
 
-export default function ClarifyPanel({ clarify, active, disabled, onPick }: Props) {
+function tipOf(active: boolean, skipped: boolean): string {
+  if (active) return '点一个选项继续，也可以在下面直接写你的口径；不想回答，直接问新的问题也行'
+  return skipped ? '这次反问没有回答，后面换成了新的问题' : '这次反问已经回答过了'
+}
+
+export default function ClarifyPanel({ clarify, active, skipped, disabled, onPick }: Props) {
   return (
     <div className="clarify">
       <div className="clarify-question"><QuestionCircleFilled /> {clarify.question}</div>
@@ -29,9 +35,7 @@ export default function ClarifyPanel({ clarify, active, disabled, onPick }: Prop
           </button>
         ))}
       </div>
-      <Typography.Text type="secondary" className="clarify-tip">
-        {active ? '点一个选项继续，也可以在下面直接输入你的口径' : '这次反问已经回答过了'}
-      </Typography.Text>
+      <Typography.Text type="secondary" className="clarify-tip">{tipOf(active, skipped)}</Typography.Text>
     </div>
   )
 }

@@ -7,6 +7,8 @@
 - ④ 结论是 ok 时先由 prune_plan 去掉用不到的表，再去 ⑤
 
 流水线本身无状态，不带检查点：追问、反问的上下文由调用方放进 QueryRequest。
+上一轮停在反问上时，① 判断本轮是不是在回答它（ParsedRequest.answers_clarify）：是回答就 ① ④ 都不能再反问，
+免得来回反问；没理会反问、问了新问题时，新问题照常能反问。
 Pipeline.run 不向外抛异常，节点里没接住的程序错误也包成 failed（停在 internal）。
 
 对照实验的开关在这里生效（use_lineage 为假就是 A 组）：
@@ -218,18 +220,22 @@ class _Steps:
 
     # ① 需求解析
     def parse(self, state: PipelineState) -> tuple[dict[str, Any], str]:
-        """调模型解析需求；不是查数需求时流程结束，把模型给用户的回复作为原因；缺了没法默认的要素时反问"""
+        """调模型解析需求；不是查数需求时流程结束，把模型给用户的回复作为原因；缺了没法默认的要素时反问。
+        上一轮停在反问上时，摘要开头写明本轮是在回答它，还是按新问题处理"""
         parsed, calls = parse_request(self._deps.llm, state["request"], state["today"])
         updates: dict[str, Any] = {"parsed": parsed, "calls": calls}
         if not parsed.is_query:
             updates.update(status=STATUS_FAILED, failed_step="parse", message=parsed.reply)
             return updates, "不是查数需求"
-        if parsed.clarify is not None and state["request"].prev_clarify is None:
+        lead = ""
+        if state["request"].prev_clarify is not None:
+            lead = "回答上一轮的反问；" if parsed.answers_clarify else "上一轮的反问没有回答，按新问题处理；"
+        if parsed.clarify is not None and not parsed.answers_clarify:
             updates["status"] = STATUS_CLARIFY
-            return updates, f"需要反问：{parsed.clarify.question}"
+            return updates, f"{lead}需要反问：{parsed.clarify.question}"
         summary = (f"完整需求：{parsed.requirement}；指标 {len(parsed.metrics)} 个、维度 {len(parsed.dimensions)} 个、"
                    f"过滤 {len(parsed.filters)} 个；时间：{_time_text(parsed.time)}")
-        return updates, summary
+        return updates, lead + summary
 
     # ② 候选召回
     def recall(self, state: PipelineState) -> tuple[dict[str, Any], str]:
@@ -265,9 +271,9 @@ class _Steps:
     # ④ 选表定口径
     def plan(self, state: PipelineState) -> tuple[dict[str, Any], str]:
         """调模型定方案，按结论转向：反问、做不到直接结束；缺东西且没到顶就上溯一层，到顶了就失败；
-        能反问而需求只说「日均」时改成反问；结论是 ok 时先去掉用不到的表"""
+        能反问（本轮不是在回答上一轮的反问）而需求只说「日均」时改成反问；结论是 ok 时先去掉用不到的表"""
         request = state["request"]
-        allow_clarify = request.prev_clarify is None
+        allow_clarify = not state["parsed"].answers_clarify
         plan, calls = plan_query(self._deps.llm, state["parsed"], state["evidence"],
                                  allow_clarify=allow_clarify, allow_upstream=request.use_lineage)
         if allow_clarify:

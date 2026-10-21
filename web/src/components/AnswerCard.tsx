@@ -62,12 +62,13 @@ function ValidationAlerts({ result }: { result: QueryResult }) {
 interface AnswerProps {
   result: QueryResult
   clarifyActive: boolean
+  clarifySkipped: boolean             // 这一轮的反问没人回答：后面问了新问题
   busy: boolean
   dialect?: string
   onPick: (label: string) => void
 }
 
-export function AnswerCard({ result, clarifyActive, busy, dialect, onPick }: AnswerProps) {
+export function AnswerCard({ result, clarifyActive, clarifySkipped, busy, dialect, onPick }: AnswerProps) {
   const status = describeStatus(result)
   return (
     <div className={`answer answer-${status.tone}`}>
@@ -81,7 +82,8 @@ export function AnswerCard({ result, clarifyActive, busy, dialect, onPick }: Ans
       )}
       <StatusAlert result={result} />
       {result.status === 'need_clarify' && result.clarify && (
-        <ClarifyPanel clarify={result.clarify} active={clarifyActive} disabled={busy} onPick={onPick} />
+        <ClarifyPanel clarify={result.clarify} active={clarifyActive} skipped={clarifySkipped} disabled={busy}
+                      onPick={onPick} />
       )}
       {result.sql && (
         <SqlBlock sql={result.sql} dialect={dialect} validated={result.validation ? result.validation.ok : null} />

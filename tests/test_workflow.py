@@ -300,10 +300,10 @@ AVG_REQUIREMENT = "查询 2026-09-30 全行不含保证金的对公存款日均�
 ORG_DEP = "ads.org_corp_dep_bal_d"
 
 
-def avg_replies() -> list[str]:
-    """① 解析出没说统计区间的日均，④ 挑了机构汇总表的年日均"""
+def avg_replies(answers_clarify: bool = False) -> list[str]:
+    """① 解析出没说统计区间的日均，④ 挑了机构汇总表的年日均；answers_clarify 是 ① 判断的本轮是不是在回答反问"""
     parsed = parsed_json(requirement=AVG_REQUIREMENT, metrics=[Metric(name="对公存款日均余额")],
-                         caliber_hints=["不含保证金"])
+                         caliber_hints=["不含保证金"], answers_clarify=answers_clarify)
     plan = plan_json(tables=[PlanTable(table=ORG_DEP)],
                      fields=[PlanField(table=ORG_DEP, column="ytd_avg_bal_rmb", usage="metric"),
                              PlanField(table=ORG_DEP, column="data_dt", usage="filter")],
@@ -323,12 +323,24 @@ def test_an_unqualified_daily_average_is_asked_back_instead_of_guessed(make):
 
 def test_when_answering_a_clarify_the_daily_average_guard_stays_quiet(make):
     prev = Clarify(question="要不要含保证金？", options=[ClarifyOption(label="含"), ClarifyOption(label="不含")])
-    pipeline, _, _ = make([*avg_replies(), sql_reply(f"SELECT SUM(ytd_avg_bal_rmb) AS ytd_avg_bal_rmb FROM {ORG_DEP} "
-                                                     "WHERE data_dt = DATE '2026-09-30'")])
+    pipeline, _, _ = make([*avg_replies(answers_clarify=True),
+                           sql_reply(f"SELECT SUM(ytd_avg_bal_rmb) AS ytd_avg_bal_rmb FROM {ORG_DEP} "
+                                     "WHERE data_dt = DATE '2026-09-30'")])
 
     result = pipeline.run(QueryRequest(question="不含", prev_clarify=prev, today=TODAY))
 
     assert result.status == "ok"
+
+
+def test_a_new_question_after_an_unanswered_clarify_still_gets_the_daily_average_question(make):
+    prev = Clarify(question="要不要含保证金？", options=[ClarifyOption(label="含"), ClarifyOption(label="不含")])
+    pipeline, _, _ = make(avg_replies(answers_clarify=False))
+
+    result = pipeline.run(QueryRequest(question="查 2026 年 9 月末全行不含保证金的对公存款日均余额",
+                                       prev_clarify=prev, today=TODAY))
+
+    assert result.status == "need_clarify" and result.llm_calls == 2
+    assert [option.label for option in result.clarify.options] == ["年日均", "月日均"]
 
 
 # ── 失败 ──────────────────────────────────────────
@@ -391,14 +403,47 @@ def test_follow_up_sends_the_previous_requirement_to_the_parser(make):
 def test_answering_a_clarify_cannot_trigger_another_one(make):
     prev = Clarify(question="贷款余额要不要含票据贴现？", options=[ClarifyOption(label="含票据贴现"),
                                                              ClarifyOption(label="不含票据贴现")])
-    pipeline, llm, _ = make([parsed_json(), clarify_json(), clarify_json()])
+    pipeline, llm, _ = make([parsed_json(answers_clarify=True), clarify_json(), clarify_json()])
 
     result = pipeline.run(request(prev_clarify=prev))
 
     assert "贷款余额要不要含票据贴现" in llm.calls[0]["messages"][-1]["content"]      # 解析时知道上一轮问了什么
+    assert "能不能反问：不能" in llm.calls[1]["messages"][-1]["content"]
     assert result.status == "failed" and result.failed_step == "plan" and "输出两次都不合格" in result.message
     assert "不能再反问" in llm.calls[2]["messages"][-1]["content"]                  # 重试时告诉模型为什么不行
     assert result.llm_calls == 3 and result.clarify is None
+    assert result.trace[0].summary.startswith("回答上一轮的反问；完整需求：")
+
+
+SAVINGS_CLARIFY = Clarify(question="存款余额要不要包含保证金？", options=[ClarifyOption(label="不含保证金"),
+                                                                    ClarifyOption(label="含保证金")])
+
+
+def test_a_new_question_after_an_unanswered_clarify_can_be_asked_back_by_the_planner(make):
+    pipeline, llm, _ = make([parsed_json(answers_clarify=False), clarify_json()])
+
+    result = pipeline.run(request(prev_requirement="查询 2026-09-30 各开户机构的对公存款余额", prev_clarify=SAVINGS_CLARIFY))
+
+    assert "能不能反问：能" in llm.calls[1]["messages"][-1]["content"]
+    assert result.status == "need_clarify" and result.llm_calls == 2
+    assert result.clarify.question == "贷款余额要不要含票据贴现？"                  # 新问题自己的反问，下一轮回答它
+    assert result.requirement == REQUIREMENT
+    assert result.trace[0].summary.startswith("上一轮的反问没有回答，按新问题处理；完整需求：")
+
+
+def test_the_parser_can_ask_back_on_a_new_question_while_a_clarify_is_pending(make):
+    clarify = Clarify(question="要看哪个客户的贷款情况？", options=[
+        ClarifyOption(label="列出全部客户"), ClarifyOption(label="指定一个客户", meaning="请回复客户名称或客户号")])
+    asking = ParsedRequest(is_query=True, answers_clarify=False, requirement="查询某个对公客户的贷款情况", clarify=clarify)
+    pipeline, _, spy = make([asking.model_dump_json()])
+
+    result = pipeline.run(QueryRequest(question="看一下某个客户的贷款情况", today=TODAY,
+                                       prev_requirement="查询 2026-09-30 各开户机构的对公存款余额",
+                                       prev_clarify=SAVINGS_CLARIFY))
+
+    assert result.status == "need_clarify" and result.clarify == clarify and result.plan is None
+    assert spy.calls == [] and result.requirement == "查询某个对公客户的贷款情况"
+    assert result.trace[0].summary == "上一轮的反问没有回答，按新问题处理；需要反问：要看哪个客户的贷款情况？"
 
 
 # ── 对照实验的三组 ─────────────────────────────────

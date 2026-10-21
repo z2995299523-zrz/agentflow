@@ -1,4 +1,5 @@
 """① 需求解析：核对规则（每条有正例和反例）、① 的反问、检索词转换、带重试的解析"""
+import json
 from datetime import date
 
 import pytest
@@ -151,12 +152,30 @@ def test_a_clarify_needs_a_question_and_two_labelled_options():
 
 
 def test_answering_a_clarify_cannot_ask_again():
-    parsed = make_parsed(clarify=which_client("列出全部客户", "指定一个客户"))
+    parsed = make_parsed(answers_clarify=True, clarify=which_client("列出全部客户", "指定一个客户"))
 
-    (problem,) = check_parsed(parsed, allow_clarify=False)
+    (problem,) = check_parsed(parsed, pending_clarify=True)
 
     assert "不能再反问" in problem and "第一个选项" in problem
-    assert check_parsed(make_parsed(), allow_clarify=False) == []
+    assert "answers_clarify 改成 false" in problem                     # 其实是新问题时怎么改
+    assert check_parsed(make_parsed(answers_clarify=True), pending_clarify=True) == []
+
+
+def test_a_new_question_after_an_unanswered_clarify_may_ask_back():
+    parsed = make_parsed(answers_clarify=False, clarify=which_client("列出全部客户", "指定一个客户"))
+
+    assert check_parsed(parsed, pending_clarify=True) == []
+
+
+def test_a_pending_clarify_needs_an_explicit_answers_clarify():
+    silent = ParsedRequest(is_query=True, requirement="查询 2026-09-30 全行对公贷款余额",
+                           metrics=[Metric(name="对公贷款余额")])
+
+    (problem,) = check_parsed(silent, pending_clarify=True)
+
+    assert "answers_clarify" in problem and "上一轮的反问" in problem
+    assert check_parsed(silent) == []                                   # 上一轮没有反问时不用写
+    assert check_parsed(ParsedRequest(is_query=False, reply="你好"), pending_clarify=True) == []
 
 
 # ── to_recall_query ───────────────────────────
@@ -298,10 +317,43 @@ def test_parse_request_accepts_a_non_query_answer():
 def test_parse_request_asks_the_model_again_when_it_clarifies_while_answering_a_clarify():
     request = QueryRequest(question="按最常用的口径处理就行", prev_requirement="查询某个对公客户的贷款情况",
                            prev_clarify=which_client("列出全部客户", "指定一个客户"))
-    asking = make_parsed(clarify=which_client("列出全部客户", "指定一个客户"))
-    llm = ScriptedLLM([asking.model_dump_json(), make_parsed().model_dump_json()])
+    asking = make_parsed(answers_clarify=True, clarify=which_client("列出全部客户", "指定一个客户"))
+    llm = ScriptedLLM([asking.model_dump_json(), make_parsed(answers_clarify=True).model_dump_json()])
 
     parsed, records = parse_request(llm, request, TODAY)
 
-    assert parsed.clarify is None and [(r.attempt, r.ok) for r in records] == [(1, False), (2, True)]
+    assert parsed.clarify is None and parsed.answers_clarify
+    assert [(r.attempt, r.ok) for r in records] == [(1, False), (2, True)]
     assert "不能再反问" in llm.calls[1]["messages"][-1]["content"]
+
+
+def test_parse_request_lets_a_new_question_ask_back_while_a_clarify_is_pending():
+    request = QueryRequest(question="看一下某个客户的贷款情况", prev_requirement="查询 2026-09-30 各开户机构的对公存款余额",
+                           prev_clarify=Clarify(question="存款余额要不要包含保证金？",
+                                                options=[ClarifyOption(label="不含保证金"), ClarifyOption(label="含保证金")]))
+    asking = make_parsed(answers_clarify=False, clarify=which_client("列出全部客户", "指定一个客户"))
+    llm = ScriptedLLM([asking.model_dump_json()])
+
+    parsed, records = parse_request(llm, request, TODAY)
+
+    assert parsed.clarify == asking.clarify and not parsed.answers_clarify and len(records) == 1
+
+
+def test_parse_request_asks_for_answers_clarify_when_the_model_leaves_it_out():
+    request = QueryRequest(question="第一个", prev_requirement="查询某个对公客户的贷款情况",
+                           prev_clarify=which_client("列出全部客户", "指定一个客户"))
+    silent = make_parsed().model_dump(exclude={"answers_clarify"})
+    llm = ScriptedLLM([json.dumps(silent, ensure_ascii=False), make_parsed(answers_clarify=True).model_dump_json()])
+
+    parsed, records = parse_request(llm, request, TODAY)
+
+    assert parsed.answers_clarify and [(r.attempt, r.ok) for r in records] == [(1, False), (2, True)]
+    assert "answers_clarify" in llm.calls[1]["messages"][-1]["content"]
+
+
+def test_without_a_pending_clarify_nothing_counts_as_an_answer():
+    llm = ScriptedLLM([make_parsed(answers_clarify=True).model_dump_json()])
+
+    parsed, _ = parse_request(llm, REQUEST, TODAY)
+
+    assert parsed.answers_clarify is False
