@@ -192,14 +192,23 @@ def test_main_rejects_unknown_option(capsys):
 
 
 def test_main_says_so_before_loading_the_model(tiny_mart, monkeypatch, capsys):
+    """提示挂在 before_embed 上：真要算向量时才说（全部复用时 build_vectors 不调它，见 test_index）"""
     import metadata.importer as importer
 
+    def fake_run_import(mart_dir, build_index, reindex, before_embed):
+        if before_embed is not None:
+            before_embed(5)                    # 像真的导入一样：调向量器之前先报要算几条
+        return ImportReport(mart_dir=mart_dir, db_path=mart_dir / "build" / "metadata.db", succeeded=True)
+
     monkeypatch.setenv("METADATA_EMBEDDER", "bge")
-    monkeypatch.setattr(importer, "run_import", lambda mart_dir, build_index: ImportReport(
-        mart_dir=mart_dir, db_path=mart_dir / "build" / "metadata.db", succeeded=True))
+    monkeypatch.setattr(importer, "run_import", fake_run_import)
 
     assert main([str(tiny_mart)]) == 0
-    assert "第一次加载向量模型可能较慢" in capsys.readouterr().out
+    assert "有 5 条文本要算向量。第一次加载向量模型可能较慢" in capsys.readouterr().out
 
     assert main([str(tiny_mart), "--no-index"]) == 0
+    assert "向量模型" not in capsys.readouterr().out
+
+    monkeypatch.setenv("METADATA_EMBEDDER", "hash")             # 哈希向量器不用加载模型，也不提示
+    assert main([str(tiny_mart)]) == 0
     assert "向量模型" not in capsys.readouterr().out

@@ -29,8 +29,8 @@ from metadata.index import (
     field_ref_id,
     field_text,
 )
-from metadata.models import Example
-from metadata.store import MetadataStore, VectorSet, write_store
+from metadata.models import Example, Mart
+from metadata.store import MetadataStore, VectorBundle, VectorSet, read_vectors, write_store
 
 ROOT = Path(__file__).resolve().parents[1]
 MOCK_MART_DIR = ROOT / "data" / "mock_mart"
@@ -56,17 +56,26 @@ def make_set(rows: list[list[float]], ref_ids: list[str]) -> VectorSet:
 
 
 class RecordingEmbedder:
-    """向量由哈希向量器给出，同时记录每次调用的文本条数"""
+    """向量由哈希向量器给出，同时记录每次调用的文本条数和全部文本"""
 
     def __init__(self) -> None:
         self._inner = HashEmbedder()
         self.name = self._inner.name
         self.dim = self._inner.dim
         self.batches: list[int] = []
+        self.texts: list[str] = []
 
     def embed(self, texts):
         self.batches.append(len(texts))
+        self.texts.extend(texts)
         return self._inner.embed(texts)
+
+
+class RefusingHashEmbedder(HashEmbedder):
+    """名字、维度和哈希向量器相同，但一调用就失败：证明向量全部复用了，没有调用向量器"""
+
+    def embed(self, texts):
+        raise AssertionError("向量应该全部复用，不该调用向量器")
 
 
 class ExplodingEmbedder:
@@ -398,6 +407,188 @@ def test_importing_the_mock_mart_twice_gives_identical_databases(tmp_path):
 
     assert second.counts["字段向量"] == 93
     assert dump(second.db_path) == first_dump          # 包括向量的每一个字节
+
+
+def test_read_vectors_reads_only_the_vectors(tiny_mart, tmp_path):
+    report = run_import(tiny_mart)
+
+    bundle = read_vectors(report.db_path)
+
+    store = MetadataStore(report.db_path)
+    assert (bundle.embedder, bundle.dim) == (store.embedder_name, 512)
+    assert bundle.sets["field"].texts == store.vectors("field").texts
+    assert np.array_equal(bundle.sets["field"].matrix, store.vectors("field").matrix)
+    assert read_vectors(run_import(tiny_mart, tmp_path / "plain.db", build_index=False).db_path) is None
+    with pytest.raises(FileNotFoundError):
+        read_vectors(tmp_path / "missing.db")
+    assert not (tmp_path / "missing.db").exists()      # 没有顺手建出一个空库
+    (tmp_path / "junk.db").write_bytes(b"not a database " * 100)
+    with pytest.raises(RuntimeError, match="读不了元数据库"):
+        read_vectors(tmp_path / "junk.db")
+
+
+# ---------- 复用上一次的向量 ----------
+
+
+def rename_column(mart: Mart, table_id: str, column_name: str, column_cn: str) -> Mart:
+    """改一个字段的中文名，这个字段的向量文本就变了"""
+    columns = [column.model_copy(update={"column_cn": column_cn})
+               if (column.table_id, column.column_name) == (table_id, column_name) else column
+               for column in mart.columns]
+    return mart.model_copy(update={"columns": columns})
+
+
+def nudged(bundle: VectorBundle) -> VectorBundle:
+    """每个分量乘一个很接近 1 的数：余弦几乎不变，逐位却和重算的不同，用来分辨向量是复用的还是重算的"""
+    return VectorBundle(embedder=bundle.embedder, dim=bundle.dim, sets={
+        kind: VectorSet(kind=kind, ref_ids=vector_set.ref_ids, texts=vector_set.texts,
+                        matrix=vector_set.matrix * np.float32(1 + 1e-6))
+        for kind, vector_set in bundle.sets.items()})
+
+
+def test_unchanged_texts_reuse_previous_vectors_without_calling_the_embedder(tiny_mart):
+    mart, _ = load_mart(tiny_mart)
+    mart = mart.model_copy(update={"examples": [make_example(1, "查询客户数")]})
+    previous = nudged(build_vectors(mart, HashEmbedder())[0])
+    hints: list[int] = []
+
+    bundle, section = build_vectors(mart, RefusingHashEmbedder(), previous=previous, before_embed=hints.append)
+
+    for kind in ("field", "example"):
+        assert np.array_equal(bundle.sets[kind].matrix, previous.sets[kind].matrix)   # 逐位就是上一版的
+    assert hints == []                                 # 不用加载模型，也就不提示
+    text = "\n".join(section.lines)
+    assert "不同的文本 10 条：复用上一版 10 条，新算 0 条" in text
+    assert "全部复用，没有调用向量器" in text
+
+
+def test_only_new_texts_are_embedded_and_a_sample_of_reused_ones_is_checked():
+    mart, _ = load_mart(MOCK_MART_DIR)
+    previous = nudged(build_vectors(mart, HashEmbedder())[0])
+    changed = rename_column(mart, "dim.org", "org_nm", "机构全称")
+    embedder = RecordingEmbedder()
+    hints: list[int] = []
+
+    bundle, section = build_vectors(changed, embedder, previous=previous, before_embed=hints.append)
+
+    field = bundle.sets["field"]
+    renamed = field.ref_ids.index("dim.org.org_nm")
+    assert field.texts[renamed].endswith("机构全称")
+    assert embedder.batches == hints == [33]           # 1 条新文本，加上从 92 条复用的文本里抽查的 32 条
+    assert embedder.texts[0] == field.texts[renamed]
+    assert len(set(embedder.texts[1:])) == 32 and field.texts[renamed] not in embedder.texts[1:]
+    assert np.array_equal(field.matrix[renamed], HashEmbedder().embed([field.texts[renamed]])[0])
+    others = [row for row in range(len(field.ref_ids)) if row != renamed]
+    assert np.array_equal(field.matrix[others], previous.sets["field"].matrix[others])     # 抽查过的也用上一版的
+    text = "\n".join(section.lines)
+    assert "不同的文本 93 条：复用上一版 92 条，新算 1 条" in text
+    assert "抽查复用的 32 条，与重算的余弦最低 1.0000" in text
+
+
+def test_reused_vectors_that_disagree_with_the_model_are_all_recomputed():
+    """向量模型换了、名字没变时，抽查发现对不上，一条旧向量也不留"""
+    mart, _ = load_mart(MOCK_MART_DIR)
+    honest = build_vectors(mart, HashEmbedder())[0].sets["field"]
+    stale = np.random.default_rng(7).normal(size=honest.matrix.shape).astype(np.float32)
+    stale /= np.linalg.norm(stale, axis=1, keepdims=True)
+    previous = VectorBundle(embedder="hash-bigram-512", dim=512, sets={"field": VectorSet(
+        kind="field", ref_ids=honest.ref_ids, texts=honest.texts, matrix=stale)})
+    embedder = RecordingEmbedder()
+
+    bundle, section = build_vectors(rename_column(mart, "dim.org", "org_nm", "机构全称"), embedder,
+                                    previous=previous)
+
+    field = bundle.sets["field"]
+    assert np.array_equal(field.matrix, HashEmbedder().embed(field.texts))
+    assert embedder.batches == [33, 60]                # 抽查对不上，剩下的 60 条也重算
+    text = "\n".join(section.lines)
+    assert "不同的文本 93 条：全部新算（抽查复用的 32 条" in text and "向量模型可能换过" in text
+
+
+def test_vectors_from_another_embedder_are_not_reused(tiny_mart):
+    mart, _ = load_mart(tiny_mart)
+    previous, _ = build_vectors(mart, HashEmbedder(256))
+    embedder = RecordingEmbedder()
+
+    bundle, section = build_vectors(mart, embedder, previous=previous)
+
+    assert embedder.batches == [9]
+    assert np.array_equal(bundle.sets["field"].matrix, HashEmbedder().embed(bundle.sets["field"].texts))
+    assert ("全部新算（上一版的向量器是 hash-bigram-256（256 维），这次是 hash-bigram-512（512 维））"
+            in "\n".join(section.lines))
+
+
+def test_identical_texts_are_embedded_once(tiny_mart):
+    mart, _ = load_mart(tiny_mart)
+    acct = next(table for table in mart.tables if table.table_id == "ods.acct")
+    twin = acct.model_copy(update={"table_id": "ods.acct_hist", "table_name": "acct_hist"})    # 中文名也是「账户表」
+    twin_columns = [column.model_copy(update={"table_id": twin.table_id})
+                    for column in mart.columns if column.table_id == "ods.acct"]
+    mart = mart.model_copy(update={"tables": [*mart.tables, twin], "columns": [*mart.columns, *twin_columns]})
+    embedder = RecordingEmbedder()
+
+    bundle, section = build_vectors(mart, embedder)
+
+    field = bundle.sets["field"]
+    assert len(field.ref_ids) == 13 and embedder.batches == [9]
+    assert np.array_equal(field.matrix[field.ref_ids.index("ods.acct_hist.bal")],
+                          field.matrix[field.ref_ids.index("ods.acct.bal")])
+    assert "不同的文本 9 条：全部新算（没有上一版的向量）" in "\n".join(section.lines)
+
+
+def test_texts_without_any_feature_do_not_look_like_a_changed_model(tiny_mart):
+    mart, _ = load_mart(tiny_mart)
+    mart = mart.model_copy(update={"examples": [make_example(1, "，。")]})     # 只有标点，哈希向量是零向量
+    previous, _ = build_vectors(mart, HashEmbedder())
+
+    bundle, section = build_vectors(rename_column(mart, "ods.acct", "bal", "账户余额"), HashEmbedder(),
+                                    previous=previous)
+
+    text = "\n".join(section.lines)
+    assert "复用上一版 9 条，新算 1 条" in text and "可能换过" not in text      # 零向量也被抽查到了
+    assert not bundle.sets["example"].matrix.any()
+
+
+def test_reimport_reuses_every_vector_without_calling_the_embedder(tiny_mart):
+    first = dump(run_import(tiny_mart, embedder=HashEmbedder()).db_path)
+
+    report = run_import(tiny_mart, embedder=RefusingHashEmbedder())
+
+    assert dump(report.db_path) == first
+    text = (tiny_mart / "build" / "import_report.md").read_text(encoding="utf-8")
+    assert "复用上一版 9 条，新算 0 条" in text and "全部复用，没有调用向量器" in text
+
+
+def test_reindex_recomputes_every_vector(tiny_mart):
+    run_import(tiny_mart, embedder=HashEmbedder())
+    embedder = RecordingEmbedder()
+
+    report = run_import(tiny_mart, embedder=embedder, reindex=True)
+
+    assert embedder.batches == [9]
+    assert "全部新算（加了 --reindex）" in report.to_markdown()
+
+
+def test_import_says_why_nothing_could_be_reused(tiny_mart):
+    assert "全部新算（元数据库还不存在）" in run_import(tiny_mart).to_markdown()
+
+    run_import(tiny_mart, build_index=False)
+    assert "全部新算（上一次导入没有算向量）" in run_import(tiny_mart).to_markdown()
+
+    default_db_path(tiny_mart).write_bytes(b"not a database " * 100)
+    report = run_import(tiny_mart)
+    assert report.succeeded and "全部新算（读不了元数据库" in report.to_markdown()
+    assert MetadataStore(report.db_path).counts()["字段向量"] == 9
+
+
+def test_command_line_reindex_flag(tiny_mart, capsys):
+    assert main([str(tiny_mart)]) == 0
+    capsys.readouterr()
+
+    assert main([str(tiny_mart), "--reindex"]) == 0
+    assert "全部新算（加了 --reindex）" in capsys.readouterr().out
+    assert main([str(tiny_mart), "--reindex", "--no-index"]) == 2      # 不算向量就谈不上重算
+    assert "用法" in capsys.readouterr().out
 
 
 # ---------- 全量检索 ----------

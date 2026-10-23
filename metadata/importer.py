@@ -1,12 +1,15 @@
 """
 元数据导入
 读取资料 → 校验 → 补全（解析加工脚本、合并血缘、推导关联、收样例）→ 算向量 → 写入元数据库 → 输出导入报告
-用法: python -m metadata.importer [资料目录] [--no-index]
+用法: python -m metadata.importer [资料目录] [--no-index | --reindex]
       不带资料目录时使用 .env 里的 MART_DIR
+      向量按文本复用上一次导入的，只算新出现的文本；全部能复用时不加载向量模型
+      --reindex 不复用，全部重算：换了向量模型，或怀疑向量有问题时用
       --no-index 不算向量：不加载向量模型、导入更快，召回只能走关键字
 """
 import sys
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,16 +20,18 @@ from metadata.loader import RawMart, load_raw
 from metadata.models import ColumnMeta, LineageEdge, Mart, Relation, TableMeta
 from metadata.relations import derive_relations
 from metadata.script_parser import SCRIPTS_DIR_NAME, merge_lineage, parse_scripts
-from metadata.store import MetadataStore, write_store
+from metadata.store import MetadataStore, VectorBundle, read_vectors, write_store
 
 BUILD_DIR_NAME = "build"
 DB_FILE_NAME = "metadata.db"
 REPORT_FILE_NAME = "import_report.md"
 TRUE_TEXTS = ("是", "y", "yes", "1", "true")
 NO_INDEX_FLAG = "--no-index"
-USAGE = ("用法: python -m metadata.importer [资料目录] [--no-index]\n"
-         "  不带资料目录时使用 .env 里的 MART_DIR；--no-index 不算向量，导入更快，召回只能走关键字")
-MODEL_HINT = ("正在为字段和样例算向量。第一次加载向量模型可能较慢，机械盘上冷启动要几分钟；"
+REINDEX_FLAG = "--reindex"
+USAGE = ("用法: python -m metadata.importer [资料目录] [--no-index | --reindex]\n"
+         "  不带资料目录时使用 .env 里的 MART_DIR；向量按文本复用上一次导入的，只算新出现的文本\n"
+         "  --reindex 不复用，全部重算；--no-index 不算向量，导入更快，召回只能走关键字")
+MODEL_HINT = ("有 {count} 条文本要算向量。第一次加载向量模型可能较慢，机械盘上冷启动要几分钟；"
               "不需要向量时加 --no-index 跳过")
 
 
@@ -212,17 +217,39 @@ def enrich_mart(mart: Mart, mart_dir: Path) -> tuple[Mart, list[Issue], list[Rep
     return mart, issues, sections
 
 
+def _previous_vectors(db_path: Path, reindex: bool) -> tuple[VectorBundle | None, str]:
+    """上一次导入写下的向量，这次按文本复用
+
+    Returns:
+        (向量, 用不了的原因)；用不了时向量为 None，原因写进导入报告
+    """
+    if reindex:
+        return None, f"加了 {REINDEX_FLAG}"
+    try:
+        previous = read_vectors(db_path)
+    except FileNotFoundError:
+        return None, "元数据库还不存在"
+    except RuntimeError as error:
+        return None, str(error)
+    if previous is None:
+        return None, "上一次导入没有算向量"
+    return previous, ""
+
+
 def run_import(mart_dir: Path, db_path: Path | None = None, *, build_index: bool = True,
-               embedder: Embedder | None = None) -> ImportReport:
+               embedder: Embedder | None = None, reindex: bool = False,
+               before_embed: Callable[[int], None] | None = None) -> ImportReport:
     """导入一套资料到元数据库，并把导入报告写到资料目录的 build 子目录
 
-    有错误时不写元数据库，原有的元数据库保持不变。
+    有错误时不写元数据库，原有的元数据库保持不变。向量按文本复用原有元数据库里的，只算新出现的文本。
 
     Args:
         mart_dir: 资料目录
         db_path: 元数据库路径，默认是 资料目录/build/metadata.db
         build_index: 是否为字段和样例算向量
         embedder: 向量器，为 None 时按环境变量取默认的
+        reindex: 不复用原有的向量，全部重算
+        before_embed: 要调用向量器之前调它一次，参数是要算的文本条数；全部复用时不调
 
     Returns:
         导入报告
@@ -239,7 +266,9 @@ def run_import(mart_dir: Path, db_path: Path | None = None, *, build_index: bool
         issues = issues + enrich_issues
         vectors = None
         if build_index:
-            vectors, section = build_vectors(mart, embedder if embedder is not None else default_embedder())
+            previous, note = _previous_vectors(db_path, reindex)
+            vectors, section = build_vectors(mart, embedder if embedder is not None else default_embedder(),
+                                             previous=previous, previous_note=note, before_embed=before_embed)
             sections.append(section)
         write_store(db_path, mart, vectors)
         report = ImportReport(
@@ -252,16 +281,22 @@ def run_import(mart_dir: Path, db_path: Path | None = None, *, build_index: bool
     return report
 
 
+def _hint_before_loading(count: int) -> None:
+    """要调 BGE 算向量之前提示一声：加载模型期间没有任何输出，免得以为卡住了"""
+    print(MODEL_HINT.format(count=count), flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     """命令行入口
 
     Returns:
-        0 表示导入成功；1 表示失败；2 表示参数不认识，打印了用法
+        0 表示导入成功；1 表示失败；2 表示参数不认识（或者 --no-index 和 --reindex 一起用），打印了用法
     """
     args = sys.argv[1:] if argv is None else argv
     build_index = NO_INDEX_FLAG not in args
-    names = [arg for arg in args if arg != NO_INDEX_FLAG]
-    if len(names) > 1 or any(name.startswith("-") for name in names):
+    reindex = REINDEX_FLAG in args
+    names = [arg for arg in args if arg not in (NO_INDEX_FLAG, REINDEX_FLAG)]
+    if len(names) > 1 or any(name.startswith("-") for name in names) or (reindex and not build_index):
         print(USAGE)
         return 2
     if names:
@@ -271,9 +306,9 @@ def main(argv: list[str] | None = None) -> int:
         mart_dir = Path(config.MART_DIR)
 
     try:
-        if build_index and isinstance(default_embedder(), BgeEmbedder):
-            print(MODEL_HINT, flush=True)       # 加载模型期间没有任何输出，先说一声免得以为卡住了
-        report = run_import(mart_dir, build_index=build_index)
+        # 只在真要调 BGE 时提示；向量全部能复用时不加载模型，也就不提示
+        hint = _hint_before_loading if build_index and isinstance(default_embedder(), BgeEmbedder) else None
+        report = run_import(mart_dir, build_index=build_index, reindex=reindex, before_embed=hint)
     except (FileNotFoundError, ValueError, RuntimeError) as error:
         print(f"导入失败: {error}")
         return 1

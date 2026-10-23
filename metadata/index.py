@@ -2,6 +2,7 @@
 向量索引
 字段文本（表中文名、字段中文名）和样例文本（需求、口径）的向量化与检索。
 向量和元数据存在同一个元数据库里，检索时用 numpy 算全量相似度，不用向量数据库。
+重新导入时按文本复用上一次的向量，只算新出现的文本，全部能复用时不加载模型。
 
 向量器可以替换：默认用本地的 BGE 模型；环境变量 METADATA_EMBEDDER=hash 时用哈希向量器，
 单元测试一律用它，不加载模型。
@@ -13,7 +14,7 @@ import threading
 import time
 import unicodedata
 import zlib
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from functools import lru_cache
 from typing import Any, Protocol
 
@@ -28,6 +29,8 @@ SECTION_VECTORS = "向量"
 FIELD_KIND = "field"                   # 向量集的类别：字段
 EXAMPLE_KIND = "example"               # 向量集的类别：样例
 NORM_TOLERANCE = 1e-3                  # 向量长度与 1 相差不超过这个数，就认为已经归一化
+REUSE_CHECK_SAMPLES = 32               # 这次要调向量器时，顺带重算几条复用的文本，核对向量模型没有换过
+REUSE_MIN_COSINE = 0.9999              # 复用的向量与重算的余弦低于这个数，就认为向量模型换过，全部重算
 
 # 哈希向量器
 HASH_DIM = 512                         # 与 BGE 的维度相同
@@ -283,16 +286,61 @@ def _embed_all(embedder: Embedder, texts: Sequence[str], batch_size: int) -> np.
     return np.concatenate(parts)
 
 
-def build_vectors(mart: Mart, embedder: Embedder, batch_size: int = 256) -> tuple[VectorBundle, ReportSection]:
-    """为全部字段和样例算向量
+def _reusable_vectors(previous: VectorBundle | None, previous_note: str, embedder: Embedder,
+                      texts: Sequence[str]) -> tuple[dict[str, np.ndarray], str]:
+    """上一版向量里能复用的部分：文本 → 向量，只收这次用得到的文本
+
+    Returns:
+        (能复用的向量, 不能复用的原因)；能复用时原因为空串
+    """
+    if previous is None:
+        return {}, previous_note or "没有上一版的向量"
+    if (previous.embedder, previous.dim) != (embedder.name, embedder.dim):
+        return {}, (f"上一版的向量器是 {previous.embedder}（{previous.dim} 维），"
+                    f"这次是 {embedder.name}（{embedder.dim} 维）")
+    wanted = set(texts)
+    reusable: dict[str, np.ndarray] = {}
+    for vector_set in previous.sets.values():                # 字段、样例用的是同一个向量器，文本相同向量就相同
+        for text, row in zip(vector_set.texts, vector_set.matrix):
+            if text in wanted:
+                reusable.setdefault(text, row)
+    return reusable, ""
+
+
+def _spread(items: Sequence[str], count: int) -> list[str]:
+    """从列表里均匀地挑 count 个，不足 count 个就全要；同样的输入挑出同样的结果"""
+    if len(items) <= count:
+        return list(items)
+    return [items[i * len(items) // count] for i in range(count)]
+
+
+def _cosine(first: np.ndarray, second: np.ndarray) -> float:
+    """两个已归一化向量的余弦；两个都是零向量（文本里没有任何特征）时算作 1"""
+    if not first.any() and not second.any():
+        return 1.0
+    return float(np.dot(first.astype(np.float64), second.astype(np.float64)))
+
+
+def build_vectors(mart: Mart, embedder: Embedder, batch_size: int = 256, *,
+                  previous: VectorBundle | None = None, previous_note: str = "",
+                  before_embed: Callable[[int], None] | None = None) -> tuple[VectorBundle, ReportSection]:
+    """为全部字段和样例算向量；给了上一版的向量时，文本相同的直接复用，只算新出现的文本
 
     字段向量的顺序与 mart.columns 一致，样例向量的顺序与 mart.examples 一致，同样的资料每次得到同样的结果。
+    同样的文本只算一次。上一版的向量器名称或维度与这次的不同时，一条也不复用。
+    全部能复用时不调用向量器，BGE 也就不用加载。复用了一部分、又要调向量器算新文本时，顺带从复用的文本里
+    均匀抽 REUSE_CHECK_SAMPLES 条重算核对：余弦低于 REUSE_MIN_COSINE 说明向量模型换过（名字没变），全部重算；
+    核对通过的仍用上一版的向量，前后两次导入逐位一致。
     没有样例时不生成样例集。表清单里没有的表下的字段（正常导入时不会出现）没法拼字段文本，直接跳过。
 
     Args:
         mart: 已经补全的资料
         embedder: 向量器
         batch_size: 每批向量化的文本条数
+        previous: 上一版的向量，按文本复用；为 None 时全部重算
+        previous_note: previous 为 None 时写进报告的原因，例如「元数据库还不存在」
+        before_embed: 第一次调用向量器之前调它一次，参数是要算的文本条数；全部复用时不调。
+            命令行用它在加载模型之前提示一声
 
     Returns:
         (向量, 报告节)
@@ -312,19 +360,50 @@ def build_vectors(mart: Mart, embedder: Embedder, batch_size: int = 256) -> tupl
         if table is not None:
             field_ids.append(field_ref_id(column.table_id, column.column_name))
             field_texts.append(field_text(table, column))
-    sets = {FIELD_KIND: VectorSet(kind=FIELD_KIND, ref_ids=field_ids, texts=field_texts,
-                                  matrix=_embed_all(embedder, field_texts, batch_size))}
-    if mart.examples:
-        example_texts = [example_text(example) for example in mart.examples]
-        sets[EXAMPLE_KIND] = VectorSet(kind=EXAMPLE_KIND, ref_ids=[example.example_id for example in mart.examples],
-                                       texts=example_texts, matrix=_embed_all(embedder, example_texts, batch_size))
+    example_texts = [example_text(example) for example in mart.examples]
 
+    unique = list(dict.fromkeys(field_texts + example_texts))         # 去重，保持首次出现的顺序
+    reusable, reason = _reusable_vectors(previous, previous_note, embedder, unique)
+    missing = [text for text in unique if text not in reusable]
+    samples = _spread([text for text in unique if text in reusable], REUSE_CHECK_SAMPLES) if missing else []
+    computed: dict[str, np.ndarray] = {}
+    if missing:
+        if before_embed is not None:
+            before_embed(len(missing) + len(samples))
+        computed = dict(zip(missing + samples, _embed_all(embedder, missing + samples, batch_size)))
+    lowest = min((_cosine(reusable[text], computed[text]) for text in samples), default=None)
+    if lowest is not None and lowest < REUSE_MIN_COSINE:
+        rest = [text for text in unique if text not in computed]
+        computed.update(zip(rest, _embed_all(embedder, rest, batch_size)))
+        reason = (f"抽查复用的 {len(samples)} 条，与重算的余弦最低 {lowest:.6f}，低于 {REUSE_MIN_COSINE}，"
+                  "向量模型可能换过")
+        reusable = {}
+    vectors = {**computed, **reusable}                                # 复用的优先：抽查过的文本仍用上一版的向量
+
+    def matrix_of(texts: list[str]) -> np.ndarray:
+        return np.array([vectors[text] for text in texts], dtype=np.float32).reshape(len(texts), embedder.dim)
+
+    sets = {FIELD_KIND: VectorSet(kind=FIELD_KIND, ref_ids=field_ids, texts=field_texts,
+                                  matrix=matrix_of(field_texts))}
+    if mart.examples:
+        sets[EXAMPLE_KIND] = VectorSet(kind=EXAMPLE_KIND, ref_ids=[example.example_id for example in mart.examples],
+                                       texts=example_texts, matrix=matrix_of(example_texts))
+
+    if reason:
+        reuse_lines = [f"- 不同的文本 {len(unique)} 条：全部新算（{reason}）"]
+    else:
+        reuse_lines = [f"- 不同的文本 {len(unique)} 条：复用上一版 {len(reusable)} 条，新算 {len(missing)} 条"]
+        if not missing:
+            reuse_lines.append("- 全部复用，没有调用向量器")
+        elif samples:
+            reuse_lines.append(f"- 抽查复用的 {len(samples)} 条，与重算的余弦最低 {lowest:.6f}")
     elapsed = time.perf_counter() - started
     section = ReportSection(SECTION_VECTORS, (
         f"- 向量器：{embedder.name}",
         f"- 维度：{embedder.dim}",
         f"- 字段向量：{len(field_ids)} 条",
         f"- 样例向量：{len(mart.examples)} 条",
+        *reuse_lines,
         f"- 耗时：{elapsed:.2f} 秒",
     ))
     return VectorBundle(embedder=embedder.name, dim=embedder.dim, sets=sets), section

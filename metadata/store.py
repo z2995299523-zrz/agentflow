@@ -318,28 +318,57 @@ def _read_store(db_path: Path) -> tuple[Mart, VectorBundle | None]:
                     for row in conn.execute("SELECT * FROM meta_example ORDER BY rowid")
                 ],
             )
-            info = {row["key"]: row["value"] for row in conn.execute("SELECT * FROM meta_info")}
-            vectors = None
-            if "embedder" in info:
-                dim = int(info["dim"])
-                grouped: dict[str, list[sqlite3.Row]] = {}
-                for row in conn.execute("SELECT * FROM meta_vector ORDER BY rowid"):
-                    grouped.setdefault(row["kind"], []).append(row)
-                vectors = VectorBundle(embedder=info["embedder"], dim=dim, sets={
-                    kind: VectorSet(
-                        kind=kind,
-                        ref_ids=[row["ref_id"] for row in rows],
-                        texts=[row["text"] for row in rows],
-                        matrix=np.frombuffer(b"".join(row["vector"] for row in rows),
-                                             dtype=VECTOR_DTYPE).reshape(len(rows), dim).copy(),
-                    )
-                    for kind, rows in grouped.items()
-                })
+            vectors = _read_vectors(conn)
     except sqlite3.DatabaseError as error:
         raise RuntimeError(
             f"读不了元数据库 {db_path}：{error}。它可能是旧版本导入器生成的，"
             "请重新运行 python -m metadata.importer 导入") from error
     return mart, vectors
+
+
+def _read_vectors(conn: sqlite3.Connection) -> VectorBundle | None:
+    """读出 meta_info 记的向量器和 meta_vector 里的全部向量；导入时没有建向量就返回 None。conn 的行要是 sqlite3.Row"""
+    info = {row["key"]: row["value"] for row in conn.execute("SELECT * FROM meta_info")}
+    if "embedder" not in info:
+        return None
+    dim = int(info["dim"])
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for row in conn.execute("SELECT * FROM meta_vector ORDER BY rowid"):
+        grouped.setdefault(row["kind"], []).append(row)
+    return VectorBundle(embedder=info["embedder"], dim=dim, sets={
+        kind: VectorSet(
+            kind=kind,
+            ref_ids=[row["ref_id"] for row in rows],
+            texts=[row["text"] for row in rows],
+            matrix=np.frombuffer(b"".join(row["vector"] for row in rows),
+                                 dtype=VECTOR_DTYPE).reshape(len(rows), dim).copy(),
+        )
+        for kind, rows in grouped.items()
+    })
+
+
+def read_vectors(db_path: Path) -> VectorBundle | None:
+    """只读元数据库里的向量，不读其余内容。重新导入时按文本复用上一次的向量用
+
+    Args:
+        db_path: 元数据库文件路径
+
+    Returns:
+        向量；导入时没有建向量（加了 --no-index）就返回 None
+
+    Raises:
+        FileNotFoundError: 元数据库不存在
+        RuntimeError: 文件不是元数据库，或者向量读不出来
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():                 # sqlite3.connect 遇到不存在的文件会新建一个空库，先挡住
+        raise FileNotFoundError(f"元数据库不存在: {db_path}")
+    try:
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            return _read_vectors(conn)
+    except (sqlite3.DatabaseError, KeyError, ValueError) as error:
+        raise RuntimeError(f"读不了元数据库 {db_path} 里的向量：{error}") from error
 
 
 class MetadataStore:
