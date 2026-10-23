@@ -1,5 +1,6 @@
 """会话历史：建、列、取、改、删，记一轮时定标题和排序，上下文的取法（和原来界面的规则一致），换实例后数据还在"""
 import json
+import sqlite3
 from itertools import count
 
 import pytest
@@ -94,6 +95,39 @@ def test_context_follows_the_latest_turn_that_has_a_requirement(store):
     assert store.context(conversation.id) == answered and store.get(conversation.id).context == answered
     with pytest.raises(LookupError, match="会话不存在"):
         store.context("nope")
+
+
+def test_a_turn_preserves_its_metadata_version(store: ConversationStore) -> None:
+    """结果带的元数据版本写进历史 JSON，重新打开历史库后仍可读出。"""
+    conversation = store.create()
+    result = ok_result().model_copy(update={"metadata_version": "20261023-history-test"})
+
+    turn = store.add_turn(conversation.id, "查存款", result)
+    detail = ConversationStore(store.path).get(conversation.id)
+
+    assert turn.result["metadata_version"] == result.metadata_version
+    assert detail.turns[0].result["metadata_version"] == result.metadata_version
+
+
+def test_old_turn_without_metadata_version_still_loads_and_provides_context(store: ConversationStore) -> None:
+    """旧 JSON 缺少版本字段时按 None 解析，追问上下文保留原来的 SQL 和表。"""
+    conversation = store.create()
+    result = ok_result()
+    result.validation = ValidationSummary(ok=True, tables=["ads.org_corp_dep_bal_d"])
+    turn = store.add_turn(conversation.id, "查存款", result)
+    old_result = result.public()
+    old_result.pop("metadata_version")
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE turns SET result = ? WHERE id = ?", (json.dumps(old_result, ensure_ascii=False), turn.id))
+
+    reopened = ConversationStore(store.path)
+    detail = reopened.get(conversation.id)
+
+    assert detail.turns[0].result == old_result
+    assert QueryResult.model_validate(detail.turns[0].result).metadata_version is None
+    expected = ConversationContext(prev_requirement=REQUIREMENT, prev_sql=result.sql,
+                                   prev_tables=["ads.org_corp_dep_bal_d"])
+    assert detail.context == expected and reopened.context(conversation.id) == expected
 
 
 def test_next_context_carries_the_sql_and_tables_only_after_a_validated_turn():

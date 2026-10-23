@@ -3,12 +3,19 @@
 用假模型（ScriptedLLM）和模拟专题库的元数据：回复的条数就是模型被调用的次数，调多了、调少了测试都会发现。
 """
 from datetime import date
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from lineage.graph import LineageGraph
+from metadata.checks import ERROR, WARNING
+from metadata.importer import load_mart
+from metadata.store import MetadataStore, write_store
 from nl2sql import workflow
 from nl2sql.executor import DuckDBExecutor, ExecResult
 from nl2sql.llm import ScriptedLLM
+from nl2sql.retriever import Retriever
 from nl2sql.schemas import (
     STEPS,
     Clarify,
@@ -25,6 +32,7 @@ from nl2sql.schemas import (
     TraceStep,
 )
 from nl2sql.workflow import Pipeline, PipelineDeps
+from nl2sql.validator import SqlValidator, ValidationIssue, ValidationReport
 
 LOAN = "ads.corp_cust_loan_bal_d"              # 对公客户贷款余额日汇总：B01 的标准用表
 REQUIREMENT = "查询 2026-09-30 全行对公贷款余额"
@@ -142,7 +150,26 @@ def test_normal_path_runs_the_seven_steps_in_order(make):
     assert result.sql.startswith("SELECT") and "\n" in result.sql                   # 排过版
     assert result.assumptions == ["余额按人民币折算"]
     assert result.exec_result is None                                               # 执行层是 none，不执行
+    assert result.metadata_version is None and result.public()["metadata_version"] is None
     assert "messages" not in result.public()["calls"][0]                           # 给界面和接口的版本没有提示词
+
+
+def test_result_records_the_metadata_version_loaded_from_the_store(tmp_path: Path) -> None:
+    """写库后读出的元数据版本进入结果和对外字典。"""
+    mart, _ = load_mart(Path(__file__).resolve().parents[1] / "data" / "mock_mart")
+    db_path = tmp_path / "metadata.db"
+    version = "20261023-followup-test"
+    write_store(db_path, mart, info={"version_id": version})
+    store = MetadataStore(db_path)
+    graph = LineageGraph(store)
+    llm = ScriptedLLM([parsed_json(), plan_json(), sql_reply(GOOD_SQL)])
+    pipeline = Pipeline(PipelineDeps(store=store, graph=graph, retriever=Retriever(store, graph, None),
+                                     validator=SqlValidator(store), llm=llm))
+
+    result = pipeline.run(request())
+
+    assert result.status == "ok" and result.llm_calls == 3
+    assert result.metadata_version == version and result.public()["metadata_version"] == version
 
 
 def test_duckdb_executor_runs_the_sql_and_the_summary_has_no_data(make, mock_db):
@@ -432,17 +459,75 @@ def test_a_follow_up_builds_on_the_sql_and_tables_of_the_previous_round(make):
     assert "## 上一轮的 SQL" in generator and PREV_SQL in generator
     assert "入选原因：上一轮用过" in planner
     assert result.trace[0].summary.startswith("在上一轮的基础上追问，以上一轮的 SQL 为底；完整需求：")
+    assert all("元数据已更新" not in item for item in result.assumptions)
 
 
-@pytest.mark.parametrize("follows_up, prev_sql", [(False, PREV_SQL), (True, "")])
-def test_a_new_question_or_a_round_without_sql_carries_nothing(make, follows_up, prev_sql):
+@pytest.mark.parametrize("prev_sql, rule", [
+    ("SELECT missing_bal FROM ads.removed_loan_bal_d", "R3"),
+    (f"SELECT removed_bal FROM {LOAN} WHERE data_dt = DATE '2026-08-31'", "R4"),
+])
+def test_a_follow_up_rejects_sql_that_no_longer_matches_metadata(make, prev_sql: str, rule: str) -> None:
+    """旧表或旧字段失效时，丢弃底稿和携带表，按完整需求重新生成。"""
+    requirement = REQUIREMENT + "，仅统计制造业"
+    pipeline, llm, spy = make([parsed_json(follows_up=True, requirement=requirement), plan_json(), sql_reply(GOOD_SQL)])
+    errors = pipeline.deps.validator.validate(prev_sql).errors
+    reasons = [f"{error.rule} {error.message}" for error in errors[:2]]
+    shown_reasons = "；".join(reason if len(reason) <= 80 else reason[:79] + "…" for reason in reasons)
+
+    result = pipeline.run(request(prev_requirement=REQUIREMENT, prev_sql=prev_sql, prev_tables=[DUEBILL],
+                                  use_examples=False))
+
+    assert result.status == "ok" and result.llm_calls == 3 and llm.remaining == 0
+    assert result.requirement == requirement
+    assert spy.calls[0]["carry_tables"] == []
+    assert DUEBILL not in result.candidate_tables
+    assert all(table.reason != "previous" for table in spy.calls[0]["result"].tables)
+    assert all("上一轮的 SQL" not in call["messages"][-1]["content"] for call in llm.calls[1:])
+    assert all(prev_sql not in call["messages"][-1]["content"] for call in llm.calls[1:])
+    assert requirement in llm.calls[1]["messages"][-1]["content"]
+    assert requirement in llm.calls[2]["messages"][-1]["content"]
+    assert result.trace[0].summary.startswith("在上一轮的基础上追问，但上一轮的 SQL 在当前元数据上校验不过")
+    assert rule in result.trace[0].summary
+    assert result.assumptions[-1] == ("元数据已更新，上一轮的 SQL 在当前版本上校验不过"
+                                       f"（{shown_reasons}），这一轮没有以它为底，按完整需求重新生成")
+
+
+@pytest.mark.parametrize("length", [79, 80, 81, 160])
+def test_rejected_base_sql_keeps_only_two_errors_with_at_most_80_characters(make, monkeypatch, length: int) -> None:
+    """拒绝原因保留错误顺序、规则编号，最多两条，每条含省略号最多 80 字。"""
+    pipeline, _, _ = make([parsed_json(follows_up=True)])
+    reason = "R3 " + "旧" * (length - 3)
+    report = ValidationReport(issues=[ValidationIssue("R6", WARNING, "警告不阻止底稿复用"),
+                                      ValidationIssue("R3", ERROR, reason[3:]),
+                                      ValidationIssue("R4", ERROR, "字段已删除"),
+                                      ValidationIssue("R5", ERROR, "第三条错误不保留")])
+    validate = Mock(return_value=report)
+    monkeypatch.setattr(pipeline.deps.validator, "validate", validate)
+    state = workflow.PipelineState(request=request(prev_requirement=REQUIREMENT, prev_sql=PREV_SQL), today=TODAY)
+
+    updates, summary = workflow._Steps(pipeline.deps).parse(state)
+
+    expected = reason if length <= 80 else reason[:79] + "…"
+    assert updates["base_sql_rejected"] == [expected, "R4 字段已删除"]
+    assert expected in summary and "第三条错误" not in summary and "警告不阻止" not in summary
+    assert workflow._base_sql({**state, **updates}) == ""
+    validate.assert_called_once_with(PREV_SQL)
+
+
+@pytest.mark.parametrize("follows_up, prev_sql", [(False, PREV_SQL), (False, "SELECT * FROM ads.removed"),
+                                                  (True, ""), (True, "   ")])
+def test_a_new_question_or_a_round_without_sql_carries_nothing(make, monkeypatch, follows_up, prev_sql):
     pipeline, llm, spy = make([parsed_json(follows_up=follows_up), plan_json(), sql_reply(GOOD_SQL)])
+    validate = Mock(wraps=pipeline.deps.validator.validate)
+    monkeypatch.setattr(pipeline.deps.validator, "validate", validate)
 
     result = pipeline.run(request(prev_requirement=REQUIREMENT, prev_sql=prev_sql, prev_tables=[DUEBILL]))
 
     assert result.status == "ok" and spy.calls[0]["carry_tables"] == []
     assert all("上一轮的 SQL" not in call["messages"][-1]["content"] for call in llm.calls[1:])
     assert not result.trace[0].summary.startswith("在上一轮的基础上追问")
+    assert all("元数据已更新" not in item for item in result.assumptions)
+    assert all(call.args[0] != prev_sql for call in validate.call_args_list)    # 只校验本轮 SQL，不核对底稿
 
 
 def test_answering_a_clarify_cannot_trigger_another_one(make):

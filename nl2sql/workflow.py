@@ -10,8 +10,10 @@
 流水线本身无状态，不带检查点：追问、反问的上下文由调用方放进 QueryRequest。
 上一轮停在反问上时，① 判断本轮是不是在回答它（ParsedRequest.answers_clarify）：是回答就 ① ④ 都不能再反问，
 免得来回反问；没理会反问、问了新问题时，新问题照常能反问。
-① 判断本轮是在上一轮的需求上追问（ParsedRequest.follows_up）、请求里又有上一轮校验通过的 SQL 时，以那条 SQL 为底：
-② 把它用到的表直接放进候选，④ ⑤ 拿它当底稿增量修改，上一轮限定的范围不会在追问里丢掉。
+① 判断本轮是在上一轮的需求上追问（ParsedRequest.follows_up）、请求里又有上一轮的 SQL 时，先在当前元数据上校验：
+没有错误才以它为底，② 把它用到的表直接放进候选，④ ⑤ 拿它当底稿增量修改；
+有错误则不带上一轮的 SQL 和表，按合并后的完整需求重新召回、生成，并在摘要和结果假设里说明原因。
+⑦ 输出结果记下本轮使用的元数据版本号，内存构造的元数据为 None。
 Pipeline.run 不向外抛异常，节点里没接住的程序错误也包成 failed（停在 internal）。
 
 对照实验的开关在这里生效（use_lineage 为假就是 A 组）：
@@ -97,6 +99,7 @@ class PipelineState(TypedDict, total=False):
     request: QueryRequest
     today: date
     parsed: ParsedRequest
+    base_sql_rejected: list[str]              # 底稿在当前元数据上校验不过的前两条错误
     scope_level: int
     base_tables: list[str]
     extra_terms: list[str]                    # ④ 每次说缺的东西，累积起来并进检索词
@@ -136,7 +139,9 @@ def _base_sql_of(request: QueryRequest, parsed: ParsedRequest | None) -> str:
 
 
 def _base_sql(state: PipelineState) -> str:
-    """同 _base_sql_of，取状态里的请求和 ① 的结果"""
+    """取本轮可用的追问底稿；① 在当前元数据上校验不过时返回空串"""
+    if state.get("base_sql_rejected"):
+        return ""
     return _base_sql_of(state["request"], state.get("parsed"))
 
 
@@ -242,10 +247,20 @@ class _Steps:
         if not parsed.is_query:
             updates.update(status=STATUS_FAILED, failed_step="parse", message=parsed.reply)
             return updates, "不是查数需求"
+        base_sql = _base_sql_of(state["request"], parsed)
+        rejected = []
+        if base_sql:
+            for error in self._deps.validator.validate(base_sql).errors[:2]:
+                reason = " ".join(f"{error.rule} {error.message}".split())
+                rejected.append(reason if len(reason) <= 80 else reason[:79] + "…")
+        updates["base_sql_rejected"] = rejected
         lead = ""
-        if state["request"].prev_clarify is not None:
+        if rejected:
+            lead = ("在上一轮的基础上追问，但上一轮的 SQL 在当前元数据上校验不过"
+                    f"（{'；'.join(rejected)}），这一轮不以它为底；")
+        elif state["request"].prev_clarify is not None:
             lead = "回答上一轮的反问；" if parsed.answers_clarify else "上一轮的反问没有回答，按新问题处理；"
-        elif _base_sql_of(state["request"], parsed):
+        elif base_sql:
             lead = "在上一轮的基础上追问，以上一轮的 SQL 为底；"
         if parsed.clarify is not None and not parsed.answers_clarify:
             updates["status"] = STATUS_CLARIFY
@@ -376,7 +391,7 @@ class _Steps:
         step = TraceStep(step="output", label=STEP_LABELS["output"],
                          elapsed_ms=int((time.perf_counter() - started) * 1000), summary=summary)
         result = _build_result(state, sql=sql, exec_result=exec_result, trace=[*state.get("trace", []), step],
-                               overrides=overrides)
+                               overrides=overrides, metadata_version=self._deps.store.version_id)
         return {"result": result, "trace": [step]}
 
     def _finalize(self, state: PipelineState) -> tuple[str, ExecSummary | None, str]:
@@ -418,7 +433,7 @@ class _Steps:
 
 
 def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | None, trace: list[TraceStep],
-                  overrides: dict[str, Any] | None = None) -> QueryResult:
+                  overrides: dict[str, Any] | None = None, metadata_version: str | None = None) -> QueryResult:
     """由流水线的最终状态组装 QueryResult
 
     Args:
@@ -427,6 +442,7 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
         exec_result: 执行结果摘要
         trace: 全部轨迹，含 output 这一步
         overrides: 覆盖状态里的 status、failed_step、message（output 自己出错时用）
+        metadata_version: 本轮使用的元数据版本号；内存构造的元数据为 None
     """
     values = {"status": state.get("status"), "failed_step": state.get("failed_step", ""),
               "message": state.get("message", ""), **(overrides or {})}
@@ -445,14 +461,18 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
     clarify = None
     if values["status"] == STATUS_CLARIFY:                  # ④ 的反问；还没到 ④ 就是 ① 的反问
         clarify = plan.clarify if plan is not None else parsed.clarify if parsed is not None else None
+    assumptions = merge_assumptions(parsed.assumptions if parsed is not None else [],
+                                    plan.assumptions if plan is not None else [])
+    if state.get("base_sql_rejected"):
+        assumptions.append("元数据已更新，上一轮的 SQL 在当前版本上校验不过"
+                           f"（{'；'.join(state['base_sql_rejected'])}），这一轮没有以它为底，按完整需求重新生成")
     return QueryResult(
-        status=values["status"], question=request.question,
+        status=values["status"], question=request.question, metadata_version=metadata_version,
         requirement=parsed.requirement.strip() if parsed is not None and parsed.is_query else "",
         parsed=parsed, sql=sql, plan=plan, clarify=clarify,
         message=values["message"] if values["status"] == STATUS_FAILED else "",
         failed_step=values["failed_step"] if values["status"] == STATUS_FAILED else "",
-        assumptions=merge_assumptions(parsed.assumptions if parsed is not None else [],
-                                      plan.assumptions if plan is not None else []),
+        assumptions=assumptions,
         validation=state.get("validation"), first_pass_ok=state.get("first_pass_ok"),
         repair_rounds=state.get("repair_rounds", 0), scope_level=state.get("scope_level", 0),
         candidate_tables=candidates, recall_notes=list(recall.notes) if recall is not None else [],
@@ -523,11 +543,12 @@ def build_workflow(deps: PipelineDeps) -> Any:
 # ── 对外的流水线 ──────────────────────────────────
 
 def _failure(request: QueryRequest, error: BaseException | str, trace: list[TraceStep], calls: list[CallRecord],
-             started: float) -> QueryResult:
-    """图本身出了错（节点里的错误已经在节点里接住了）时给出的 failed 结果，带上已经走过的轨迹和调用记录"""
+             started: float, metadata_version: str | None = None) -> QueryResult:
+    """图本身出了错（节点里的错误已经在节点里接住了）时给出的 failed 结果，带上已经走过的轨迹、调用记录和元数据版本号"""
     message = _internal_message(error) if isinstance(error, BaseException) else f"内部错误：{error}"
     return QueryResult(status=STATUS_FAILED, question=request.question, message=message, failed_step=INTERNAL_STEP,
-                       trace=trace, calls=calls, elapsed_ms=int((time.perf_counter() - started) * 1000))
+                       trace=trace, calls=calls, elapsed_ms=int((time.perf_counter() - started) * 1000),
+                       metadata_version=metadata_version)
 
 
 class Pipeline:
@@ -581,5 +602,5 @@ class Pipeline:
             logger.exception("流水线运行出错")
             result, failure = None, error
         if result is None:
-            result = _failure(request, failure, trace, calls, started)
+            result = _failure(request, failure, trace, calls, started, self.deps.store.version_id)
         yield result

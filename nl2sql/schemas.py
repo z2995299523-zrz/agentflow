@@ -348,6 +348,7 @@ class QueryResult(BaseModel):
 
     status: Status
     question: str
+    metadata_version: str | None = None       # 本轮使用的元数据版本号；旧结果和内存元数据为 None
     requirement: str = ""                     # 调用方追问时把它作为下一轮的 prev_requirement
     parsed: ParsedRequest | None = None
     sql: str = ""                             # 排版后的 SQL；need_clarify、failed 时为空
