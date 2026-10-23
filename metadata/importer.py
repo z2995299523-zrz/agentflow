@@ -1,12 +1,13 @@
 """
 元数据导入
 读取资料 → 校验 → 补全（解析加工脚本、合并血缘、推导关联、收样例）→ 算向量 → 写入元数据库 → 输出导入报告
-用法: python -m metadata.importer [资料目录] [--no-index | --reindex] [--no-promote] [--force]
+用法: python -m metadata.importer [资料目录] [--no-index | --reindex] [--no-promote] [--force] [--replay]
       不带资料目录时使用 .env 里的 MART_DIR
       向量按文本复用上一次导入的，只算新出现的文本；全部能复用时不加载向量模型
       --reindex 不复用，全部重算：换了向量模型，或怀疑向量有问题时用
       --no-index 不算向量：不加载向量模型、导入更快，召回只能走关键字
-      命令行导入保存版本并默认切换；--no-promote 只生成候选，--force 强制生成新版本
+      命令行导入保存版本，没有需确认项才默认切换；有需确认项用 promote --accept 确认后切换
+      --no-promote 只生成候选，--force 强制生成新版本，--replay 强制召回重放（可能加载 BGE）
 """
 import sys
 from collections import defaultdict
@@ -33,10 +34,12 @@ NO_INDEX_FLAG = "--no-index"
 REINDEX_FLAG = "--reindex"
 NO_PROMOTE_FLAG = "--no-promote"
 FORCE_FLAG = "--force"
-USAGE = ("用法: python -m metadata.importer [资料目录] [--no-index | --reindex] [--no-promote] [--force]\n"
+REPLAY_FLAG = "--replay"
+USAGE = ("用法: python -m metadata.importer [资料目录] [--no-index | --reindex] [--no-promote] [--force] [--replay]\n"
          "  不带资料目录时使用 .env 里的 MART_DIR；向量按文本复用上一次导入的，只算新出现的文本\n"
          "  --reindex 不复用，全部重算；--no-index 不算向量，导入更快，召回只能走关键字\n"
-         "  --no-promote 只生成候选版本；--force 资料和代码没变也生成新版本")
+         "  --no-promote 只生成候选版本；--force 资料和代码没变也生成新版本\n"
+         "  --replay 强制召回重放（可能加载 BGE），可与 --no-index 一起用；有需确认项用 promote --accept 切换")
 MODEL_HINT = ("有 {count} 条文本要算向量。第一次加载向量模型可能较慢，机械盘上冷启动要几分钟；"
               "不需要向量时加 --no-index 跳过")
 
@@ -337,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     build_index = NO_INDEX_FLAG not in args
     reindex = REINDEX_FLAG in args
-    names = [arg for arg in args if arg not in (NO_INDEX_FLAG, REINDEX_FLAG, NO_PROMOTE_FLAG, FORCE_FLAG)]
+    names = [arg for arg in args if arg not in (NO_INDEX_FLAG, REINDEX_FLAG, NO_PROMOTE_FLAG, FORCE_FLAG, REPLAY_FLAG)]
     if len(names) > 1 or any(name.startswith("-") for name in names) or (reindex and not build_index):
         print(USAGE)
         return 2
@@ -354,7 +357,8 @@ def main(argv: list[str] | None = None) -> int:
         embedder = default_embedder() if build_index else None
         hint = _hint_before_loading if isinstance(embedder, BgeEmbedder) else None
         result = import_version(mart_dir, build_index=build_index, embedder=embedder, reindex=reindex,
-                                force=FORCE_FLAG in args, promote=NO_PROMOTE_FLAG not in args, before_embed=hint)
+                                force=FORCE_FLAG in args, promote=NO_PROMOTE_FLAG not in args, before_embed=hint,
+                                replay=REPLAY_FLAG in args)
     except (FileNotFoundError, ValueError, RuntimeError) as error:
         print(f"导入失败: {error}")
         return 1
@@ -364,12 +368,23 @@ def main(argv: list[str] | None = None) -> int:
     report = result.report
     if report is not None:
         print(report.to_markdown())
+    if result.diff_report is not None:
+        if result.confirm_items:
+            print("差异需确认项：")
+            for number, item in enumerate(result.confirm_items, 1):
+                print(f"{number}. {item}")
+            print(f"差异报告：{result.diff_report}")
+        else:
+            print(f"差异：没有需确认项（报告：{result.diff_report}）")
     if report is None or not report.succeeded:
         print(f"版本 {result.version_id} 导入失败，活动版本没变；报告在 {result.version_dir / REPORT_FILE_NAME}")
         return 1
     if result.promoted:
         previous = f"（上一个：{result.previous}）" if result.previous else "（这是第一个版本）"
         print(f"版本 {result.version_id} 已切换为活动版本{previous}")
+    elif result.confirm_items:
+        print(f"版本 {result.version_id} 有 {len(result.confirm_items)} 项需要确认，没有切换；"
+              f"看过差异报告后运行 python -m metadata.versions promote {result.version_id} --accept")
     else:
         print(f"版本 {result.version_id} 是候选版本，没有切换；"
               f"要切换运行 python -m metadata.versions promote {result.version_id}")

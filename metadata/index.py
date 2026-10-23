@@ -211,6 +211,12 @@ class BgeEmbedder:
         return np.ascontiguousarray(vectors, dtype=np.float32)
 
 
+def bge_loaded() -> bool:
+    """查询进程内 BGE 是否已经加载；不创建单例，也不触发模型加载。"""
+    instance = BgeEmbedder._instance
+    return instance is not None and instance._model is not None
+
+
 def default_embedder() -> Embedder:
     """按环境变量 METADATA_EMBEDDER 取默认向量器，每次调用都重新读环境变量
 

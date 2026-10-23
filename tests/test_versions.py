@@ -473,3 +473,153 @@ def test_sql_files_count_as_inputs_whatever_the_case_of_the_suffix(tiny_mart):
     (tiny_mart / "scripts" / "LOAD_CUST.SQL").write_text("-- 后缀大写\n", encoding="utf-8")
 
     assert "scripts/LOAD_CUST.SQL" in versions.input_files(tiny_mart)
+
+
+def remove_customer(tiny_mart: Path, tiny_sheets: dict) -> None:
+    """删除无血缘依赖的客户维表及其手工关联，保留其余资料的合法性。"""
+    tiny_sheets["表清单"] = [r for r in tiny_sheets["表清单"] if r[1:3] != ["ods", "cust"]]
+    tiny_sheets["字段清单"] = [r for r in tiny_sheets["字段清单"] if r[0] != "ods.cust"]
+    tiny_sheets["关联关系"].clear()
+    write_mart(tiny_mart, tiny_sheets)
+
+
+def test_pending_import_accept_and_rollback(tiny_mart, tiny_sheets):
+    first = versions.import_version(tiny_mart, now=NOW)
+    before = active_files(tiny_mart)
+    remove_customer(tiny_mart, tiny_sheets)
+    candidate = versions.import_version(tiny_mart, now=NOW)
+    assert not candidate.promoted and candidate.active == first.version_id
+    assert active_files(tiny_mart) == before
+    assert candidate.confirm_items[0] == "删了 1 张表、2 个字段"
+    assert candidate.diff_report == candidate.version_dir / "diff_report.md"
+    text = candidate.diff_report.read_text(encoding="utf-8")
+    assert f"- 基线：{first.version_id}" in text and "## 影响面（零成本回归）" in text
+    assert "输入文件内容变了：" in text and "代码：没有变化" in text
+    manifest = read_json(candidate.version_dir / "version.json")
+    assert manifest["status"] == "ready" and manifest["accepted_at"] is None
+    assert manifest["confirm_items"] == candidate.confirm_items
+    assert set(manifest["gates"]) == {"清单校验", "样例", "差异", "题库静态核对", "召回重放", "会话影响"}
+    with pytest.raises(ValueError, match="有 .* 项需要确认.*--accept"):
+        versions.promote(tiny_mart / "build", candidate.version_id)
+    assert active_files(tiny_mart) == before
+    assert versions.promote(tiny_mart / "build", candidate.version_id, accept=True, now=NOW) == first.version_id
+    accepted = read_json(candidate.version_dir / "version.json")["accepted_at"]
+    assert datetime.fromisoformat(accepted).tzinfo is not None
+    assert versions.rollback(tiny_mart / "build") == first.version_id
+    assert versions.rollback(tiny_mart / "build") == candidate.version_id
+    assert read_json(candidate.version_dir / "version.json")["accepted_at"] == accepted
+
+
+def test_description_change_still_promotes_and_first_import_gates(tiny_mart, tiny_sheets):
+    first = versions.import_version(tiny_mart, now=NOW)
+    manifest = read_json(first.version_dir / "version.json")
+    assert manifest["confirm_items"] == [] and manifest["accepted_at"] is None
+    assert set(manifest["gates"]) == {"清单校验", "样例"} and first.diff_report is None
+    tiny_sheets["表清单"][0][-1] = "补充说明"
+    write_mart(tiny_mart, tiny_sheets)
+    second = versions.import_version(tiny_mart, now=NOW)
+    assert second.promoted and not second.confirm_items
+    assert "description：账户每日快照 → 补充说明" in second.diff_report.read_text(encoding="utf-8")
+
+
+def test_regression_failure_does_not_fail_import(tiny_mart):
+    versions.import_version(tiny_mart, now=NOW)
+    before = active_files(tiny_mart)
+    (tiny_mart / "eval_questions.yaml").write_text("invalid question format", encoding="utf-8")
+    candidate = versions.import_version(tiny_mart, force=True, now=NOW)
+    assert candidate.report.succeeded and not candidate.promoted
+    assert candidate.confirm_items[0].startswith("零成本回归没跑完：")
+    assert active_files(tiny_mart) == before
+    assert read_json(candidate.version_dir / "version.json")["status"] == "ready"
+
+
+def test_regression_unexpected_failure_is_also_pending(tiny_mart, monkeypatch):
+    from eval import regression
+
+    versions.import_version(tiny_mart, now=NOW)
+    def fail(*args, **kwargs):
+        raise RuntimeError("回归入口故障")
+    monkeypatch.setattr(regression, "run_regression", fail)
+    candidate = versions.import_version(tiny_mart, force=True, now=NOW)
+    assert candidate.confirm_items == ["零成本回归没跑完：回归入口故障"]
+    assert candidate.report.succeeded and not candidate.promoted and candidate.diff_report.is_file()
+
+
+def test_legacy_manifest_missing_gates_remains_compatible(tiny_mart):
+    result = versions.import_version(tiny_mart, now=NOW)
+    path = result.version_dir / "version.json"
+    manifest = read_json(path)
+    for name in ("confirm_items", "accepted_at", "gates"):
+        manifest.pop(name)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert versions.promote(tiny_mart / "build", result.version_id) == result.version_id
+    assert versions.import_version(tiny_mart).skipped
+
+
+def test_diff_cli_ready_only_and_accept_cli(tiny_mart, tiny_sheets, capsys):
+    first = versions.import_version(tiny_mart, now=NOW)
+    remove_customer(tiny_mart, tiny_sheets)
+    candidate = versions.import_version(tiny_mart, now=NOW)
+    mart = ["--mart", str(tiny_mart)]
+    assert versions.main(["diff", first.version_id, candidate.version_id, *mart]) == 0
+    text = capsys.readouterr().out
+    assert "# 元数据差异报告" in text and "ods.cust" in text and "## 影响面" not in text
+    assert versions.main(["promote", candidate.version_id, *mart]) == 1
+    assert "--accept" in capsys.readouterr().out
+    assert versions.main(["promote", candidate.version_id, "--accept", *mart]) == 0
+    assert current(tiny_mart)["active"] == candidate.version_id
+    assert read_json(candidate.version_dir / "version.json")["accepted_at"]
+    assert versions.main(["diff", "missing", candidate.version_id, *mart]) == 1
+    tiny_sheets["表清单"][0][0] = "错误层级"
+    write_mart(tiny_mart, tiny_sheets)
+    failed = versions.import_version(tiny_mart, now=NOW)
+    assert versions.main(["diff", candidate.version_id, failed.version_id, *mart]) == 1
+    assert "不是 ready" in capsys.readouterr().out
+
+
+def test_invalid_example_input_decoding_and_confirmation(tiny_mart, tiny_sheets):
+    path = tiny_mart / "examples" / "EXAMPLE.SQL"
+    path.parent.mkdir()
+    path.write_text("-- 需求: 客户名称\nSELECT cust_nm FROM ods.cust;\n", encoding="gb18030")
+    versions.import_version(tiny_mart, now=NOW)
+    tiny_sheets["字段清单"] = [r for r in tiny_sheets["字段清单"] if r[:2] != ["ods.cust", "cust_nm"]]
+    write_mart(tiny_mart, tiny_sheets)
+    candidate = versions.import_version(tiny_mart, now=NOW)
+    assert "失效样例 1 条" in candidate.confirm_items
+    assert "客户名称：R4" in candidate.diff_report.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("replay,kind,loaded,expected", [
+    (False, "bge", False, False), (True, "bge", False, True),
+    (False, "bge", True, True), (False, "hash", False, True), (False, "none", False, True)])
+def test_replay_decision_never_loads_bge(tiny_mart, monkeypatch, replay, kind, loaded, expected):
+    from eval import regression
+    from metadata import index
+
+    versions.import_version(tiny_mart, now=NOW)
+    if kind == "bge":
+        monkeypatch.setattr(MetadataStore, "embedder_name", property(lambda self: index.BGE_NAME))
+    elif kind == "none":
+        monkeypatch.setattr(MetadataStore, "embedder_name", property(lambda self: None))
+    monkeypatch.setattr(versions, "bge_loaded", lambda: loaded)
+    def forbidden(*args):
+        raise AssertionError("不允许加载 BGE")
+    monkeypatch.setattr(index, "_load_bge_model", forbidden)
+    monkeypatch.setattr(regression, "embedder_for", forbidden)
+    received = []
+    def run(*args, **kwargs):
+        received.append(kwargs["replay"])
+        return regression.RegressionResult(gates={"召回重放": "测试已替代重放"})
+    monkeypatch.setattr(regression, "run_regression", run)
+    result = versions.import_version(tiny_mart, force=True, now=NOW, replay=replay)
+    assert result.promoted and received == [expected]
+
+
+def test_header_limits_and_git_commits():
+    old = {"version_id": "a", "inputs": {"gone": "old", "changed": "old"}, "code_digest": "a", "git_commit": "123456789"}
+    new = {"version_id": "b", "baseline": "a", "inputs": {"changed": "new", **{f"file{i}": "x" for i in range(25)}},
+           "code_digest": "b", "git_commit": "987654321"}
+    text = "\n".join(versions._diff_header(old, new))
+    assert "等共 25 项" in text and "1234567 → 9876543" in text
+    assert "输入文件删除：gone" in text and "输入文件内容变了：changed" in text
+    assert "基线没有输入记录（旧库登记的版本）" in "\n".join(versions._diff_header({}, new))

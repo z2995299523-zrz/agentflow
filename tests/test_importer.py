@@ -232,3 +232,25 @@ def test_main_says_so_before_loading_the_model(tiny_mart, monkeypatch, capsys):
     monkeypatch.setenv("METADATA_EMBEDDER", "hash")             # 哈希向量器不用加载模型，也不提示
     assert main([str(tiny_mart)]) == 0
     assert "向量模型" not in capsys.readouterr().out
+
+
+def test_cli_diff_summary_pending_and_replay_flag(tiny_mart, tiny_sheets, capsys):
+    from metadata import versions
+
+    assert main([str(tiny_mart), "--no-index", "--replay"]) == 0
+    assert "差异：" not in capsys.readouterr().out
+    tiny_sheets["表清单"][0][-1] = "更新说明"
+    write_mart(tiny_mart, tiny_sheets)
+    assert main([str(tiny_mart), "--no-index", "--replay"]) == 0
+    output = capsys.readouterr().out
+    assert "差异：没有需确认项（报告：" in output
+    assert output.index("# 元数据导入报告") < output.index("差异：") < output.index("已切换为活动版本")
+    tiny_sheets["字段清单"] = [r for r in tiny_sheets["字段清单"] if r[:2] != ["ods.cust", "cust_nm"]]
+    write_mart(tiny_mart, tiny_sheets)
+    assert main([str(tiny_mart), "--no-index"]) == 0
+    output = capsys.readouterr().out
+    assert "删了 0 张表、1 个字段" in output and "差异报告：" in output
+    assert "项需要确认，没有切换；看过差异报告后运行 python -m metadata.versions promote" in output
+    assert "--accept" in output
+    candidate = versions.list_versions(tiny_mart / "build")[0]
+    assert candidate.label == "候选"

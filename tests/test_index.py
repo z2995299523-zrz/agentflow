@@ -847,3 +847,18 @@ def test_bge_download_goes_through_the_mirror_unless_an_endpoint_is_configured(f
     monkeypatch.setattr(BgeEmbedder(), "_model", None)
     BgeEmbedder().embed(["贷款余额"])
     assert os.environ["HF_ENDPOINT"] == "https://example.invalid"      # 配置过的不动
+def test_bge_loaded_is_observation_only(monkeypatch):
+    """读取状态不创建单例、不加载模型，已有模型时返回真。"""
+    from metadata import index
+
+    def forbidden():
+        raise AssertionError("不允许加载模型")
+    monkeypatch.setattr(index, "_load_bge_model", forbidden)
+    monkeypatch.setattr(index.BgeEmbedder, "_instance", None)
+    assert index.bge_loaded() is False
+    assert index.BgeEmbedder._instance is None
+    instance = index.BgeEmbedder()
+    monkeypatch.setattr(instance, "_model", None)
+    assert index.bge_loaded() is False
+    monkeypatch.setattr(instance, "_model", object())
+    assert index.bge_loaded() is True

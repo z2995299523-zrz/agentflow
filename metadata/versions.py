@@ -3,7 +3,8 @@
 命令行导入的每一版写进 资料目录/build/versions/<版本号>/（元数据库、版本清单、导入报告、输入副本），写完不再改。
 切换就是把选中版本的库复制成 build/metadata.db，服务、打包、发布脚本照旧只读这一个文件；
 current.json 记活动版本、上一个活动版本和切换历史，回退就是切回上一个活动版本。
-用法: python -m metadata.versions {list,promote,rollback,prune} [--mart 资料目录]
+有需确认项的版本须用 promote <版本> --accept 切换；diff <基线> <版本> 查看纯差异。
+用法: python -m metadata.versions {list,promote,diff,rollback,prune} [--mart 资料目录]
 """
 import argparse
 import hashlib
@@ -15,14 +16,15 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from metadata import importer
-from metadata.examples import EXAMPLES_DIR_NAME
-from metadata.index import Embedder, default_embedder
+from metadata.diff import confirm_items, diff_stores, render_diff
+from metadata.examples import EXAMPLE_ENCODINGS, EXAMPLES_DIR_NAME, RawExample, parse_example_text
+from metadata.index import BGE_NAME, Embedder, bge_loaded, default_embedder
 from metadata.script_parser import SCRIPTS_DIR_NAME
 from metadata.store import MetadataStore, read_vectors, read_version_id
 from metadata.template import SHEETS, WORKBOOK_NAME
@@ -52,6 +54,8 @@ class VersionResult:
     previous: str | None
     skipped: bool
     active: str | None
+    confirm_items: list[str] = field(default_factory=list)
+    diff_report: Path | None = None
 
 
 @dataclass
@@ -222,8 +226,8 @@ def _switch_record(build_dir: Path, version_id: str, how: str, now: datetime | N
 
 
 def promote(build_dir: Path, version_id: str, *, how: str = "promote",
-            now: datetime | None = None) -> str | None:
-    """把已就绪版本复制为活动库，返回切换前的活动版本号。"""
+            now: datetime | None = None, accept: bool = False) -> str | None:
+    """把已就绪版本复制为活动库；有需确认项时必须显式接受，返回原活动版本号。"""
     build_dir = Path(build_dir)
     directory = _version_dir(build_dir, version_id)
     if not directory.is_dir():
@@ -241,6 +245,14 @@ def promote(build_dir: Path, version_id: str, *, how: str = "promote",
             raise RuntimeError(f"版本库里的版本号与 {version_id} 不一致，不能切换")
         # 先检查记录是否可读，避免替换库后才发现历史已损坏。
         _read_json(build_dir / CURRENT_FILE_NAME)
+        manifest = _read_json(directory / VERSION_FILE_NAME)
+        pending = manifest.get("confirm_items", [])
+        if pending and not manifest.get("accepted_at"):
+            if not accept:
+                raise ValueError(f"版本 {version_id} 有 {len(pending)} 项需要确认，看过 "
+                                 f"{directory / 'diff_report.md'} 后加 --accept 再切换")
+            manifest["accepted_at"] = _time(now).isoformat()
+            _write_json(directory / VERSION_FILE_NAME, manifest)
         for name in (importer.DB_FILE_NAME, importer.REPORT_FILE_NAME):
             source = directory / name
             if not source.is_file():
@@ -304,6 +316,7 @@ def adopt_active(build_dir: Path, now: datetime | None = None) -> None:
         "inputs": {}, "inputs_digest": None, "code_digest": None, "git_commit": None,
         "embedder": store.embedder_name, "dim": vectors.dim if vectors else None,
         "counts": store.counts(), "errors": 0, "warnings": 0, "error": None,
+        "confirm_items": [], "accepted_at": None, "gates": {},
     })
     promote(build_dir, directory.name, how="legacy", now=now)
 
@@ -311,8 +324,8 @@ def adopt_active(build_dir: Path, now: datetime | None = None) -> None:
 def import_version(mart_dir: Path, *, build_index: bool = True, embedder: Embedder | None = None,
                    reindex: bool = False, force: bool = False, promote: bool = True,
                    before_embed: Callable[[int], None] | None = None,
-                   now: datetime | None = None) -> VersionResult:
-    """导入到独立版本目录，成功后默认切换；资料与代码没变时跳过。"""
+                   now: datetime | None = None, replay: bool = False) -> VersionResult:
+    """导入独立版本，清单通过且没有需确认项才自动切换；资料与代码没变时跳过。"""
     mart_dir = Path(mart_dir)
     if not mart_dir.is_dir():
         raise FileNotFoundError(f"资料目录不存在: {mart_dir}")
@@ -328,7 +341,9 @@ def import_version(mart_dir: Path, *, build_index: bool = True, embedder: Embedd
     if (not force and not reindex and active.get("status") == "ready"
             and active.get("inputs_digest") == inputs_digest and active.get("code_digest") == code_digest
             and active.get("embedder") == (selected.name if selected is not None else None)):
-        return VersionResult(baseline, active_dir, None, False, baseline, True, baseline)
+        diff_path = active_dir / "diff_report.md"
+        return VersionResult(baseline, active_dir, None, False, baseline, True, baseline,
+                             active.get("confirm_items", []), diff_path if diff_path.is_file() else None)
     created = _time(now)
     directory = _new_version(build_dir, created.strftime("%Y%m%d-%H%M"))
     snapshot = directory / INPUTS_DIR_NAME
@@ -349,6 +364,7 @@ def import_version(mart_dir: Path, *, build_index: bool = True, embedder: Embedd
         "embedder": selected.name if selected is not None else None,
         "dim": selected.dim if selected is not None else None,
         "counts": {}, "errors": 0, "warnings": 0, "error": UNFINISHED,
+        "confirm_items": [], "accepted_at": None, "gates": {},
     }
     # 先记成失败：中途按 Ctrl+C、加载模型时进程被杀，这一版也能在列表里看到、被清理掉
     _write_json(directory / VERSION_FILE_NAME, manifest)
@@ -363,13 +379,88 @@ def import_version(mart_dir: Path, *, build_index: bool = True, embedder: Embedd
         raise
     manifest.update(status="ready" if report.succeeded else "failed", counts=report.counts,
                     errors=len(report.errors), warnings=len(report.warnings), error=None)
+    manifest["gates"] = {
+        "清单校验": "通过" if report.succeeded else f"未通过，{len(report.errors)} 条错误",
+        "样例": (f"收下 {report.counts.get('样例', 0)} 条，"
+                 f"{sum(i.rule == 'W08' for i in report.warnings)} 条警告") if report.succeeded else "没跑：清单未通过",
+    }
+    diff_report = None
+    if report.succeeded and active_dir is not None and (active_dir / importer.DB_FILE_NAME).is_file():
+        from nl2sql.validator import SqlValidator  # 只有导入后的差异分析需要查询层
+
+        old_store = MetadataStore(active_dir / importer.DB_FILE_NAME)
+        new_store = MetadataStore(directory / importer.DB_FILE_NAME)
+        difference = diff_stores(old_store, new_store, candidate_examples=_raw_examples(snapshot),
+                                 validate=SqlValidator(new_store).validate)
+        pending = confirm_items(difference)
+        manifest["gates"]["差异"] = f"{len(pending)} 项需确认" if pending else "没有需确认项"
+        try:
+            from eval.regression import run_regression  # list 等管理命令不加载评估层
+
+            regression = run_regression(mart_dir, old_store, new_store,
+                                        removed_tables=set(difference.tables.removed),
+                                        replay=replay or new_store.embedder_name != BGE_NAME or bge_loaded())
+            pending += regression.confirm_items
+            manifest["gates"].update(regression.gates)
+            regression_lines = regression.lines
+        except Exception as error:  # 回归模块本身出错也不能让已导入的候选版本失败
+            reason = " ".join(str(error).splitlines()) or type(error).__name__
+            pending.append(f"零成本回归没跑完：{reason}")
+            for gate in ("题库静态核对", "召回重放", "会话影响"):
+                manifest["gates"][gate] = f"没跑完：{reason}"
+            regression_lines = [f"- 零成本回归没跑完：{reason}"]
+        manifest["confirm_items"] = pending
+        diff_report = directory / "diff_report.md"
+        diff_report.write_text(render_diff(difference, header=_diff_header(active, manifest), confirm=pending,
+                                          extra_sections=[("影响面（零成本回归）", regression_lines)]), encoding="utf-8")
     _write_json(directory / VERSION_FILE_NAME, manifest)
-    promoted = report.succeeded and promote
+    promoted = report.succeeded and promote and not manifest["confirm_items"]
     previous = baseline
     if promoted:
         previous = _promote(build_dir, directory.name, how="import", now=now)
     active_id = _read_json(build_dir / CURRENT_FILE_NAME).get("active")
-    return VersionResult(directory.name, directory, report, promoted, previous, False, active_id)
+    return VersionResult(directory.name, directory, report, promoted, previous, False, active_id,
+                         manifest["confirm_items"], diff_report)
+
+
+def _raw_examples(snapshot: Path) -> list[RawExample]:
+    """从本版输入快照读取样例，编码和后缀规则与样例导入一致。"""
+    result = []
+    for path in sorted((snapshot / EXAMPLES_DIR_NAME).glob("*")):
+        if not path.is_file() or path.suffix.lower() != ".sql":
+            continue
+        data = path.read_bytes()
+        for encoding in EXAMPLE_ENCODINGS:
+            try:
+                text = data.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+            raws, _ = parse_example_text(text, path.name)
+            result.extend(raws)
+            break
+    return result
+
+
+def _diff_header(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """版本、输入摘要和代码摘要的比较说明，每类文件最多列二十个。"""
+    lines = [f"- 版本：{new['version_id']}", f"- 基线：{new.get('baseline') or old.get('version_id', '无')}"]
+    old_inputs, new_inputs = old.get("inputs", {}), new.get("inputs", {})
+    if not old_inputs:
+        lines.append("- 基线没有输入记录（旧库登记的版本）")
+    else:
+        for label, names in (
+            ("新增", sorted(new_inputs.keys() - old_inputs.keys())),
+            ("删除", sorted(old_inputs.keys() - new_inputs.keys())),
+            ("内容变了", sorted(k for k in old_inputs.keys() & new_inputs.keys() if old_inputs[k] != new_inputs[k])),
+        ):
+            detail = "、".join(name.replace("|", "\\|").replace("\n", " ").replace("\r", " ") for name in names[:20]) or "没有"
+            lines.append(f"- 输入文件{label}：{detail}" + (f"，等共 {len(names)} 项" if len(names) > 20 else ""))
+    if old.get("code_digest") == new.get("code_digest"):
+        lines.append("- 代码：没有变化")
+    else:
+        lines.append(f"- 代码：变了（{(old.get('git_commit') or '未知')[:7]} → "
+                     f"{(new.get('git_commit') or '未知')[:7]}）")
+    return lines
 
 
 def rollback(build_dir: Path, now: datetime | None = None) -> str:
@@ -378,7 +469,7 @@ def rollback(build_dir: Path, now: datetime | None = None) -> str:
     previous = _read_json(build_dir / CURRENT_FILE_NAME).get("previous")
     if not previous:
         raise ValueError("没有上一个活动版本可以回退")
-    promote(build_dir, previous, how="rollback", now=now)
+    promote(build_dir, previous, how="rollback", now=now, accept=True)
     return previous
 
 
@@ -424,10 +515,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="元数据版本目录与切换")
     parser.add_argument("--mart", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("list", "promote", "rollback", "prune"):
+    for name in ("list", "promote", "diff", "rollback", "prune"):
         command = commands.add_parser(name)
         command.add_argument("--mart", type=Path, default=argparse.SUPPRESS)
         if name == "promote":
+            command.add_argument("version_id")
+            command.add_argument("--accept", action="store_true")
+        elif name == "diff":
+            command.add_argument("baseline")
             command.add_argument("version_id")
         elif name == "prune":
             command.add_argument("--keep", type=int, default=KEEP_VERSIONS)
@@ -452,8 +547,18 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"{row.version_id} | {row.created_at} | {row.label} | "
                           f"{row.counts.get('表', 0)} | {row.counts.get('字段', 0)} | {row.counts.get('字段向量', 0)}")
         elif args.command == "promote":
-            previous = promote(build_dir, args.version_id)
+            previous = promote(build_dir, args.version_id, accept=args.accept)
             print(f"已切换到 {args.version_id}（上一个：{previous or '无'}）")
+        elif args.command == "diff":
+            stores = []
+            for version_id in (args.baseline, args.version_id):
+                directory = _version_dir(build_dir, version_id)
+                if _read_json(directory / VERSION_FILE_NAME).get("status") != "ready":
+                    raise ValueError(f"版本 {version_id} 的状态不是 ready，不能比较")
+                stores.append(MetadataStore(directory / importer.DB_FILE_NAME))
+            difference = diff_stores(*stores)
+            print(render_diff(difference, header=[f"- 版本：{args.version_id}", f"- 基线：{args.baseline}"],
+                              confirm=confirm_items(difference)))
         elif args.command == "rollback":
             print(f"已回退到 {rollback(build_dir)}")
         else:
