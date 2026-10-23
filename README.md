@@ -130,7 +130,7 @@ python run_eval.py       # 模拟库三组对照评估（调用 DeepSeek，43 �
 
 | 层 | 技术 | 选型理由 |
 |----|------|---------|
-| LLM | DeepSeek Chat（OpenAI 兼容接口） | 便宜、国内直连、中文好，JSON 模式稳定 |
+| LLM | DeepSeek Flash（`deepseek-flash`，OpenAI 兼容接口，关掉思考模式） | 便宜、国内直连、中文好，JSON 模式稳定 |
 | 编排 | LangGraph 1.x | 三条回路（上溯、修正、反问）用条件边表达，逐步给出进度 |
 | SQL 解析与校验 | sqlglot | 方言转换、作用域解析（CTE、子查询、临时表）、静态校验 |
 | Embedding | BGE-small-zh-v1.5（本地） | 免费、离线；向量存进元数据库，numpy 全量检索 |

@@ -39,7 +39,7 @@ python deploy/package_frontend.py
 
 ```dotenv
 LLM_PROVIDER=deepseek
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-flash
 DEEPSEEK_API_KEY=<通过安全通道写入>
 MART_DIR=/var/lib/agentflow/datasets/real-20261019-v1
 EXECUTOR=none

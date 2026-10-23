@@ -268,6 +268,30 @@ def test_chat_client_wraps_errors_and_empty_replies(fake_openai):
         client.complete(MESSAGES)
 
 
+def test_deepseek_defaults_to_flash_with_thinking_off(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "deepseek")
+    monkeypatch.setattr(config, "LLM_MODEL", "")
+    monkeypatch.setattr(config, "LLM_API_BASE", "")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    kwargs = config.get_llm_kwargs(0.0)
+
+    assert kwargs["model"] == "deepseek-flash"
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert kwargs["temperature"] == 0.0
+
+
+def test_other_providers_send_no_thinking_switch(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "dashscope")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+
+    assert "extra_body" not in config.get_llm_kwargs(0.0)
+
+
 # ── 结果的对外字典 ────────────────────────────
 
 def test_public_drops_prompts_and_replies():

@@ -24,7 +24,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")  # deepseek / openai / dash
 LLM_API_BASE = os.getenv("LLM_API_BASE", "")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-flash")
 
 # ============================================
 # NL2SQL 专题库配置
@@ -48,17 +48,20 @@ FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", "8000"))
 def get_llm_kwargs(temperature: float | None = None):
     """
     获取 LLM 初始化参数
-    日常开发默认用 DeepSeek（便宜），可通过 .env 切换 OpenAI
+    日常开发默认用 DeepSeek（便宜），可通过 .env 切换 OpenAI。
+    DeepSeek 的思考模式默认打开：开着时温度不生效、思考内容按输出计费、回复也慢，这里显式关掉
 
     Args:
         temperature: 温度。None 时用 0.7；查询流水线传 0
     """
     provider = LLM_PROVIDER
+    extra_body = None
 
     if provider == "deepseek":
         api_key = os.getenv("DEEPSEEK_API_KEY", LLM_API_KEY)
         base_url = LLM_API_BASE or "https://api.deepseek.com/v1"
-        model = LLM_MODEL or "deepseek-chat"
+        model = LLM_MODEL or "deepseek-flash"
+        extra_body = {"thinking": {"type": "disabled"}}
     elif provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY", LLM_API_KEY)
         base_url = LLM_API_BASE or ""
@@ -82,5 +85,7 @@ def get_llm_kwargs(temperature: float | None = None):
     }
     if base_url:
         kwargs["base_url"] = base_url
+    if extra_body:
+        kwargs["extra_body"] = extra_body
 
     return kwargs

@@ -6,7 +6,8 @@ paths:
 
 # 查询流水线与提示词
 
-- 产品里调用的模型是 DeepSeek Chat（OpenAI 兼容接口，langchain-openai）；① 解析、④ 方案用 JSON 模式，温度 0
+- 产品里调用的模型是 DeepSeek Flash（`deepseek-flash`，OpenAI 兼容接口，langchain-openai）；① 解析、④ 方案用 JSON 模式，温度 0
+- DeepSeek 的思考模式默认打开，开着时温度不生效、思考内容按输出计费，`config.get_llm_kwargs` 用 `extra_body` 关掉，改连接参数时别丢
 - `nl2sql/schemas.py` 是步骤之间的契约：改字段要连同调用方和测试一起改
 - 新的提示词写进 `prompts/`，不在代码里拼字符串
 

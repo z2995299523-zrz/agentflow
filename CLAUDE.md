@@ -27,7 +27,7 @@ start.bat                                 # Windows 同时起接口和界面（h
 - 配置从两个 `.env` 加载：项目 `.env` 优先，`D:/hermes-agent-home/.env` 兜底（见 `config.py`）。`DEEPSEEK_API_KEY`、`MART_DIR`、`SQL_DIALECT`、`EXECUTOR`、`LLM_TIMEOUT` 的说明在 `.env.example`
 - `HF_ENDPOINT=https://hf-mirror.com` 在 `config.py` 顶部设置，要在其他 import 之前，否则 BGE 模型下载失败
 - 依赖版本：fastapi ≥ 0.124 加 starlette ≥ 0.49.1；langgraph 限定 1.x；sqlglot 限定 25.x
-- 技术栈：DeepSeek Chat（产品里调用的模型）、LangGraph（不带检查点）、sqlglot（方言转换、作用域解析、静态校验）、BGE `bge-small-zh-v1.5`（向量存进元数据库，numpy 全量检索）、DuckDB（模拟库执行）、FastAPI、React + Ant Design。元数据库和会话历史都是 SQLite，放在 `data/<资料>/build/`，不入库。Docker Compose 两个容器：api（构建时导入模拟库元数据）、web（多阶段构建，nginx 托管）
+- 技术栈：DeepSeek Flash（产品里调用的模型 `deepseek-flash`，思考模式在 `config.get_llm_kwargs` 里关掉）、LangGraph（不带检查点）、sqlglot（方言转换、作用域解析、静态校验）、BGE `bge-small-zh-v1.5`（向量存进元数据库，numpy 全量检索）、DuckDB（模拟库执行）、FastAPI、React + Ant Design。元数据库和会话历史都是 SQLite，放在 `data/<资料>/build/`，不入库。Docker Compose 两个容器：api（构建时导入模拟库元数据）、web（多阶段构建，nginx 托管）
 
 ## 架构
 
