@@ -2,7 +2,9 @@
 按资料目录装配查询流水线，界面、接口、评估共用
 - build_pipeline：读元数据库，建血缘图、召回、校验器、模型和执行层
 - get_metadata、get_pipeline：进程内缓存。元数据页和元数据接口只用 get_metadata，没配模型 Key 也能用；
-  元数据库文件变了（重新导入过）就重新读，流水线也跟着重新装配，不用重启
+  同路径的元数据库文件变了就在后台读好再换，期间继续用旧缓存，并在后台预装配流水线，不用重启；
+  首次读取、文件不存在或资料路径变了时同步读。读库、建图和装配都不占缓存锁
+- metadata_status、wait_for_reload：查看后台换版本状态、等待换版本及流水线预装配结束
 - warm_up：接口启动时在后台预热（装配流水线、加载向量模型）；装配期间元数据、会话历史照常能取
 - get_history：当前资料目录的会话历史库（资料目录/build/history.db）
 - reset_pipeline：测试里清缓存
@@ -35,12 +37,18 @@ SEARCH_LAYER_ORDER = tuple(reversed(LAYERS))  # 搜索结果里专题层排前�
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()                    # 保护下面几个缓存变量，只在读写缓存时短暂持有
+_LOAD_LOCK = threading.Lock()                # 串行读取元数据库，不占缓存锁
 _ASSEMBLE_LOCK = threading.Lock()            # 装配流水线时持有：第一次要导入模型库，机械盘上要一两分钟，
                                              # 只让要流水线的请求排队，元数据、会话历史的请求不受影响
 _metadata: tuple[MetadataStore, LineageGraph] | None = None
-_metadata_key: tuple[str, int] | None = None  # 缓存的元数据来自哪个文件、文件的修改时间
+_metadata_key: tuple[str, int, int] | None = None  # 文件路径、修改时间纳秒、大小
 _pipeline: Pipeline | None = None
 _history: ConversationStore | None = None
+_reload_thread: threading.Thread | None = None
+_reload_generation: int | None = None
+_failed_key: tuple[str, int, int] | None = None
+_reload_error = ""
+_generation = 0
 
 
 def embedder_for(store: MetadataStore) -> Embedder | None:
@@ -126,33 +134,116 @@ def build_pipeline(mart_dir: Path | None = None, *, llm: LLMClient | None = None
     return _assemble(store, graph, mart_dir, llm, executor_kind)
 
 
-def _db_key(mart_dir: Path) -> tuple[str, int] | None:
-    """元数据库的路径和修改时间（纳秒）；文件不存在时为 None"""
+def _db_key(mart_dir: Path) -> tuple[str, int, int] | None:
+    """元数据库的路径、修改时间（纳秒）和大小；文件不存在时为 None"""
     db_path = default_db_path(mart_dir)
     try:
-        return str(db_path), db_path.stat().st_mtime_ns
+        stat = db_path.stat()
+        return str(db_path), stat.st_mtime_ns, stat.st_size
     except FileNotFoundError:
         return None
+
+
+def _reload_metadata(mart_dir: Path, key: tuple[str, int, int],
+                     previous_key: tuple[str, int, int], generation: int) -> None:
+    """后台读好元数据再替换缓存，并在同一线程里预装配流水线"""
+    global _metadata, _metadata_key, _pipeline, _failed_key, _reload_error
+    global _reload_thread, _reload_generation
+    started = time.perf_counter()
+    try:
+        try:
+            with _LOAD_LOCK:
+                with _LOCK:
+                    if generation != _generation:
+                        return
+                metadata = _load_metadata(mart_dir)
+                with _LOCK:
+                    if (generation != _generation or _metadata_key != previous_key
+                            or Path(config.MART_DIR) != mart_dir):
+                        return
+                    _metadata, _metadata_key = metadata, key
+                    _pipeline = None
+                    _failed_key, _reload_error = None, ""
+        except Exception as error:  # noqa: BLE001 换版本失败保留旧缓存，同一版本不再重试
+            with _LOCK:
+                if (generation != _generation or _metadata_key != previous_key
+                        or Path(config.MART_DIR) != mart_dir):
+                    return
+                _failed_key = key
+                _reload_error = f"新的元数据库读不了，继续用原来的版本：{error}"
+                message = _reload_error
+            logger.warning("%s", message)
+            return
+        logger.info("元数据已换为版本 %s，用时 %.1f 秒", metadata[0].version_id,
+                    time.perf_counter() - started)
+        try:
+            get_pipeline()
+        except Exception as error:  # noqa: BLE001 装配失败不影响已经换好的元数据
+            logger.warning("元数据换版本后的流水线预装配没有完成：%s", error)
+    finally:
+        with _LOCK:
+            _reload_thread, _reload_generation = None, None
 
 
 def get_metadata() -> tuple[MetadataStore, LineageGraph]:
     """进程内缓存的元数据和血缘图，只读，不需要模型配置
 
-    每次取的时候比对元数据库文件的路径和修改时间：重新导入过（导入器写完整个文件再替换），就重新读，
-    并清掉流水线的缓存，下次 get_pipeline 用新的元数据重新装配。
+    同路径文件的修改时间或大小变了时，起一个后台线程读好再换，立即返回旧缓存；失败的版本不再重试。
+    没有缓存、文件不存在或资料路径变了时，在独立的读库锁里同步读，失败不进缓存。
 
     Raises:
         FileNotFoundError: 元数据库不存在，信息里带导入命令
+        RuntimeError: 文件不是元数据库，或者是旧版本导入器生成的
     """
-    global _metadata, _metadata_key, _pipeline
+    global _metadata, _metadata_key, _pipeline, _reload_thread, _reload_generation
+    global _failed_key, _reload_error
+    mart_dir = Path(config.MART_DIR)
+    key = _db_key(mart_dir)
     with _LOCK:
-        mart_dir = Path(config.MART_DIR)
+        # reset 之后，旧后台线程不能借预装配重新填回缓存。
+        if threading.current_thread() is _reload_thread and _reload_generation != _generation:
+            raise RuntimeError("元数据缓存已重置，取消旧版本的流水线预装配")
+        if _metadata is not None and key is not None and _metadata_key is not None:
+            if key == _metadata_key:
+                return _metadata
+            if key[0] == _metadata_key[0]:
+                metadata = _metadata
+                if _reload_thread is None and key != _failed_key:
+                    _reload_generation = _generation
+                    _reload_thread = threading.Thread(
+                        target=_reload_metadata, args=(mart_dir, key, _metadata_key, _generation),
+                        daemon=True, name="metadata-reload")
+                    _reload_thread.start()
+                return metadata
+        generation = _generation
+    with _LOAD_LOCK:
         key = _db_key(mart_dir)
-        if _metadata is None or key != _metadata_key:
-            _metadata = _load_metadata(mart_dir)
-            _metadata_key = key
-            _pipeline = None
-        return _metadata
+        with _LOCK:
+            if _metadata is not None and key is not None and key == _metadata_key:
+                return _metadata
+        metadata = _load_metadata(mart_dir)
+        with _LOCK:
+            if generation == _generation and Path(config.MART_DIR) == mart_dir:
+                _metadata, _metadata_key = metadata, key
+                _pipeline = None
+                _failed_key, _reload_error = None, ""
+        return metadata
+
+
+def metadata_status() -> dict[str, Any]:
+    """返回后台换版本（包含流水线预装配）是否在跑，以及最近一次换版本失败的原因"""
+    with _LOCK:
+        return {"reloading": _reload_thread is not None, "reload_error": _reload_error}
+
+
+def wait_for_reload(timeout: float | None = None) -> bool:
+    """等待当前后台线程读库和预装配结束，返回等待后是否已没有换版本线程在跑"""
+    with _LOCK:
+        worker = _reload_thread
+    if worker is not None and worker is not threading.current_thread():
+        worker.join(timeout)
+    with _LOCK:
+        return _reload_thread is None
 
 
 def get_pipeline() -> Pipeline:
@@ -216,13 +307,16 @@ def get_history() -> ConversationStore:
 
 
 def reset_pipeline() -> None:
-    """清掉 get_metadata、get_pipeline、get_history 的缓存"""
+    """清掉元数据、流水线、会话历史缓存和换版本错误，并使正在读取的旧结果失效"""
     global _metadata, _metadata_key, _pipeline, _history
+    global _failed_key, _reload_error, _generation
     with _LOCK:
         _metadata = None
         _metadata_key = None
         _pipeline = None
         _history = None
+        _failed_key, _reload_error = None, ""
+        _generation += 1
 
 
 def _field_id(table: str, column: str) -> str:

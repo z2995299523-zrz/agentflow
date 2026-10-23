@@ -75,6 +75,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 
 - `main.py`（FastAPI）：查数 `POST /nl2sql/query`、`/nl2sql/stream`（SSE）；会话 `/conversations`、`/conversations/{id}`、`/conversations/{id}/turns`（SSE）；元数据 `tables`、`columns`、`search`、`lineage`、`examples`；`GET /health`
   - SSE：流水线在后台线程跑，事件循环等队列，15 秒没有新事件发一行注释保活；浏览器断开时后台照样跑完、照样存历史
+  - 元数据库文件变了（导入、promote、rollback）：`service.get_metadata` 在后台读好再换，期间照常返回旧版本，读失败继续用旧的、同一个文件不重试；`/health` 报 `metadata_reloading`、`reload_error`。服务器切资料是改 `MART_DIR` 再重启，不走这条
   - 启动时在后台线程预热（`service.warm_up`：装配流水线、加载 BGE）
 - `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问；那一轮校验通过时还有它的 SQL 和用到的表
 - `web/`：查数页（七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`

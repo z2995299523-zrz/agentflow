@@ -508,6 +508,8 @@ class HealthInfo(BaseModel):
     dialect: str
     hint: str = ""
     metadata_version: str | None = None
+    metadata_reloading: bool = False
+    reload_error: str = ""
 
 
 def _model_info() -> tuple[str, str]:
@@ -532,6 +534,10 @@ def health(request: Request) -> HealthInfo:
         store, _ = provider()
     except Exception as error:  # noqa: BLE001 健康检查要如实报告，不能自己先崩
         problem = error if isinstance(error, ServiceUnavailable) else _unavailable(error)
-        return HealthInfo(status=problem.status, counts={}, hint=problem.message, **base)
+        state = service.metadata_status()
+        return HealthInfo(status=problem.status, counts={}, hint=problem.message,
+                          metadata_reloading=state["reloading"], reload_error=state["reload_error"], **base)
+    state = service.metadata_status()
     return HealthInfo(status="ok", counts=store.counts(), hint=model_hint,
-                      metadata_version=store.version_id, **base)
+                      metadata_version=store.version_id, metadata_reloading=state["reloading"],
+                      reload_error=state["reload_error"], **base)
