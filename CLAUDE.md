@@ -9,8 +9,9 @@ pip install -r requirements.txt           # 国内加速加 -i https://pypi.tuna
 python run_tests.py                       # 全部单元测试，不调模型、不加载 BGE
 python -m pytest tests/test_workflow.py -q  # 单个测试文件
 
-python -m metadata.importer               # 导入 MART_DIR 指向的资料：校验、解析脚本、补血缘、推导关联、收样例、算向量
-python -m metadata.importer 目录 --no-index   # 不算向量，几秒导完；第一次加载 BGE 在机械盘上要几分钟
+python -m metadata.importer               # 导入 MART_DIR 指向的资料成新版本并切换：校验、解析脚本、补血缘、推导关联、收样例、算向量
+python -m metadata.importer 目录 --no-index   # 不算向量；--reindex 向量全部重算，--no-promote 只导成候选版本，--force 资料没变也重导
+python -m metadata.versions list          # 列出版本；promote <版本>、rollback 切换和回退，prune 清理旧版本（加 --yes 才删）
 python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel 模板（已存在时不覆盖，要覆盖加 --force）
 python -m data.mock_mart.build_mock       # 重新生成模拟专题库（固态盘约 15 秒，机械盘约 1.5 分钟）
 python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
@@ -44,6 +45,8 @@ start.bat                                 # Windows 同时起接口和界面（h
 ```
 
 - `metadata/store.py` 的 `MetadataStore` 是只读入口，构造时全部读进内存
+- 向量按「向量器、文本」复用上一版的，只算新文本，全部复用时不加载 BGE（第一次加载 BGE 在机械盘上要几分钟）
+- `metadata/versions.py` 版本：命令行导入写进 `build/versions/<版本号>/`（库、版本清单、报告、输入副本），资料和代码都没变不出新版本；切换就是把版本的库复制成 `build/metadata.db`，服务、打包、发布只读这个文件；`current.json` 记活动版本和上一个，回退就是切回上一个。直接调 `run_import` 不分版本，测试和转换器测试在用。设计和后续几块见 `notes/2026-10-23_design_元数据更新机制.md`
 - `metadata/sqlscope.py` 作用域解析：字段穿过 CTE、UNION、子查询、临时表追溯到实体表
 - `metadata/codes.py` 代码字段配名称字段（「××代码」配「××名称」、`_cd` 配 `_nm`）和码值表，证据提示和 R9 共用
 - `lineage/graph.py` 血缘图与关联图：字段上游链路（每一跳带加工表达式、过滤条件、关联条件）、同源对比、表的上下游、关联路径

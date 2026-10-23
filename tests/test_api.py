@@ -339,7 +339,8 @@ def test_health_reports_counts_executor_and_model(api, mock_store, monkeypatch):
     body = client.get("/health").json()
 
     assert body == {"status": "ok", "mart_dir": str(config.MART_DIR), "counts": mock_store.counts(),
-                    "executor": config.EXECUTOR, "model": "test-model", "dialect": config.SQL_DIALECT, "hint": ""}
+                    "executor": config.EXECUTOR, "model": "test-model", "dialect": config.SQL_DIALECT,
+                    "hint": "", "metadata_version": None}
 
     def no_key(temperature=None):
         raise ValueError("未找到 deepseek 的 API Key")
@@ -347,6 +348,18 @@ def test_health_reports_counts_executor_and_model(api, mock_store, monkeypatch):
     monkeypatch.setattr(config, "get_llm_kwargs", no_key)
     body = client.get("/health").json()
     assert body["status"] == "ok" and "API Key" in body["hint"]          # 元数据照常能用，只提示查数接口不能用
+
+
+def test_health_reports_metadata_version(api, tiny_mart):
+    """健康检查暴露实际加载的元数据库版本号。"""
+    from metadata.importer import run_import
+    from metadata.store import MetadataStore
+
+    report = run_import(tiny_mart, version_id="20261023-1450")
+    store = MetadataStore(report.db_path)
+    main.app.dependency_overrides[main.get_metadata_dep] = lambda: (store, None)
+    client, _ = api
+    assert client.get("/health").json()["metadata_version"] == "20261023-1450"
 
 
 def test_health_without_metadata_says_so_and_how_to_import(api):
@@ -361,6 +374,7 @@ def test_health_without_metadata_says_so_and_how_to_import(api):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "no_metadata" and body["counts"] == {} and "python -m metadata.importer" in body["hint"]
+    assert body["metadata_version"] is None
 
     def broken():
         raise RuntimeError("读不了元数据库")
@@ -368,6 +382,7 @@ def test_health_without_metadata_says_so_and_how_to_import(api):
     main.app.dependency_overrides[main.get_metadata_dep] = broken
     body = client.get("/health").json()
     assert body["status"] == "error" and "读不了元数据库" in body["hint"]
+    assert body["metadata_version"] is None
 
 
 # ── 服务取不到时 ──────────────────────────────────

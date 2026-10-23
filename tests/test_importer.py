@@ -73,6 +73,21 @@ def test_custom_database_path(tiny_mart, tmp_path):
     assert MetadataStore(report.db_path).counts()["表"] == 3
 
 
+def test_custom_report_path_and_version_id(tiny_mart, tmp_path, tiny_sheets):
+    report_path = tmp_path / "candidate" / "report.md"
+    db_path = tmp_path / "candidate" / "meta.db"
+    report = run_import(tiny_mart, db_path, report_path=report_path, version_id="test-version")
+    assert report.version_id == MetadataStore(db_path).version_id == "test-version"
+    assert "- 版本：test-version" in report_path.read_text(encoding="utf-8")
+    assert not (tiny_mart / "build" / "import_report.md").exists()
+    tiny_sheets["表清单"][0][0] = "明细层"
+    write_mart(tiny_mart, tiny_sheets)
+    report = run_import(tiny_mart, db_path, report_path=report_path, version_id="failed-version")
+    assert not report.succeeded and report.version_id == "failed-version"
+    assert "- 版本：failed-version" in report_path.read_text(encoding="utf-8")
+    assert MetadataStore(db_path).version_id == "test-version"
+
+
 def test_failed_import_keeps_previous_database(tmp_path, tiny_sheets):
     mart_dir = write_mart(tmp_path / "m", tiny_sheets)
     previous = dump(run_import(mart_dir).db_path)
@@ -195,10 +210,15 @@ def test_main_says_so_before_loading_the_model(tiny_mart, monkeypatch, capsys):
     """提示挂在 before_embed 上：真要算向量时才说（全部复用时 build_vectors 不调它，见 test_index）"""
     import metadata.importer as importer
 
-    def fake_run_import(mart_dir, build_index, reindex, before_embed):
+    original = importer.run_import
+
+    def fake_run_import(mart_dir, db_path, **kwargs):
+        from metadata.index import HashEmbedder
+
+        before_embed = kwargs["before_embed"]
         if before_embed is not None:
             before_embed(5)                    # 像真的导入一样：调向量器之前先报要算几条
-        return ImportReport(mart_dir=mart_dir, db_path=mart_dir / "build" / "metadata.db", succeeded=True)
+        return original(mart_dir, db_path, **{**kwargs, "embedder": HashEmbedder(), "before_embed": None})
 
     monkeypatch.setenv("METADATA_EMBEDDER", "bge")
     monkeypatch.setattr(importer, "run_import", fake_run_import)

@@ -591,6 +591,48 @@ def test_command_line_reindex_flag(tiny_mart, capsys):
     assert "用法" in capsys.readouterr().out
 
 
+def test_import_merges_compatible_vector_sources_in_order(tiny_mart, tiny_sheets, tmp_path, monkeypatch):
+    """坏库、无向量库和不兼容库被跳过，候选库补充的新文本仍能复用。"""
+    from metadata import importer
+    from tests.helpers import write_mart
+
+    base = run_import(tiny_mart, tmp_path / "base.db", embedder=HashEmbedder()).db_path
+    no_vectors = run_import(tiny_mart, tmp_path / "plain.db", build_index=False).db_path
+    incompatible = run_import(tiny_mart, tmp_path / "other.db", embedder=HashEmbedder(256)).db_path
+    tiny_sheets["字段清单"][3][2] = "账户余额"
+    write_mart(tiny_mart, tiny_sheets)
+    candidate = run_import(tiny_mart, tmp_path / "candidate.db", embedder=HashEmbedder()).db_path
+    broken = tmp_path / "broken.db"
+    broken.write_bytes(b"broken sqlite database")
+    captured = []
+    original = importer.build_vectors
+
+    def capture(*args, **kwargs):
+        captured.append(kwargs["previous"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(importer, "build_vectors", capture)
+    report = run_import(tiny_mart, tmp_path / "merged.db", embedder=RefusingHashEmbedder(),
+                        reuse_from=[tmp_path / "missing.db", broken, no_vectors, base, incompatible, candidate])
+
+    assert report.succeeded and "全部复用，没有调用向量器" in report.to_markdown()
+    merged = captured[0]
+    first = read_vectors(base).sets["field"]
+    second = read_vectors(candidate).sets["field"]
+    assert merged.embedder == "hash-bigram-512" and merged.dim == 512
+    assert merged.sets["field"].ref_ids == first.ref_ids + second.ref_ids
+    assert merged.sets["field"].texts == first.texts + second.texts
+    assert np.array_equal(merged.sets["field"].matrix, np.concatenate((first.matrix, second.matrix)))
+
+
+def test_import_uses_first_unusable_source_reason_and_empty_sources(tiny_mart, tmp_path):
+    plain = run_import(tiny_mart, tmp_path / "plain.db", build_index=False).db_path
+    report = run_import(tiny_mart, tmp_path / "new.db", reuse_from=[plain, tmp_path / "missing.db"])
+    assert "全部新算（上一次导入没有算向量）" in report.to_markdown()
+    report = run_import(tiny_mart, tmp_path / "new.db", reuse_from=[])
+    assert "全部新算（元数据库还不存在）" in report.to_markdown()
+
+
 # ---------- 全量检索 ----------
 
 

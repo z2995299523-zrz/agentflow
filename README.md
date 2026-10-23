@@ -88,6 +88,7 @@ Docker：`docker-compose up -d` 起两个容器，接口 `api`（镜像构建时
 1. `python -m metadata.template 模板.xlsx` 生成空白模板，按表清单、字段清单、血缘清单、关联关系填好，加工脚本放进 `scripts/`，历史样例放进 `examples/`
 2. `.env` 里把 `MART_DIR` 指向资料目录
 3. `python -m metadata.importer`，看导入报告里的错误和警告
+4. 资料改了再运行同一条命令：每次导成一个新版本并切换过去（向量按文本复用，资料没变不出新版本）；导错了用 `python -m metadata.versions rollback` 切回上一个版本，`list` 看全部版本
 
 ## 📡 API 端点
 

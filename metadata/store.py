@@ -161,7 +161,8 @@ def _vector_rows(vectors: VectorBundle) -> list[tuple[str, str, str, bytes]]:
     return rows
 
 
-def write_store(db_path: Path, mart: Mart, vectors: VectorBundle | None = None) -> None:
+def write_store(db_path: Path, mart: Mart, vectors: VectorBundle | None = None,
+                info: dict[str, str] | None = None) -> None:
     """全量重建元数据库
 
     先写临时文件，全部成功后再替换正式文件。中途失败时正式文件不受影响。
@@ -171,11 +172,14 @@ def write_store(db_path: Path, mart: Mart, vectors: VectorBundle | None = None) 
         db_path: 元数据库文件路径
         mart: 校验通过、已经补全脚本和关联的资料
         vectors: 字段和样例的向量；为 None 时不写向量（导入时加了 --no-index）
+        info: 额外的元数据库信息，不能覆盖 embedder 和 dim
 
     Raises:
         RuntimeError: 元数据库文件被其它程序占用，无法替换
         ValueError: 向量的条数或维度对不上
     """
+    if info is not None and {"embedder", "dim"}.intersection(info):
+        raise ValueError("info 不能包含 embedder 或 dim")
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = db_path.with_name(db_path.name + ".tmp")
@@ -226,6 +230,8 @@ def write_store(db_path: Path, mart: Mart, vectors: VectorBundle | None = None) 
                 conn.executemany("INSERT INTO meta_info VALUES (?, ?)",
                                  [("embedder", vectors.embedder), ("dim", str(vectors.dim))])
                 conn.executemany("INSERT INTO meta_vector VALUES (?, ?, ?, ?)", _vector_rows(vectors))
+            if info:
+                conn.executemany("INSERT INTO meta_info VALUES (?, ?)", info.items())
             conn.commit()
     except Exception:
         tmp_path.unlink(missing_ok=True)
@@ -238,7 +244,7 @@ def write_store(db_path: Path, mart: Mart, vectors: VectorBundle | None = None) 
             f"元数据库文件正被其它程序占用，请先关闭占用它的程序再重试: {db_path}") from error
 
 
-def _read_store(db_path: Path) -> tuple[Mart, VectorBundle | None]:
+def _read_store(db_path: Path) -> tuple[Mart, VectorBundle | None, str | None]:
     """把元数据库的全部内容读回内存
 
     Raises:
@@ -319,11 +325,26 @@ def _read_store(db_path: Path) -> tuple[Mart, VectorBundle | None]:
                 ],
             )
             vectors = _read_vectors(conn)
+            row = conn.execute("SELECT value FROM meta_info WHERE key = 'version_id'").fetchone()
+            version_id = row[0] if row is not None else None
     except sqlite3.DatabaseError as error:
         raise RuntimeError(
             f"读不了元数据库 {db_path}：{error}。它可能是旧版本导入器生成的，"
             "请重新运行 python -m metadata.importer 导入") from error
-    return mart, vectors
+    return mart, vectors, version_id
+
+
+def read_version_id(db_path: Path) -> str | None:
+    """只读元数据库的版本号；旧库返回 None，不存在或读不了时明确报错。"""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"元数据库不存在: {db_path}")
+    try:
+        with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+            row = conn.execute("SELECT value FROM meta_info WHERE key = 'version_id'").fetchone()
+            return row[0] if row is not None else None
+    except sqlite3.DatabaseError as error:
+        raise RuntimeError(f"读不了元数据库 {db_path} 里的版本号：{error}") from error
 
 
 def _read_vectors(conn: sqlite3.Connection) -> VectorBundle | None:
@@ -413,8 +434,9 @@ class MetadataStore:
         store._load(mart, vectors)
         return store
 
-    def _load(self, mart: Mart, vectors: VectorBundle | None) -> None:
+    def _load(self, mart: Mart, vectors: VectorBundle | None, version_id: str | None = None) -> None:
         """建立按表、按字段查找用的内部索引"""
+        self._version_id = version_id
         self._tables: dict[str, TableMeta] = {t.table_id: t for t in mart.tables}
         self._columns: dict[str, list[ColumnMeta]] = {table_id: [] for table_id in self._tables}
         for column in mart.columns:
@@ -429,6 +451,11 @@ class MetadataStore:
             self._script_columns.setdefault(script_column.target_table, []).append(script_column)
         self._examples: list[Example] = list(mart.examples)
         self._vectors = vectors
+
+    @property
+    def version_id(self) -> str | None:
+        """元数据库的版本号；旧库和内存构造的入口没有版本号。"""
+        return self._version_id
 
     def tables(self, layer: str | None = None) -> list[TableMeta]:
         """返回表清单，可按层级过滤，顺序与表清单一致"""

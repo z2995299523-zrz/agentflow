@@ -19,7 +19,46 @@ from metadata.models import (
     ScriptStatement,
     TableMeta,
 )
-from metadata.store import MetadataStore, VectorBundle, VectorSet, write_store
+from metadata.store import MetadataStore, VectorBundle, VectorSet, read_version_id, write_store
+
+
+def test_store_info_and_version_id(tmp_path):
+    path = tmp_path / "metadata.db"
+    mart = make_mart()
+    write_store(path, mart, info={"version_id": "20261023-1450", "source": "测试"})
+    assert read_version_id(path) == MetadataStore(path).version_id == "20261023-1450"
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT value FROM meta_info WHERE key='source'").fetchone()[0] == "测试"
+    assert MetadataStore.from_mart(mart).version_id is None
+    write_store(path, mart)
+    assert read_version_id(path) is None and MetadataStore(path).version_id is None
+
+
+@pytest.mark.parametrize("key", ["embedder", "dim"])
+def test_store_info_cannot_override_vector_metadata(tmp_path, key):
+    path = tmp_path / "metadata.db"
+    with pytest.raises(ValueError, match="embedder 或 dim"):
+        write_store(path, make_mart(), info={key: "wrong"})
+    assert not path.exists()
+
+
+def test_read_version_id_missing_does_not_create_file(tmp_path):
+    path = tmp_path / "absent.db"
+    with pytest.raises(FileNotFoundError):
+        read_version_id(path)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("content", [b"not sqlite", None])
+def test_read_version_id_rejects_invalid_database(tmp_path, content):
+    path = tmp_path / "invalid.db"
+    if content is None:
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    else:
+        path.write_bytes(content)
+    with pytest.raises(RuntimeError, match="读不了元数据库"):
+        read_version_id(path)
 
 
 def make_mart() -> Mart:

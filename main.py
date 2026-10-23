@@ -507,6 +507,7 @@ class HealthInfo(BaseModel):
     model: str
     dialect: str
     hint: str = ""
+    metadata_version: str | None = None
 
 
 def _model_info() -> tuple[str, str]:
@@ -532,4 +533,5 @@ def health(request: Request) -> HealthInfo:
     except Exception as error:  # noqa: BLE001 健康检查要如实报告，不能自己先崩
         problem = error if isinstance(error, ServiceUnavailable) else _unavailable(error)
         return HealthInfo(status=problem.status, counts={}, hint=problem.message, **base)
-    return HealthInfo(status="ok", counts=store.counts(), hint=model_hint, **base)
+    return HealthInfo(status="ok", counts=store.counts(), hint=model_hint,
+                      metadata_version=store.version_id, **base)
