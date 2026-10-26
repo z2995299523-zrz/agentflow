@@ -37,7 +37,7 @@ def metadata_contract(path: Path) -> dict:
         raise ValueError("元数据库没有可用的表和字段")
     if info.get("embedder") != "bge-small-zh-v1.5" or counts["字段向量"] != counts["字段"]:
         raise ValueError("正式发布必须具有完整 BGE 字段向量")
-    return {"counts": counts, "vector_model": info["embedder"]}
+    return {"counts": counts, "vector_model": info["embedder"], "version_id": info.get("version_id")}
 
 
 def make_profile(mart_dir: str, executor: str, release: Path) -> dict:

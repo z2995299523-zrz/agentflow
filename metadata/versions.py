@@ -155,6 +155,17 @@ def _fingerprint(root: Path, names: list[str]) -> tuple[dict[str, str], str]:
     return files, digest.hexdigest()
 
 
+def inputs_fingerprint(mart_dir: Path) -> tuple[dict[str, str], str]:
+    """返回与版本导入一致的输入文件指纹及合计摘要。"""
+    return _fingerprint(mart_dir, input_files(mart_dir))
+
+
+def active_manifest(build_dir: Path) -> dict | None:
+    """读取活动版本的清单；尚未登记活动版本时返回 None。"""
+    active = _read_json(build_dir / CURRENT_FILE_NAME).get("active")
+    return _read_json(_version_dir(build_dir, active) / VERSION_FILE_NAME) if active else None
+
+
 def _code_fingerprint() -> tuple[str, str | None]:
     """(代码摘要, Git 提交)：摘要覆盖 CODE_DIRS 下全部 .py；取不到提交（没有 Git 或 .git）时为 None"""
     root = Path(__file__).resolve().parents[1]

@@ -23,6 +23,7 @@ DATA = Path("/var/lib/agentflow")
 SITE_PATH = Path("/etc/agentflow/site.json")
 SITE_KEYS = ("public_url", "server_name", "cert_dir", "uv", "watch_units")
 NGINX_SITE = Path("/etc/nginx/sites-available/agentflow")
+ACCESS_CONF = Path("/etc/nginx/agentflow-access.conf")
 REMOTE = "https://github.com/z2995299523-zrz/agentflow.git"
 
 
@@ -132,14 +133,14 @@ def prepare(commit: str, frontend: Path, mart_dir: str | None = None, executor: 
     run("id", "agentflow")
     run("install", "-d", "-o", "agentflow", "-g", "agentflow", "-m", "750",
         str(DATA), str(DATA / "huggingface"), str(DATA / "marts"), "/var/backups/agentflow")
-    settings = read_environment()
+    settings = read_environment(ENV_PATH)
     selected_mart = mart_dir or settings.get("MART_DIR", "./data/mock_mart")
     selected_executor = executor or settings.get("EXECUTOR", "duckdb")
     if selected_mart not in ("./data/mock_mart", "data/mock_mart"):
         root = Path(selected_mart).resolve()
         if not root.is_relative_to(DATA / "datasets") or selected_executor != "none":
             raise ValueError("真实资料只能使用 datasets 下的独立快照，且不连接模拟执行库")
-        access = Path("/etc/nginx/agentflow-access.conf")
+        access = ACCESS_CONF
         if not access.is_file() or "auth_basic_user_file" not in access.read_text():
             raise RuntimeError("真实资料发布前必须先启用站点访问密码")
         profile = make_profile(selected_mart, selected_executor, release)
@@ -178,7 +179,7 @@ def prepare(commit: str, frontend: Path, mart_dir: str | None = None, executor: 
 def health(expected: dict | None = None) -> dict:
     """核对实际资料和准备阶段契约，兼容真实资料只生成 SQL 的部署。"""
     if expected is None:
-        settings = read_environment()
+        settings = read_environment(ENV_PATH)
         expected = make_profile(settings["MART_DIR"], settings["EXECUTOR"], BASE / "current")
     with urllib.request.urlopen("http://127.0.0.1:8790/health", timeout=10) as response:
         result = json.load(response)
@@ -186,6 +187,8 @@ def health(expected: dict | None = None) -> dict:
     assert result["executor"] == expected["executor"], "执行层不符合发布契约"
     assert result["mart_dir"] == expected["mart_dir"], "资料目录不符合发布契约"
     assert result["counts"] == expected["counts"], "元数据数量不符合发布契约"
+    if expected.get("version_id") and "metadata_version" in result:
+        assert result["metadata_version"] == expected["version_id"], "资料版本不符合发布契约"
     assert result["counts"]["字段向量"] > 0, result
     return result
 
@@ -209,9 +212,10 @@ def activate(commit: str, profile_override: dict | None = None) -> None:
     old = (BASE / "current").resolve() if (BASE / "current").exists() else None
     prepared = json.loads((evidence / "prepared.json").read_text())
     profile = profile_override or prepared.get("profile") or make_profile("./data/mock_mart", "duckdb", release)
-    if profile["external"] and not Path("/etc/nginx/agentflow-access.conf").is_file():
+    if profile["external"] and (not ACCESS_CONF.is_file()
+                                or "auth_basic_user_file" not in ACCESS_CONF.read_text()):
         raise RuntimeError("真实资料激活前必须保留站点访问保护")
-    settings = read_environment()
+    settings = read_environment(ENV_PATH)
     old_profile = make_profile(settings["MART_DIR"], settings["EXECUTOR"], old or release)
     old_env = ENV_PATH.read_bytes()
     env_backup = evidence / f"runtime-before-{time.time_ns()}.env"
@@ -240,9 +244,9 @@ def activate(commit: str, profile_override: dict | None = None) -> None:
             content = nginx_site if target == NGINX_SITE else source.read_bytes()
             # 回退到历史模板时也保留现有密码保护，不因旧代码模板缺少 include 而公开站点。
             if (target == NGINX_SITE
-                    and Path("/etc/nginx/agentflow-access.conf").is_file() and b"agentflow-access" not in content):
+                    and ACCESS_CONF.is_file() and b"agentflow-access" not in content):
                 content = content.replace(b"    server_tokens off;", b"    server_tokens off;\n"
-                                          b"    include /etc/nginx/agentflow-access.conf;")
+                                          + f"    include {ACCESS_CONF};".encode())
                 if b"agentflow-access" not in content:
                     raise RuntimeError("无法在旧版 Nginx 模板中保留访问保护")
             target.write_bytes(content)
@@ -290,6 +294,74 @@ def activate(commit: str, profile_override: dict | None = None) -> None:
         raise
 
 
+def switch_data(commit: str, mart_dir: str, executor: str | None = None, *, how: str = "switch") -> None:
+    """在当前提交上切换资料；先备份会话，失败恢复配置，成功登记可回退记录。"""
+    release = BASE / "releases" / f"git-{commit}"
+    evidence = BASE / "deployments" / commit
+    if not (BASE / "current").exists() or (BASE / "current").resolve() != release.resolve():
+        raise ValueError("当前指针不是这个提交，不能只切换资料")
+    settings = read_environment(ENV_PATH)
+    selected_executor = executor or settings["EXECUTOR"]
+    root = Path(mart_dir).resolve()
+    if not root.is_relative_to((DATA / "datasets").resolve()):
+        raise ValueError("新资料必须在 datasets 下的独立快照目录中")
+    if not ACCESS_CONF.is_file() or "auth_basic_user_file" not in ACCESS_CONF.read_text():
+        raise RuntimeError("资料切换前必须启用站点访问密码保护")
+    profile = make_profile(str(root), selected_executor, release)
+    if not Path(profile["history_path"]).is_file():
+        raise RuntimeError("资料的稳定会话库尚未初始化")
+    old_profile = make_profile(settings["MART_DIR"], settings["EXECUTOR"], release)
+    old_root = (release / settings["MART_DIR"]).resolve()
+    if root == old_root:
+        raise ValueError("新资料和当前资料是同一个目录")
+    old_env = ENV_PATH.read_bytes()
+    stamp = time.time_ns()
+    env_backup = evidence / f"runtime-before-{stamp}.env"
+    changed = False                          # 运行配置改过才需要恢复、重启；备份失败这类动手前的错误不碰服务
+    try:
+        as_app(release, str(release / "deploy/backup_history.py"), "--source", old_profile["history_path"])
+        evidence.mkdir(parents=True, exist_ok=True)
+        # 独占创建并限制权限，运行配置备份中可能含有密钥。
+        with env_backup.open("xb") as output:
+            env_backup.chmod(0o600)
+            output.write(old_env)
+        changed = True
+        write_profile(ENV_PATH, profile)
+        run("systemctl", "restart", "agentflow")
+        for attempt in range(30):
+            try:
+                status = health(profile)
+                break
+            except Exception:
+                if attempt == 29:
+                    raise
+                time.sleep(2)
+        save(evidence / f"data-switch-{stamp}.json", {
+            "commit": commit, "how": how, "from": old_profile, "to": profile,
+            "runtime_backup": str(env_backup), "health": status,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    except Exception as error:
+        if changed:
+            try:
+                ENV_PATH.write_bytes(old_env)
+                run("systemctl", "restart", "agentflow")
+            except Exception as recovery_error:
+                error.add_note(f"恢复运行配置或重启失败：{recovery_error}")
+        raise
+    print(json.dumps({"mart_dir": profile["mart_dir"], "version_id": profile["version_id"],
+                      "counts": profile["counts"]}, ensure_ascii=False))
+
+
+def rollback_data(commit: str) -> None:
+    """按本提交最近一次资料切换记录回退；再次回退可切回刚才的资料。"""
+    records = list((BASE / "deployments" / commit).glob("data-switch-*.json"))
+    if not records:
+        raise ValueError("这个提交上没有换过资料，没有可回退的")
+    latest = max(records, key=lambda path: int(path.stem.removeprefix("data-switch-")))
+    previous = json.loads(latest.read_text(encoding="utf-8"))["from"]
+    switch_data(commit, previous["mart_dir"], previous["executor"], how="rollback")
+
+
 def verify(commit: str) -> None:
     """核对活动提交、前端字节、服务与备份任务，保存验收证据。"""
     release = BASE / "releases" / f"git-{commit}"
@@ -321,7 +393,7 @@ def main() -> None:
     """接受完整提交及发布阶段，仅允许 root 在固定目录执行。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("commit")
-    parser.add_argument("stage", choices=("prepare", "activate", "verify", "rollback"))
+    parser.add_argument("stage", choices=("prepare", "activate", "verify", "rollback", "switch-data", "rollback-data"))
     parser.add_argument("--frontend", type=Path)
     parser.add_argument("--mart-dir", help="准备阶段选用的资料目录；默认沿用服务器现有配置")
     parser.add_argument("--executor", choices=("none", "duckdb"))
@@ -333,6 +405,12 @@ def main() -> None:
         if args.frontend is None:
             parser.error("prepare 必须提供 --frontend")
         prepare(args.commit, args.frontend, args.mart_dir, args.executor)
+    elif args.stage == "switch-data":
+        if args.mart_dir is None:
+            parser.error("switch-data 必须提供 --mart-dir")
+        switch_data(args.commit, args.mart_dir, args.executor)
+    elif args.stage == "rollback-data":
+        rollback_data(args.commit)
     else:
         {"activate": activate, "verify": verify, "rollback": rollback}[args.stage](args.commit)
 

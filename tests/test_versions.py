@@ -26,6 +26,22 @@ def current(mart_dir: Path) -> dict:
     return read_json(mart_dir / "build" / "current.json")
 
 
+def test_inputs_fingerprint_matches_registered_version(tiny_mart: Path) -> None:
+    """公开指纹与实际导入的版本登记一致。"""
+    result = versions.import_version(tiny_mart, now=NOW)
+    manifest = read_json(result.version_dir / "version.json")
+    assert versions.inputs_fingerprint(tiny_mart) == (manifest["inputs"], manifest["inputs_digest"])
+    assert versions.active_manifest(tiny_mart / "build") == manifest
+
+
+def test_active_manifest_without_active_version(tmp_path: Path) -> None:
+    """没有指针文件或指针未登记活动版本时返回 None。"""
+    assert versions.active_manifest(tmp_path) is None
+    for value in ({}, {"active": None}):
+        (tmp_path / "current.json").write_text(json.dumps(value), encoding="utf-8")
+        assert versions.active_manifest(tmp_path) is None
+
+
 def active_files(mart_dir: Path) -> dict[str, bytes]:
     """保存活动文件原始字节，用于检查失败或候选导入没有改变它们。"""
     return {name: (mart_dir / "build" / name).read_bytes()

@@ -107,31 +107,41 @@ sudo systemctl status agentflow --no-pager
 
 1. 标准 CSV 清单。
 2. `scripts/` 下的加工 SQL。
-3. 用 SQLite 在线备份生成的 `build/metadata.db`，含已计算的 BGE 向量。
-4. `dataset-manifest.json`，登记数量、向量器和逐文件 SHA256。
+3. 用 SQLite 在线备份生成的 `build/metadata.db`，含已计算的 BGE 向量和版本号。
+4. `version.json`：版本号、数量、输入和代码的摘要、关卡结果、需确认项条数；不含文件名和需确认项原文。
+5. `dataset-manifest.json`，登记数量、向量器、版本号和逐文件 SHA256。
 
 本地 `build/history.db`、`.env`、业务数据、评估文件、`convert.ini`、源资料路径和保密词文件都不会被复制。这个操作是发布模型资料，不是迁移单位数据库。
 
 资料包内的加工 SQL 仅用于提供模型和血缘证据，不要把它们作为初始化脚本连到单位数据库执行。
 
+资料有变化时，先在本机导成新版本（元数据按版本管理，见 `notes/2026-10-23_design_元数据更新机制.md`）：
+
+```powershell
+python data/real_mart/convert.py                 # 来源资料变了时先转换
+python -m metadata.importer data/real_mart       # 导成新版本，和上一版比出差异报告
+```
+
+导入后没有需确认项就自动切换；有需确认项时，先看 `data/real_mart/build/versions/<版本号>/diff_report.md`，确认没问题再运行 `python -m metadata.versions promote <版本号> --accept --mart data/real_mart`。差异报告里有真实表名，只留在本机。
+
 ```powershell
 python deploy/dataset.py package `
   --mart-dir data/real_mart `
-  --output .runtime-deploy/private-dataset-<新批次>.tar.gz
+  --output .runtime-deploy/private-dataset-<版本号>.tar.gz
 ```
 
-目标文件已存在时脚本拒绝覆盖。资料有变化时先确认本地元数据库已按当前清单和脚本重新导入；不要仅修改 CSV 就沿用旧元数据库。BGE 向量与元数据必须配套。
+目标文件已存在时脚本拒绝覆盖。打包前脚本会核对版本状态，下面任何一条不满足就拒绝打包：资料目录有活动版本；活动版本不是旧库登记的（有输入记录）；资料目录里现在的清单和脚本与活动版本登记的一致（改了没重新导入会被拦下）；`build/metadata.db` 的版本号就是活动版本。BGE 向量与元数据必须配套。
 
 上传前后核对脚本输出的 SHA256。使用 SSH/SCP 传输，临时包应为 0600，安装后的真实资料目录只给 root 和应用账户读取。服务器安装命令：
 
 ```bash
-sudo python3 /opt/agentflow/releases/git-<新SHA>/deploy/dataset.py install \
-  --archive /tmp/agentflow-private-<新批次>.tar.gz \
-  --id real-<新批次> \
+sudo python3 /opt/agentflow/current/deploy/dataset.py install \
+  --archive /tmp/agentflow-private-<版本号>.tar.gz \
+  --id real-<版本号> \
   --history /var/lib/agentflow/history-real.db
 ```
 
-`--id` 只接受 real/private 前缀、英文小写字母、数字和连字符。已安装的同名目录拒绝覆盖。脚本会阻止路径越界、链接、摘要不一致、清单外文件和本地会话库进入资料快照。
+`--id` 只接受 real/private 前缀、英文小写字母、数字和连字符；用本机的版本号命名，例如版本 `20261023-1450` 装成 `real-20261023-1450`，服务器上的快照和本机版本一一对得上。已安装的同名目录拒绝覆盖。脚本会阻止路径越界、链接、摘要不一致、清单外文件和本地会话库进入资料快照；包里有 `version.json` 时，它的版本号必须和元数据库里的一致。旧格式的包（没有版本号）照旧能装。随新代码一起发布资料时，用新代码目录 `/opt/agentflow/releases/git-<新SHA>/deploy/dataset.py` 安装。
 
 首次使用真实会话库时，先以 `agentflow` 账户调用 `ConversationStore` 初始化稳定库，再安装资料或启动服务。不要复制本地真实会话来替代初始化。后续更新复用服务器现有稳定会话库。
 
@@ -194,7 +204,7 @@ sudo python3 "$release_dir/deploy/release.py" "$release_sha" prepare \
   --executor none
 ```
 
-仅代码更新时，可省略 `--mart-dir` 和 `--executor`，脚本会沿用服务器当前的真实资料配置。更新资料时填写新快照路径。
+仅代码更新时，可省略 `--mart-dir` 和 `--executor`，脚本会沿用服务器当前的真实资料配置。只换资料、代码不变时，不走 prepare/activate，用下面「只换真实资料」一节的 `switch-data`；代码和资料都要更新时分两步：先发代码（资料不变），验收后再 `switch-data`，出了问题知道是哪一步。
 
 准备阶段会：核对前端提交和摘要，建立独立 `.venv`，安装官方 CPU 版 torch 与服务器依赖，记录完整 Linux 依赖版本，运行所有单元测试，再核对真实元数据库的完整性、数量、BGE 向量、访问控制和稳定会话路径。真实资料不重新造 DuckDB，也不自动重算全部向量。
 
@@ -226,6 +236,33 @@ SQL_DIALECT=postgres
 
 DeepSeek 凭据继续留在 `app.env`，不是从 Git 拉取。真实资料切换时，必须将 `EXECUTOR` 一并设为 `none`，不能向模拟库执行真实表名对应的 SQL。
 
+## 只换真实资料
+
+代码不变、只换真实资料时，在当前代码目录执行：
+
+```bash
+current_sha=$(basename "$(readlink -f /opt/agentflow/current)" | sed 's/^git-//')
+[[ "$current_sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+sudo python3 /opt/agentflow/current/deploy/release.py "$current_sha" switch-data \
+  --mart-dir /var/lib/agentflow/datasets/real-<版本号>
+```
+
+`switch-data` 动手前核对：当前指针就是这个提交；新快照在 `/var/lib/agentflow/datasets/` 下，`EXECUTOR` 保持 `none`；站点访问密码在；新快照的完整性、数量、BGE 向量、版本号都合格；稳定会话库已存在；新资料和当前资料不是同一份。任何一条不满足就停下，什么都不改。然后在线备份当前资料的会话库，把运行配置原文存成 `deployments/<SHA>/runtime-before-*.env`（仅 root 可读），改运行配置里的 `MART_DIR`，重启本应用，按新快照的契约做健康检查（含版本号）。健康检查失败就写回原来的运行配置并重启，再报错。成功后在 `deployments/<SHA>/data-switch-*.json` 记下换前换后的资料，`rollback-data` 用它。代码指针和 `previous.json` 都不动，所以代码回退和资料回退互不干扰。
+
+切回上一份资料：
+
+```bash
+sudo python3 /opt/agentflow/current/deploy/release.py "$current_sha" rollback-data
+```
+
+`rollback-data` 按最近一次 `data-switch` 记录切回换之前的快照，同样会备份、检查、失败恢复，并记一条新记录，所以连着执行两次就回到原处。它只在 `datasets` 下的快照之间切换；要回到模拟资料，用代码回退 `rollback`。
+
+注意：
+
+- `switch-data`、`rollback-data` 和带版本号的资料包，要服务器上运行的是包含元数据版本功能的代码才有。2026-10-19 上线的 `e957221…` 没有，它的 `dataset.py install` 也不认包里的 `version.json`。第一次先按「常规代码发布顺序」发新代码（资料不变），之后再用 `switch-data` 换资料
+- 重启会打断正在跑的查询（没跑完的这一轮不会落库），切换安排在没人用的时候
+- 旧快照不自动删；人工清理时至少留当前和上一份（`rollback-data` 要用上一份）
+
 ## 上线验收
 
 SSH 内部检查不需要网站访问密码：
@@ -243,7 +280,7 @@ curl --fail --user agentflow https://<服务器IP>:8447/api/health
 至少检查：
 
 - 未认证访问首页和元数据接口返回 401；已认证访问正常。
-- `/api/health` 为 `status=ok`，`executor=none`，`counts` 等于本次资料契约；真实资料当前是 833 张表，不是 14 张表。
+- `/api/health` 为 `status=ok`，`executor=none`，`counts` 等于本次资料契约；真实资料当前是 833 张表，不是 14 张表。新版本代码还返回 `metadata_version`，应等于本次资料的版本号（快照名 `real-<版本号>` 里的那段），`reload_error` 为空。
 - 前端显示真实资料与“只生成 SQL”；表、字段、搜索及血缘图能加载。
 - 使用真实资料的典型需求调用 DeepSeek，SQL 的静态校验通过、实际用表存在于本次元数据库中。
 - `exec_result` 为空，或其中 `executed=false`。界面没有业务查询结果是当前执行契约，不应捏造一组数据来演示执行成功。
@@ -277,6 +314,8 @@ sudo python3 /opt/agentflow/current/deploy/release.py <需要撤回的当前完�
 ```
 
 回退使用本次 `previous.json` 登记的代码和资料配置，保留两套会话数据库的新记录。若上一版是模拟资料，回退后会显示原模拟会话；真实会话仍在 `history-real.db` 中，没有被覆盖。
+
+只回退资料、代码不动时用 `rollback-data`（见「只换真实资料」）。会话库跨资料版本共用，不随资料回退；资料换了以后，追问会先在当前资料上核对上一轮的 SQL，表或字段没了就按完整需求重新生成。
 
 本次真实资料发布的上一版是旧模拟版本。发布脚本在回退旧版 Nginx 模板时会继续保留已有的密码 include；回退后仍须核对匿名访问为 401。后续新版本的模板已保留外部访问控制 include。
 

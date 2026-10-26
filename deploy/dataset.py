@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import tarfile
 import tempfile
 from contextlib import closing
@@ -35,8 +36,24 @@ def package_dataset(mart_dir: Path, destination: Path) -> dict:
     destination = destination.resolve()
     if destination.exists():
         raise FileExistsError("资料包目标已存在，不能覆盖历史快照")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    # 服务器安装只用系统 Python；版本模块仅在本机打包时加载。
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from metadata.versions import active_manifest, inputs_fingerprint
+
+    version = active_manifest(mart_dir / "build")
+    if not version:
+        raise ValueError("没有活动版本；先运行 python -m metadata.importer 导入，生成版本")
+    if not version.get("inputs_digest"):
+        raise ValueError("活动版本是旧库登记的，没有输入记录；先运行 python -m metadata.importer 再打包")
+    if inputs_fingerprint(mart_dir)[1] != version["inputs_digest"]:
+        raise ValueError(f"资料目录里的清单或脚本和活动版本 {version['version_id']} 登记的不一致，"
+                         "改了没重新导入？先运行 python -m metadata.importer")
     source_db = mart_dir / "build/metadata.db"
+    if metadata_contract(source_db)["version_id"] != version["version_id"]:
+        raise ValueError("build/metadata.db 的 version_id 和活动版本号不一致；先运行 python -m metadata.importer")
+    destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
         staging = Path(temporary)
         (staging / "build").mkdir()
@@ -49,9 +66,17 @@ def package_dataset(mart_dir: Path, destination: Path) -> dict:
             output = staging / relative
             output.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, output)
+        public_version = {key: version.get(key) for key in (
+            "version_id", "created_at", "baseline", "inputs_digest", "code_digest", "git_commit",
+            "embedder", "dim", "counts", "gates", "accepted_at")}
+        public_version["confirm_count"] = len(version.get("confirm_items", []))
+        (staging / "version.json").write_text(
+            json.dumps(public_version, ensure_ascii=False, indent=2), encoding="utf-8")
         files = sorted(path for path in staging.rglob("*") if path.is_file())
         manifest = {"format": 1, **metadata_contract(staging / "build/metadata.db"),
                     "files": {path.relative_to(staging).as_posix(): digest(path) for path in files}}
+        if manifest["version_id"] != version["version_id"]:
+            raise ValueError("打包期间元数据库版本发生变化，请重新打包")
         content = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
         with tarfile.open(destination, "w:gz") as bundle:
             for path in files:
@@ -61,7 +86,8 @@ def package_dataset(mart_dir: Path, destination: Path) -> dict:
             bundle.addfile(entry, io.BytesIO(content))
     destination.chmod(0o600)
     return {"archive": str(destination), "sha256": digest(destination), "files": len(manifest["files"]),
-            "counts": manifest["counts"], "vector_model": manifest["vector_model"]}
+            "counts": manifest["counts"], "vector_model": manifest["vector_model"],
+            "version_id": manifest["version_id"]}
 
 
 def unpack_dataset(archive: Path, staging: Path) -> dict:
@@ -84,7 +110,7 @@ def unpack_dataset(archive: Path, staging: Path) -> dict:
             raise ValueError("资料包条目与清单不一致")
         for name, expected in manifest["files"].items():
             path = PurePosixPath(name)
-            allowed = (name == "build/metadata.db" or name in STANDARD_CSV_NAMES
+            allowed = (name in ("build/metadata.db", "version.json") or name in STANDARD_CSV_NAMES
                        or (len(path.parts) == 2 and path.parts[0] == "scripts" and path.suffix == ".sql"))
             if not allowed:
                 raise ValueError("资料包只能包含元数据库、CSV 清单和 SQL 脚本")
@@ -95,10 +121,16 @@ def unpack_dataset(archive: Path, staging: Path) -> dict:
             if digest(target) != expected:
                 raise ValueError("资料包文件摘要不一致")
         contract = metadata_contract(staging / "build/metadata.db")
+        if "version.json" in names:
+            version = json.loads((staging / "version.json").read_text(encoding="utf-8"))
+            if "version_id" not in version or version["version_id"] != contract["version_id"]:
+                raise ValueError("version.json 的 version_id 与元数据库不一致")
+        if "version_id" in manifest and manifest["version_id"] != contract["version_id"]:
+            raise ValueError("资料包清单的 version_id 与元数据库不一致")
         if contract["counts"] != manifest["counts"] or contract["vector_model"] != manifest["vector_model"]:
             raise ValueError("元数据库与清单契约不一致")
         (staging / "dataset-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    return manifest
+    return {**manifest, "version_id": contract["version_id"]}
 
 
 def install_dataset(archive: Path, dataset_id: str, history: Path) -> dict:
@@ -127,7 +159,8 @@ def install_dataset(archive: Path, dataset_id: str, history: Path) -> dict:
     (staging / "build/history.db").symlink_to(history)
     staging.rename(destination)
     return {"dataset_id": dataset_id, "mart_dir": str(destination), "history_path": str(history),
-            "archive_sha256": digest(archive), "counts": manifest["counts"], "vector_model": manifest["vector_model"]}
+            "archive_sha256": digest(archive), "counts": manifest["counts"], "vector_model": manifest["vector_model"],
+            "version_id": manifest["version_id"]}
 
 
 def main() -> None:
