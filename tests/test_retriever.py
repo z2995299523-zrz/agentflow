@@ -22,6 +22,7 @@ from metadata.store import MetadataStore
 from nl2sql import retriever as retriever_module
 from nl2sql.retriever import (
     MAX_EXAMPLES,
+    MAX_EXTRA_TABLES,
     MAX_HITS_PER_TABLE,
     MAX_TABLES,
     MAX_UPSTREAM_TABLES,
@@ -197,6 +198,56 @@ def test_tables_of_the_previous_round_are_carried_in_without_taking_a_slot():
     assert [item.table_id for item in result.tables if item.reason == "previous"] == ["dwd.src"]  # 已在候选里的、没有的、重复的跳过
     assert reasons.count("recall") == MAX_TABLES and reasons.index("previous") == MAX_TABLES      # 不占名额，紧跟召回的表
     assert next(item for item in result.tables if item.table_id == "dwd.src").hits == []          # 第 0 层范围外，没有命中
+
+
+def standard_tables() -> list[tuple]:
+    """extra_mart 里的 10 张标准表"""
+    return [(f"ads.t{number:02d}", "存款汇总", [(f"amt_t{number}", "存款金额一")]) for number in range(1, 11)]
+
+
+def extra_mart() -> Mart:
+    """10 张标准表各有 1 个字段「存款金额一」；4 张非标准表各有 1 个字段，中文名正好是「存款金额」，
+    和标准表一起排名时能挤进前 8；还有 1 张非标准表只有「备注」
+
+    标准表的字段名各不相同：同一层里超过一半的表都有的字段名会被当成样板字段，不参与计分
+    """
+    tables = standard_tables()
+    tables += [(f"ads.x{number}", "存款实库表", [("amt", "存款金额")]) for number in range(1, 5)]
+    tables.append(("ads.x9", "其他实库表", [("note", "备注")]))
+    mart = make_mart(tables)
+    return mart.model_copy(update={"tables": [table.model_copy(update={"standard": table.table_id.startswith("ads.t")})
+                                              for table in mart.tables]})
+
+
+def test_non_standard_tables_rank_on_their_own_and_take_no_slot():
+    mart = extra_mart()
+    retriever = make_retriever(mart)
+    query = RecallQuery("存款金额汇总统计", ["存款金额"])
+
+    result = retriever.recall(query)
+
+    assert retriever.scope_tables(0)[0] == [f"ads.t{number:02d}" for number in range(1, 11)]     # 第 0 层只有标准表
+    assert [item.reason for item in result.tables] == ["recall"] * MAX_TABLES + ["extra"] * MAX_EXTRA_TABLES
+    extras = result.tables[MAX_TABLES:]
+    assert {item.table_id for item in extras} < {"ads.x1", "ads.x2", "ads.x3", "ads.x4"}           # 只要有命中的
+    assert all(item.hits for item in extras)
+    # 标准表的先后和得分，和元数据里没有非标准表时完全一样
+    standard_only = make_retriever(make_mart(standard_tables()))
+    assert [(item.table_id, item.score) for item in result.tables[:MAX_TABLES]] == [
+        (item.table_id, item.score) for item in standard_only.recall(query).tables]
+    # 对照实验 A 组：全部表一起排名，不分是不是标准表，非标准表照样占名额，没有 extra
+    group_a = retriever.recall(query, all_layers=True)
+    assert any(item.table_id.startswith("ads.x") for item in group_a.tables[:MAX_TABLES])
+    assert {item.reason for item in group_a.tables} == {"recall"}
+
+
+def test_a_term_that_only_hits_non_standard_tables_is_not_reported_as_missing():
+    retriever = make_retriever(extra_mart(), with_embedder=False)
+
+    result = retriever.recall(RecallQuery("看一下备注", ["备注"]))
+
+    assert [(item.table_id, item.reason) for item in result.tables] == [("ads.x9", "extra")]
+    assert not any("没有命中任何字段" in note for note in result.notes)
 
 
 def bridge_mart() -> Mart:

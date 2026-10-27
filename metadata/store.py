@@ -38,7 +38,8 @@ CREATE TABLE meta_table (
     table_type    TEXT NOT NULL,
     grain_columns TEXT NOT NULL,
     date_column   TEXT,
-    description   TEXT NOT NULL DEFAULT ''
+    description   TEXT NOT NULL DEFAULT '',
+    standard      INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE meta_column (
     table_id    TEXT NOT NULL,
@@ -189,9 +190,9 @@ def write_store(db_path: Path, mart: Mart, vectors: VectorBundle | None = None,
         with closing(sqlite3.connect(tmp_path)) as conn:
             conn.executescript(SCHEMA_SQL)
             conn.executemany(
-                "INSERT INTO meta_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO meta_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(t.table_id, t.layer, t.schema_name, t.table_name, t.table_cn, t.table_type,
-                  ",".join(t.grain_columns), t.date_column, t.description) for t in mart.tables],
+                  ",".join(t.grain_columns), t.date_column, t.description, int(t.standard)) for t in mart.tables],
             )
             conn.executemany(
                 "INSERT INTO meta_column VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -261,6 +262,8 @@ def _read_store(db_path: Path) -> tuple[Mart, VectorBundle | None, str | None]:
                         table_type=row["table_type"],
                         grain_columns=[name for name in row["grain_columns"].split(",") if name],
                         date_column=row["date_column"], description=row["description"],
+                        # 加「标准表」之前导入的库没有这一列，全部按标准表
+                        standard=bool(row["standard"]) if "standard" in row.keys() else True,
                     )
                     for row in conn.execute("SELECT * FROM meta_table ORDER BY rowid")
                 ],

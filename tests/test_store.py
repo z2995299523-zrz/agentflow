@@ -238,6 +238,25 @@ def test_script_column_scopes_round_trip_and_old_databases_read_as_unknown(tmp_p
     assert column.scopes == [] and column.expression == "SUM(ods.acct.bal)"
 
 
+def test_standard_flag_round_trips_and_old_databases_read_as_standard(tmp_path):
+    mart = make_mart()
+    mart.tables[0] = mart.tables[0].model_copy(update={"standard": False})
+    write_store(tmp_path / "m.db", mart)
+    assert [t.standard for t in MetadataStore(tmp_path / "m.db").tables()] == [False] + [True] * (len(mart.tables) - 1)
+
+    with closing(sqlite3.connect(tmp_path / "m.db")) as conn:             # 加「标准表」之前导入的库：没有这一列
+        conn.executescript("""
+            CREATE TABLE old_table AS
+                SELECT table_id, layer, schema_name, table_name, table_cn, table_type, grain_columns, date_column,
+                       description
+                FROM meta_table;
+            DROP TABLE meta_table;
+            ALTER TABLE old_table RENAME TO meta_table;
+        """)
+
+    assert all(t.standard for t in MetadataStore(tmp_path / "m.db").tables())
+
+
 def test_columns_of_unlisted_table_do_not_break_the_store():
     mart = make_mart()
     mart.columns.append(ColumnMeta(table_id="ods.other", column_name="x", ordinal=1, column_cn="某字段"))

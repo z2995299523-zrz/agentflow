@@ -119,7 +119,8 @@ def diff_stores(baseline: MetadataStore, candidate: MetadataStore, *,
     new_columns = _models([c for t in candidate.tables() for c in candidate.columns(t.table_id)],
                           lambda c: (c.table_id, c.column_name))
     result.tables = _compare(old_tables, new_tables,
-                             ("layer", "table_type", "grain_columns", "date_column", "table_cn", "description"))
+                             ("layer", "table_type", "grain_columns", "date_column", "table_cn", "description",
+                              "standard"))
     result.columns = _compare(old_columns, new_columns,
                               ("column_cn", "data_type", "is_pk", "description", "enum_values"))
     edge_key = lambda e: (e.target_table, e.target_column, e.source_table, e.source_column)

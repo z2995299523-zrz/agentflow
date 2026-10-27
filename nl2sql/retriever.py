@@ -10,6 +10,8 @@
 上溯加入的上游表不占 MAX_TABLES 的名额，命中字段在这些表自己的范围里单独找，不与专题层的表争名次；
 但数量有上限：只留有命中字段的，按表得分最多 MAX_UPSTREAM_TABLES 张。一张也没命中时无从比较，取最近的前 MAX_UPSTREAM_TABLES 张，
 免得上溯一张表也不给。没留下的维表回到第 0 层，和专题层的表一起排名。
+表清单里标成非标准表的（设计文档没收录、只在实库里有）不进第 0 层：它们同样在自己的范围里单独找命中字段、单独排名，
+有命中的前 MAX_EXTRA_TABLES 张补进候选，不占标准表的名额。真实库上这类表比标准表还多，一起排名时会把标准表挤出候选。
 
 打分：
     关键字路  汉字二元组和英文单词的覆盖率：字段中文名占 0.7，表中文名占 0.3，检索词是字段中文名的子串再加 0.2
@@ -39,6 +41,7 @@ from metadata.store import MetadataStore
 
 MAX_TABLES = 8
 MAX_UPSTREAM_TABLES = 8                       # 上溯加入的上游表最多留几张，真实库上第 2 层的上游闭包有几十张
+MAX_EXTRA_TABLES = 3                          # 非标准表单独排名后最多补几张
 MISSING_TABLES_PER_TERM = 2                   # ④ 说缺的每一样单独召回时取前几张
 MAX_MISSING_TABLES = 6                        # 单独召回补进来的表最多几张
 MAX_EXAMPLES = 3
@@ -57,7 +60,7 @@ BOILERPLATE_MIN_TABLES = 10                  # 样本太小时比例没有意义
 SCORE_DIGITS = 10                            # 比较得分时保留的小数位：浮点误差不能打乱同分的先后
 UPSTREAM_LAYERS = {1: ("整合层",), 2: ("整合层", "贴源层")}    # 上溯层数 → 上游表的层级
 REASON_RECALL, REASON_UPSTREAM, REASON_EXAMPLE = "recall", "upstream", "example"
-REASON_PREVIOUS, REASON_MISSING = "previous", "missing"
+REASON_PREVIOUS, REASON_MISSING, REASON_EXTRA = "previous", "missing", "extra"
 VIA_VECTOR, VIA_KEYWORD = "vector", "keyword"
 
 
@@ -88,7 +91,7 @@ class TableCandidate:
     """一张候选表"""
 
     table_id: str
-    reason: str                          # recall、previous、missing、upstream 或 example
+    reason: str                          # recall、previous、missing、upstream、extra 或 example
     score: float
     hits: list[FieldHit]
 
@@ -210,8 +213,10 @@ class Retriever:
         self._graph = graph
         self._embedder = embedder
         self._tables = {table.table_id: table for table in store.tables()}
-        self._level0 = sorted(table.table_id for table in store.tables()
-                              if table.layer == "专题层" or (table.layer == "整合层" and table.table_type == "维表"))
+        first_level = [table for table in store.tables()
+                       if table.layer == "专题层" or (table.layer == "整合层" and table.table_type == "维表")]
+        self._level0 = sorted(table.table_id for table in first_level if table.standard)
+        self._extra_pool = sorted(table.table_id for table in first_level if not table.standard)   # 非标准表，单独排名
 
         self._boilerplate = self._find_boilerplate()
         self._fields: list[_Field] = []
@@ -336,17 +341,18 @@ class Retriever:
                missing_terms: Sequence[str] = ()) -> RecallResult:
         """召回候选表和相似样例
 
-        候选表分五类，按 recall、previous、missing、upstream、example 的顺序排列：
-        recall 是范围内（第 0 层）得分最高的前 MAX_TABLES 张；
+        候选表分六类，按 recall、previous、missing、upstream、extra、example 的顺序排列：
+        recall 是范围内（第 0 层，只有标准表）得分最高的前 MAX_TABLES 张；
         previous 是追问时上一轮 SQL 用到的表（carry_tables），原样带进来；
         missing 是 ④ 最近一次说缺的东西（missing_terms）逐条单独在第 0 层排名，轮流各取一张，每条最多
         MISSING_TABLES_PER_TERM 张、总共最多 MAX_MISSING_TABLES 张：缺的东西混在全部检索词里一起加总得分时，
         会被原来的检索词冲淡；
         upstream 是上溯加入的表，只留有命中字段的前 MAX_UPSTREAM_TABLES 张，都没命中时取最近的前 MAX_UPSTREAM_TABLES 张；
+        extra 是非标准表（第 0 层那几种层级里、表清单标成非标准表的）单独排名后有命中字段的前 MAX_EXTRA_TABLES 张；
         example 是相似样例用到的表。除 recall 以外都不占名额，前面几类里已经有的表不重复。
 
-        all_layers 是对照实验 A 组用的：排名池是全部层级的全部表，没有上溯，所以没有 upstream、missing 两类，
-        scope_size 是全部表数，scope_level 只能是 0。
+        all_layers 是对照实验 A 组用的：排名池是全部层级的全部表，不分是不是标准表，没有上溯，
+        所以没有 upstream、missing、extra 三类，scope_size 是全部表数，scope_level 只能是 0。
 
         Args:
             query: 完整需求和拆出来的指标、维度、过滤
@@ -379,21 +385,28 @@ class Retriever:
         taken = set(kept)       # 上游表单独排名；没留下的维表仍在第 0 层里，回到池子里和专题层的表一起排
         pool = [table_id for table_id in (scope if all_layers else self._level0) if table_id not in taken]
         scored, matched = self._score_tables(terms, vectors, pool)
+        # 非标准表在自己的范围里单独找命中字段，不和标准表争字段名次和候选名额
+        extra_scored, extra_matched = ({}, set()) if all_layers else self._score_tables(terms, vectors, self._extra_pool)
         notes += [f"检索词「{term.text}」没有命中任何字段"
-                  for position, term in enumerate(terms) if position not in matched | upstream_matched]
+                  for position, term in enumerate(terms) if position not in matched | upstream_matched | extra_matched]
 
         ranked = sorted((table_id for table_id, item in scored.items() if item.score > 0),
                         key=lambda table_id: self._order_key(table_id, scored.get(table_id)))
         tables = [self._candidate(table_id, REASON_RECALL, scored) for table_id in ranked[:MAX_TABLES]]
         have = {candidate.table_id for candidate in tables}
+        all_scored = {**upstream_scored, **extra_scored, **scored}
         for table_id in carry_tables:
             if table_id in self._tables and table_id not in have:
                 have.add(table_id)
-                tables.append(self._candidate(table_id, REASON_PREVIOUS, {**upstream_scored, **scored}))
+                tables.append(self._candidate(table_id, REASON_PREVIOUS, all_scored))
         if not all_layers:
             tables += self._missing_candidates(missing_terms, have)
         tables += [self._candidate(table_id, REASON_UPSTREAM, upstream_scored) for table_id in kept if table_id not in have]
         have.update(kept)
+        extras = sorted((table_id for table_id, item in extra_scored.items() if item.score > 0 and table_id not in have),
+                        key=lambda table_id: self._order_key(table_id, extra_scored[table_id]))[:MAX_EXTRA_TABLES]
+        tables += [self._candidate(table_id, REASON_EXTRA, extra_scored) for table_id in extras]
+        have.update(extras)
 
         examples = self._similar_examples(query.requirement, requirement_vector)
         if self._examples and self._vector_note is None and self._example_index is None:
@@ -402,7 +415,7 @@ class Retriever:
             for table_id in example.tables:
                 if table_id in self._tables and table_id not in have:
                     have.add(table_id)
-                    tables.append(self._candidate(table_id, REASON_EXAMPLE, {**upstream_scored, **scored}))
+                    tables.append(self._candidate(table_id, REASON_EXAMPLE, all_scored))
         return RecallResult(scope_level=scope_level, scope_size=len(scope), tables=tables, examples=examples,
                             notes=notes)
 

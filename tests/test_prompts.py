@@ -490,6 +490,12 @@ def test_a_follow_up_repair_round_still_shares_its_prefix_with_the_first_round(e
     assert repair.startswith(first.split("## 要求")[0])                 # 上一轮的 SQL 也在共同的前缀里
 
 
+def test_the_planner_is_told_to_use_non_standard_tables_only_as_a_last_resort():
+    rule = PLANNER_SYSTEM.split("\n4. 选表")[1].split("\n5. ")[0]
+    assert "入选原因是「非标准表」的表没有收进设计文档" in rule and "都满足不了时才用" in rule
+    assert "缺的东西单独召回、非标准表都一样" in PLANNER_SYSTEM                   # 缺东西时也要先看它们
+
+
 def test_the_two_model_steps_are_told_how_to_build_on_the_previous_round():
     assert "14. 追问" in PLANNER_SYSTEM and "上一轮限定的范围" in PLANNER_SYSTEM and "缺的东西单独召回" in PLANNER_SYSTEM
     assert "追问时，用户消息里会给出上一轮的 SQL" in GENERATOR_SYSTEM
@@ -648,6 +654,7 @@ def test_script_kinds_mark_empty_etl_time_and_constant_columns(mock_store):
     ("recall", "入选原因：召回"), ("upstream", "入选原因：上溯带入"),
     ("example", "入选原因：样例带入"), ("join", "入选原因：关联路径经过的中间表"),
     ("previous", "入选原因：上一轮用过"), ("missing", "入选原因：缺的东西单独召回"),
+    ("extra", "入选原因：非标准表（设计文档没收录，单独排名补进来）"),
 ])
 def test_candidate_reasons_are_spelled_out(mock_store, reason, expected):
     evidence = make_evidence(mock_store)

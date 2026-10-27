@@ -50,6 +50,10 @@ def bad_table_type(s):
     s["表清单"][0][4] = "事实表"
 
 
+def bad_standard_mark(s):
+    s["表清单"][0].append("不是")
+
+
 def table_without_columns(s):
     s["表清单"].append(["贴源层", "ods", "empty", "空表", "维表", "id", "", ""])
 
@@ -125,6 +129,7 @@ CASES = [
     (duplicate_column, (ERROR, "M04")),
     (bad_layer, (ERROR, "M05")),
     (bad_table_type, (ERROR, "M05")),
+    (bad_standard_mark, (ERROR, "M05")),
     (table_without_columns, (ERROR, "M06")),
     (grain_not_a_column, (ERROR, "M07")),
     (date_not_a_column, (ERROR, "M07")),

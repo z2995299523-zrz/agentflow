@@ -35,12 +35,14 @@ def example(requirement: str, sql: str, number: int = 1) -> Example:
 def test_table_and_column_add_remove_change():
     old = Mart(tables=[table("ads.a"), table("ads.deleted")], columns=[column("id"), column("gone", "旧字段", 2)])
     new = deepcopy(old)
-    new.tables = [table("ads.a").model_copy(update={"description": "新说明", "grain_columns": ["key"]}), table("ads.new")]
+    new.tables = [table("ads.a").model_copy(update={"description": "新说明", "grain_columns": ["key"], "standard": False}),
+                  table("ads.new")]
     new.columns = [column("id").model_copy(update={"is_pk": True, "enum_values": "1=是"}), column("fresh", "新字段", 3)]
     diff = compare(old, new)
     assert set(diff.tables.added) == {"ads.new"} and set(diff.tables.removed) == {"ads.deleted"}
     assert diff.tables.changed["ads.a"]["description"] == ("", "新说明")
     assert diff.tables.changed["ads.a"]["grain_columns"] == (["id"], ["key"])
+    assert diff.tables.changed["ads.a"]["standard"] == (True, False)
     assert set(diff.columns.added) == {("ads.a", "fresh")}
     assert set(diff.columns.removed) == {("ads.a", "gone")}
     assert diff.columns.changed[("ads.a", "id")]["is_pk"] == (False, True)

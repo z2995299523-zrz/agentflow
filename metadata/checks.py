@@ -5,7 +5,7 @@
 规则编号：
     M01 清单或必填列缺失，或表清单为空  M02 必填单元格为空
     M03 表重复                    M04 同一张表内字段重复
-    M05 层级或表类型取值非法      M06 表在字段清单里没有字段
+    M05 层级、表类型或标准表取值非法  M06 表在字段清单里没有字段
     M07 粒度字段或数据日期字段不在字段清单里
     M08 快照表没有数据日期字段    M09 血缘的目标不在字段清单里
     M10 血缘的源字段不在字段清单里
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import networkx as nx
 
 from metadata.loader import RawMart, RawRow
-from metadata.models import CARDINALITIES, LAYERS, TABLE_TYPES
+from metadata.models import CARDINALITIES, LAYERS, STANDARD_MARKS, TABLE_TYPES
 from metadata.template import COLUMN_SHEET, LINEAGE_SHEET, RELATION_SHEET, SHEETS, TABLE_SHEET
 
 ERROR = "错误"
@@ -150,6 +150,9 @@ def _check_tables(raw: RawMart, issues: list[Issue]) -> dict[str, RawRow]:
         if values["table_type"] and values["table_type"] not in TABLE_TYPES:
             issues.append(Issue(ERROR, "M05", sheet, row.row_no,
                                 f"表类型「{values['table_type']}」不在允许范围内（{'、'.join(TABLE_TYPES)}）"))
+        if values["standard"] and values["standard"] not in STANDARD_MARKS:
+            issues.append(Issue(ERROR, "M05", sheet, row.row_no,
+                                f"标准表「{values['standard']}」不在允许范围内（{'、'.join(STANDARD_MARKS)}，或留空）"))
         if values["table_type"] == SNAPSHOT_TYPE and not values["date_column"]:
             issues.append(Issue(ERROR, "M08", sheet, row.row_no,
                                 f"快照表 {table_id} 没有填数据日期字段"))

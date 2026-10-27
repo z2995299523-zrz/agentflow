@@ -127,8 +127,8 @@ class EvidenceTable(BaseModel):
     date_column: str | None = None
     description: str = ""
     # join：关联路径经过、证据组装时补进来的中间表；previous：追问时上一轮 SQL 用到的表；
-    # missing：④ 说缺东西时，拿缺的每一样单独在第 0 层召回到的表
-    reason: Literal["recall", "upstream", "example", "join", "previous", "missing"]
+    # missing：④ 说缺东西时，拿缺的每一样单独在第 0 层召回到的表；extra：非标准表单独排名后补进来的表
+    reason: Literal["recall", "upstream", "example", "join", "previous", "missing", "extra"]
     score: float = 0.0
     columns: list[EvidenceColumn] = Field(default_factory=list)
 

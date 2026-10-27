@@ -21,7 +21,7 @@ from metadata.checks import ERROR, WARNING, Issue, ReportSection, check_mart, sp
 from metadata.examples import EXAMPLES_DIR_NAME, load_examples
 from metadata.index import BgeEmbedder, Embedder, build_vectors, default_embedder
 from metadata.loader import RawMart, load_raw
-from metadata.models import ColumnMeta, LineageEdge, Mart, Relation, TableMeta
+from metadata.models import NOT_STANDARD, ColumnMeta, LineageEdge, Mart, Relation, TableMeta
 from metadata.relations import derive_relations
 from metadata.script_parser import SCRIPTS_DIR_NAME, merge_lineage, parse_scripts
 from metadata.store import MetadataStore, VectorBundle, VectorSet, read_vectors, write_store
@@ -127,6 +127,7 @@ def build_mart(raw: RawMart) -> Mart:
             grain_columns=split_list(row.values["grain_columns"]),
             date_column=row.values["date_column"] or None,
             description=row.values["description"],
+            standard=row.values["standard"] != NOT_STANDARD,
         )
         for row in raw.rows["tables"]
     ]

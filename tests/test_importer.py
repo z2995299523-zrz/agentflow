@@ -45,6 +45,18 @@ def test_external_source_is_flagged_and_still_imported(tmp_path, tiny_sheets):
     assert [edge.source_external for edge in mart.lineage] == [False, False, False, True]
 
 
+def test_standard_column_is_optional_and_no_marks_a_non_standard_table(tmp_path, tiny_sheets, tiny_mart):
+    assert [t.standard for t in build_mart(load_raw(tiny_mart)).tables] == [True, True, True]   # 没填就是标准表
+    tiny_sheets["表清单"][2].append("否")
+    tiny_sheets["表清单"][1].append("是")
+
+    mart, issues = load_mart(write_mart(tmp_path / "m", tiny_sheets))
+
+    assert issues == []
+    assert [(t.table_id, t.standard) for t in mart.tables] == [
+        ("ods.acct", True), ("ads.cust_bal", True), ("ods.cust", False)]
+
+
 def test_load_mart_returns_none_on_error(tmp_path, tiny_sheets):
     tiny_sheets["表清单"][0][0] = "明细层"
 

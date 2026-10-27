@@ -8,6 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field
 LAYERS: tuple[str, ...] = ("贴源层", "整合层", "专题层")
 # 快照表：每个数据日期一份全量，查询必须带日期条件；全量表：每次清空重装，只有当前状态
 TABLE_TYPES: tuple[str, ...] = ("快照表", "流水表", "维表", "全量表")
+# 表清单「标准表」一列：空着算是；填「否」的是设计文档没收录、只在实库里有的表，召回时单独排名
+STANDARD_MARKS: tuple[str, ...] = ("是", "否")
+NOT_STANDARD = "否"
 # 关联关系清单里手工填写时允许的对应关系
 CARDINALITIES: tuple[str, ...] = ("N:1", "1:1", "1:N")
 # 推导出的关联另有两种：两侧都不唯一，或者缺粒度字段无法判断
@@ -41,6 +44,7 @@ class TableMeta(BaseModel):
     grain_columns: list[str]         # 粒度字段：能唯一确定一行的字段，不清楚时为空列表
     date_column: str | None = None   # 数据日期字段，快照表必填
     description: str = ""
+    standard: bool = True            # 标准表；False 是设计文档没收录的表，召回时单独排名、不占标准表的名额
 
 
 class ColumnMeta(BaseModel):

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from metadata.models import CARDINALITIES, LAYERS, TABLE_TYPES
+from metadata.models import CARDINALITIES, LAYERS, NOT_STANDARD, TABLE_TYPES
 
 WORKBOOK_NAME = "metadata.xlsx"
 GUIDE_SHEET_NAME = "填写说明"
@@ -50,6 +50,9 @@ TABLE_SHEET = SheetSpec(
                    help="能唯一确定一行的字段，多个用英文逗号分隔。不清楚可以留空，留空后无法判断关联是否会发散"),
         ColumnSpec("数据日期字段", "date_column", identifier=True, help="快照表必填"),
         ColumnSpec("表说明", "description"),
+        ColumnSpec("标准表", "standard",
+                   help=f"设计文档里收录、口径确认过的表留空或填「是」；只在实库里有、没整理过的表填「{NOT_STANDARD}」："
+                        "召回时单独排名，不占标准表的候选名额"),
     ),
 )
 
