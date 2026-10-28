@@ -57,7 +57,7 @@ start.bat                                 # Windows 同时起接口和界面（h
 ```
 QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(模型) → ⑤ generate(模型) → ⑥ validate → ⑦ output → QueryResult
   ① 缺对象或指标时反问，直接去 ⑦；④ need_upstream：上溯一层回到 ②（最多 2 层），② 还拿 ④ 说缺的东西逐条单独补召回第 0 层的表；need_clarify、cannot_answer 直接去 ⑦
-  ④ ok：只说「日均」没说统计区间时 clarify_daily_average 改成反问；prune_plan 去掉用不到的表（孤立表、只用关联键关联专题层的维表，记进 dropped_tables，⑤ 再用就是 R8 错误）再去 ⑤
+  ④ ok：只说「日均」没说统计区间时 clarify_daily_average 改成反问；prune_plan 去掉用不到的表（孤立表、LEFT JOIN 右边字段不进结果的表、只用关联键关联专题层的维表，记进 dropped_tables，⑤ 再用就是 R8 错误）再去 ⑤
   ⑥ 有错误：带着错误回到 ⑤（最多修正 2 次）
 ```
 

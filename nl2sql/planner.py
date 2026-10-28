@@ -166,10 +166,21 @@ def check_plan(plan: QueryPlan, evidence: Evidence, *, allow_clarify: bool, allo
 
 # ── 方案精简 ──────────────────────────────────────
 
+_QUALIFIED = re.compile(r"(?<![\w.])(\w+\.\w+)\.\w+(?![\w.])")      # 「模式.表.字段」
+
+
 def _mentioned(table: str, columns: Iterable[str], filters: Sequence[str]) -> bool:
-    """过滤条件里有没有写到这张表：写了「模式.表.」，或者写了 columns 里的字段名（按整词，带别名的也算）"""
-    patterns = [rf"(?<![\w.]){re.escape(table)}\."] + [rf"(?<!\w){re.escape(name)}(?!\w)" for name in columns]
-    return any(re.search(pattern, text, re.IGNORECASE) for text in filters for pattern in patterns)
+    """过滤条件里有没有写到这张表：写了「模式.表.」，或者写了 columns 里的字段名（按整词，带别名的也算；
+    写成别的表「模式.表.字段」的不算，同名字段如 data_dt 很常见）"""
+    own = re.compile(rf"(?<![\w.]){re.escape(table)}\.", re.IGNORECASE)
+    names = [re.compile(rf"(?<!\w){re.escape(name)}(?!\w)", re.IGNORECASE) for name in columns]
+    for text in filters:
+        if own.search(text):
+            return True
+        rest = _QUALIFIED.sub(lambda match: match.group(0) if match.group(1).lower() == table.lower() else " ", text)
+        if any(pattern.search(rest) for pattern in names):
+            return True
+    return False
 
 
 def _sides(join: PlanJoin, table: str) -> tuple[list[str], str, list[str]]:
@@ -179,10 +190,10 @@ def _sides(join: PlanJoin, table: str) -> tuple[list[str], str, list[str]]:
     return join.left_columns, join.right_table, join.right_columns
 
 
-def _redundant_dimension(plan: QueryPlan, evidence: Evidence, table: str) -> PlanJoin | None:
-    """只用来关联、去掉也不改变结果的维表：返回要和它一起去掉的那条关联，不是这种维表时返回 None"""
+def _redundant_join_table(plan: QueryPlan, evidence: Evidence, table: str) -> PlanJoin | None:
+    """只用来关联、去掉也不改变结果的表：返回要和它一起去掉的那条关联，不是这种表时返回 None"""
     meta = evidence.table(table)
-    if meta is None or meta.table_type != DIM_TABLE_TYPE or not meta.grain_columns:
+    if meta is None:
         return None
     joins = [join for join in plan.joins if table in (join.left_table, join.right_table)]
     if len(joins) != 1 or joins[0].left_table == joins[0].right_table:
@@ -193,14 +204,18 @@ def _redundant_dimension(plan: QueryPlan, evidence: Evidence, table: str) -> Pla
     if other_meta is None or other not in {item.table for item in plan.tables}:
         return None
     used = [item for item in plan.fields if item.table == table]
-    if any(item.usage != "join" or item.column not in keys for item in used):
-        return None
-    if not set(meta.grain_columns) <= set(keys):                     # 关联键要包含维表的全部粒度字段：N:1，不发散
+    if any(item.usage == "join" and item.column not in keys for item in used):
         return None
     others = [column.name for column in meta.columns if column.name not in keys]
     if _mentioned(table, others, plan.filters):
         return None
-    if (join.join_type == "LEFT" and join.right_table == table) or other_meta.layer == TOP_LAYER:
+    if join.join_type == "LEFT" and join.right_table == table:
+        # 左表的行原样保留，它的字段又没进结果（只列了关联键或「其它」）：什么表都能去掉；
+        # 关联键不覆盖粒度时原来会一对多把行翻倍，去掉反而对
+        return join if all(item.usage in ("join", "other") for item in used) else None
+    if (meta.table_type == DIM_TABLE_TYPE and meta.grain_columns and all(item.usage == "join" for item in used)
+            and set(meta.grain_columns) <= set(keys)                 # 关联键包含维表的全部粒度字段：N:1，不发散
+            and other_meta.layer == TOP_LAYER):
         return join
     return None
 
@@ -209,10 +224,12 @@ def prune_plan(plan: QueryPlan, evidence: Evidence) -> tuple[QueryPlan, list[str
     """去掉方案里用不到的表
 
     - 孤立表：没有字段、不在任何关联里、过滤条件里也没写到
-    - 只用来关联的维表：证据里是维表；方案里只引用了它的关联键，过滤条件里也没写到它；只出现在一条关联里（不是中间表）；
-      关联键包含它的全部粒度字段（N:1，不发散）；并且关联另一侧是专题层的表（专题层与维表参照完整），
-      或者它在 LEFT JOIN 的右边（左表的行原样保留）。去掉时连同这条关联、另一侧只为这条关联列出的关联键一起去掉。
-      整合层、贴源层的表内连接维表不动：那常常是在还原专题层加工时的内连接过滤
+    - 只用来关联的表：只出现在一条关联里（不是中间表），过滤条件里没写到它，并且是下面两种之一。
+      去掉时连同这条关联、另一侧只为这条关联列出的关联键一起去掉。
+      - 在 LEFT JOIN 的右边，方案里只列了它的关联键或用途是「其它」的字段：左表的行原样保留，它的字段又不进结果，
+        什么表都算，不看粒度（关联键不覆盖粒度时原来会一对多把行翻倍）
+      - 维表，方案里只引用了它的关联键，关联键包含它的全部粒度字段（N:1，不发散），关联另一侧是专题层的表
+        （专题层与维表参照完整）。整合层、贴源层的表内连接维表不动：那常常是在还原专题层加工时的内连接过滤
     只处理结论是 ok 的方案，返回新方案，不修改传入的对象。去掉的表记进方案的 dropped_tables：
     ⑤ 不能再用它们（样例里常有这些关联，⑤ 容易照抄回来），校验时用到了就报错。
 
@@ -239,7 +256,7 @@ def prune_plan(plan: QueryPlan, evidence: Evidence) -> tuple[QueryPlan, list[str
                     continue
                 current = current.model_copy(update={"tables": [t for t in current.tables if t.table != table]})
             else:
-                join = _redundant_dimension(current, evidence, table)
+                join = _redundant_join_table(current, evidence, table)
                 if join is None:
                     continue
                 _, other, other_keys = _sides(join, table)

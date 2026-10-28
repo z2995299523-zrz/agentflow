@@ -368,6 +368,43 @@ def test_a_left_joined_dimension_on_the_right_is_dropped_whatever_the_layer(wide
     assert prune_plan(cust_plan(DWD_ACCT, join_type="LEFT"), wide)[1] == [CUST]
 
 
+def org_plan(*, join_type: str = "LEFT", org_fields=(), filters=(), swap: bool = False) -> QueryPlan:
+    """客户余额按机构号关联机构余额表（专题层快照表，不是维表；粒度含数据日期，只按机构号关联是一对多）；
+    org_fields 是机构余额表除关联键以外列进方案的字段，swap 时机构余额表在关联的左边。两张表都有 data_dt"""
+    sides = [(CUST_BAL, ["org_no"]), (ORG_BAL, ["org_no"])]
+    (left, left_columns), (right, right_columns) = reversed(sides) if swap else sides
+    return make_plan(
+        tables=[PlanTable(table=CUST_BAL), PlanTable(table=ORG_BAL)],
+        fields=[PlanField(table=CUST_BAL, column="dep_bal_rmb", usage="metric"),
+                PlanField(table=CUST_BAL, column="data_dt", usage="filter"),
+                PlanField(table=CUST_BAL, column="org_no", usage="join"),
+                PlanField(table=ORG_BAL, column="org_no", usage="join"),
+                *[PlanField(table=ORG_BAL, column=column, usage=usage) for column, usage in org_fields]],
+        joins=[PlanJoin(left_table=left, left_columns=left_columns, right_table=right, right_columns=right_columns,
+                        join_type=join_type)],
+        filters=[f"{CUST_BAL}.data_dt {DAY_FILTER}", *filters])
+
+
+def test_a_left_joined_table_whose_fields_stay_out_of_the_result_is_dropped_whatever_its_type(wide):
+    plan = org_plan(org_fields=[("dep_cust_cnt", "other")])          # 「其它」：比如列来核对口径，不进结果
+
+    pruned, removed = prune_plan(plan, wide)
+
+    assert removed == [ORG_BAL] and pruned.joins == []
+    assert [(item.table, item.column) for item in pruned.fields] == [(CUST_BAL, "dep_bal_rmb"), (CUST_BAL, "data_dt")]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"org_fields": [("dep_cust_cnt", "dimension")]},                 # 取了它的字段
+    {"filters": [f"{ORG_BAL}.dep_bal_rmb > 0"]},                     # 过滤里写了它
+    {"filters": ["o.dep_cust_cnt > 0"]},                             # 过滤里用别名写到了它的字段
+    {"join_type": "INNER"},                                          # 内连接可能筛掉左表的行
+    {"swap": True},                                                  # 它在左边，行从它来
+])
+def test_a_left_joined_table_that_matters_is_kept(wide, kwargs):
+    assert prune_plan(org_plan(**kwargs), wide)[1] == []
+
+
 @pytest.mark.parametrize("cust_fields, filters", [
     ([("industry_nm", "dimension")], []),                                # 取了维表的字段
     ([], ["c.industry_nm = '制造业'"]),                                  # 过滤里用别名写到了维表的字段
