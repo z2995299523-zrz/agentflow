@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MOCK_MART_DIR = ROOT / "data" / "mock_mart"
 RECALL_TERMS = Path(__file__).parent / "data" / "recall_terms.yaml"
 MIN_RECALLED_QUESTIONS = 34          # 37 道出 SQL 的题里，标准用表全部进了候选的题数不能低于它
-SCHEMA_LAYER = {"ads": "专题层", "zt": "专题层", "dwd": "整合层", "dim": "整合层", "ods": "贴源层"}
+SCHEMA_LAYER = {"ads": "专题层", "zt": "专题层", "dws": "汇总层", "dwd": "标准层", "dim": "标准层", "ods": "贴源层"}
 
 # 子进程里跑的脚本：在模拟库上召回两次，把结果打印成 JSON。换 PYTHONHASHSEED 重复跑，结果必须逐字相同
 CHILD_SCRIPT = """
@@ -121,15 +121,15 @@ def test_scope_grows_with_the_upstream_layers(mock_retriever):
     base = ["ads.corp_cust_loan_bal_d"]
     level0, upstream0 = mock_retriever.scope_tables(0)
     assert level0 == ["ads.corp_cust_dep_bal_d", "ads.corp_cust_loan_bal_d", "ads.org_corp_dep_bal_d",
-                      "dim.corp_cust", "dim.org"]                      # 专题层全部表加整合层的维表
+                      "dim.corp_cust", "dim.org"]                      # 专题层全部表加标准层的维表
     assert upstream0 == []
 
     level1, upstream1 = mock_retriever.scope_tables(1, base)
-    assert upstream1 == ["dim.corp_cust", "dwd.corp_loan_duebill_d"]    # 只有整合层，且只有这张贷款表的上游
+    assert upstream1 == ["dim.corp_cust", "dwd.corp_loan_duebill_d"]    # 只有标准层，且只有这张贷款表的上游
     assert level1 == level0 + ["dwd.corp_loan_duebill_d"]              # 维表本来就在第 0 层里，不重复
 
     level2, upstream2 = mock_retriever.scope_tables(2, base)
-    assert upstream2[:2] == upstream1                                      # 近的在前：整合层的两张
+    assert upstream2[:2] == upstream1                                      # 近的在前：标准层的两张
     assert set(upstream2[2:]) == {"ods.ecif_corp_cust", "ods.industry_dict", "ods.core_loan_duebill",
                                   "ods.exch_rate"}                         # 再加贴源层
     assert not {"ods.core_dep_acct", "dwd.corp_dep_acct_d"} & set(level2)  # 存款那条线不在这张表的上游里
@@ -148,7 +148,7 @@ def test_dimension_tables_are_not_climbed_and_bad_arguments_are_rejected(mock_re
 # ── 名额 ──────────────────────────────────────
 
 def ten_table_mart(carriers: int = 10) -> Mart:
-    """10 张专题层表、1 张整合层上游表、1 张贴源层上游表、1 张只有样例用到的贴源层表
+    """10 张专题层表、1 张标准层上游表、1 张贴源层上游表、1 张只有样例用到的贴源层表
 
     t01 有 7 个字段都对得上「存款金额」，其余每张表 1 个（名字一样长，同分时按字段编号，t01 排在最前）；
     carriers 张表带样板字段「时间-年」。
@@ -217,6 +217,17 @@ def extra_mart() -> Mart:
     mart = make_mart(tables)
     return mart.model_copy(update={"tables": [table.model_copy(update={"standard": table.table_id.startswith("ads.t")})
                                               for table in mart.tables]})
+
+
+def test_summary_layer_tables_sit_in_level_zero_with_the_mart_tables():
+    mart = make_mart([("ads.cust_bal", "客户存款汇总", [("dep_bal", "存款余额")]),
+                      ("dws.cust_bal_sum", "客户存款主题汇总", [("dep_bal", "存款余额")]),
+                      ("dwd.acct", "存款账户快照", [("bal", "余额")]),
+                      ("dim.org", "机构维表", [("org_no", "机构号")])])
+
+    level0, _ = make_retriever(mart).scope_tables(0)
+
+    assert level0 == ["ads.cust_bal", "dim.org", "dws.cust_bal_sum"]       # 标准层只有维表在第 0 层
 
 
 def test_non_standard_tables_rank_on_their_own_and_take_no_slot():
@@ -289,7 +300,7 @@ def test_missing_items_are_capped_never_repeat_and_are_skipped_for_group_a(monke
 
 
 def upstream_mart(strong: int, weak: int, unrelated: int) -> Mart:
-    """专题层 ads.t01 直接依赖整合层的 strong + weak + unrelated 张表：
+    """专题层 ads.t01 直接依赖标准层的 strong + weak + unrelated 张表：
     s 开头的字段名与「存款金额」完全一致，w 开头的只对上「存款」，n 开头的完全对不上"""
     tables = [("ads.t01", "存款汇总", [("amt", "存款金额")])]
     edges = []
@@ -450,7 +461,7 @@ def test_without_vectors_or_embedder_only_the_keyword_route_runs_and_says_why(mo
 
 def test_similar_examples_bring_their_tables_in(mock_parts):
     store, graph = mock_parts
-    example = next(item for item in store.examples() if item.example_id == "03_上溯整合层.sql#1")
+    example = next(item for item in store.examples() if item.example_id == "03_上溯标准层.sql#1")
     query = RecallQuery(example.requirement, ["折人民币余额"], ["币种代码"])
     for embedder in (HashEmbedder(), None):                                # 没有向量时只用 Jaccard，也能找到
         result = Retriever(store, graph, embedder).recall(query)
@@ -528,7 +539,7 @@ def test_gold_tables_of_the_mock_questions_reach_the_candidates(mock_retriever):
 
 def test_all_layers_ranks_every_table_in_one_pool_and_never_climbs():
     query = RecallQuery("存款金额汇总统计", ["存款金额"])
-    retriever = make_retriever(ten_table_mart(), with_embedder=False)       # 10 张专题层表、1 张整合层表、2 张贴源层表
+    retriever = make_retriever(ten_table_mart(), with_embedder=False)       # 10 张专题层表、1 张标准层表、2 张贴源层表
 
     layered = retriever.recall(query)
     flat = retriever.recall(query, all_layers=True)
@@ -537,7 +548,7 @@ def test_all_layers_ranks_every_table_in_one_pool_and_never_climbs():
     assert (flat.scope_level, flat.scope_size) == (0, 13)                   # 排名池是全部表
     assert {item.table_id: item.reason for item in layered.tables if item.table_id in ("dwd.src", "ods.raw")} == {}
     ranked = {item.table_id: item.reason for item in flat.tables}
-    assert ranked["dwd.src"] == ranked["ods.raw"] == "recall"               # 整合层、贴源层的表和专题层的表一起争名次
+    assert ranked["dwd.src"] == ranked["ods.raw"] == "recall"               # 标准层、贴源层的表和专题层的表一起争名次
     assert {item.reason for item in flat.tables} <= {"recall", "example"}   # 没有上溯加入的表
     assert sum(item.reason == "recall" for item in flat.tables) == MAX_TABLES
     scores = [item.score for item in flat.tables if item.reason == "recall"]

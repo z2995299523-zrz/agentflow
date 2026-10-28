@@ -67,7 +67,7 @@ ADS_DEP = "ads.corp_cust_dep_bal_d"
 ADS_LOAN = "ads.corp_cust_loan_bal_d"
 ADS_ORG = "ads.org_corp_dep_bal_d"
 
-SCHEMA_LAYER = {"ods": "贴源层", "dwd": "整合层", "dim": "整合层", "ads": "专题层"}
+SCHEMA_LAYER = {"ods": "贴源层", "dwd": "标准层", "dim": "标准层", "ads": "专题层"}
 
 
 # ── 构造资料、召回结果的小工具 ──────────────────────────────────────
@@ -183,7 +183,7 @@ def test_limits_are_the_documented_values():
 # ── 候选表 ──────────────────────────────────────
 
 def candidates_fixture() -> tuple[MetadataStore, LineageGraph]:
-    """专题层一张表（字段的说明有长有短，有码值），整合层一张、贴源层一张"""
+    """专题层一张表（字段的说明有长有短，有码值），标准层一张、贴源层一张"""
     return make_store([
         ("ads.dep", [
             ("data_dt", "数据日期", {"description": "D" * 250}),
@@ -290,7 +290,7 @@ def test_code_columns_carry_the_name_column_of_their_table_or_a_code_table_in_th
         ["industry_nm", "scale_nm", "cust_nm", ""]
     assert cust["industry_cd"].code_table == ""                                  # 同表有名称字段就不再指码值表
     dep = {column.name: column for column in evidence.table(ADS_DEP).columns}
-    assert dep["cust_no"].code_table == "dim.corp_cust.cust_nm"                  # 整合层的维表排在贴源层前面
+    assert dep["cust_no"].code_table == "dim.corp_cust.cust_nm"                  # 标准层的维表排在贴源层前面
     assert dep["org_no"].code_table == ""                                        # 机构维表不在证据里
     ecif = {column.name: column for column in evidence.table("ods.ecif_corp_cust").columns}
     assert ecif["industry_cd"].code_table == "ods.industry_dict.industry_nm"
@@ -869,7 +869,7 @@ def test_at_level_0_the_integration_layer_tables_behind_the_candidates_are_offer
 
     evidence = evidence_of(mock_store, mock_graph, recall)
 
-    assert evidence.upstream_options == [UpstreamOption(table_id=DEP_D, table_cn="对公存款账户日快照", layer="整合层")]
+    assert evidence.upstream_options == [UpstreamOption(table_id=DEP_D, table_cn="对公存款账户日快照", layer="标准层")]
     assert evidence.table_ids() == [ADS_DEP, ADS_ORG, CUST]
 
 

@@ -9,12 +9,12 @@ import difflib
 import re
 from collections.abc import Iterable, Sequence
 
+from metadata.models import DIRECT_LAYERS
 from nl2sql.llm import LLMClient, structured_call
 from nl2sql.schemas import CallRecord, Clarify, ClarifyOption, Evidence, ParsedRequest, PlanJoin, QueryPlan
 from prompts.nl2sql import planner_messages
 
 MAX_SUGGESTIONS = 5               # 报错时附上最接近的几个字段名
-TOP_LAYER = "专题层"              # 专题层的表与维表参照完整（ETL 保证）：只用关联键关联维表不改变结果
 DIM_TABLE_TYPE = "维表"
 
 
@@ -215,7 +215,7 @@ def _redundant_join_table(plan: QueryPlan, evidence: Evidence, table: str) -> Pl
         return join if all(item.usage in ("join", "other") for item in used) else None
     if (meta.table_type == DIM_TABLE_TYPE and meta.grain_columns and all(item.usage == "join" for item in used)
             and set(meta.grain_columns) <= set(keys)                 # 关联键包含维表的全部粒度字段：N:1，不发散
-            and other_meta.layer == TOP_LAYER):
+            and other_meta.layer in DIRECT_LAYERS):
         return join
     return None
 
@@ -228,8 +228,8 @@ def prune_plan(plan: QueryPlan, evidence: Evidence) -> tuple[QueryPlan, list[str
       去掉时连同这条关联、另一侧只为这条关联列出的关联键一起去掉。
       - 在 LEFT JOIN 的右边，方案里只列了它的关联键或用途是「其它」的字段：左表的行原样保留，它的字段又不进结果，
         什么表都算，不看粒度（关联键不覆盖粒度时原来会一对多把行翻倍）
-      - 维表，方案里只引用了它的关联键，关联键包含它的全部粒度字段（N:1，不发散），关联另一侧是专题层的表
-        （专题层与维表参照完整）。整合层、贴源层的表内连接维表不动：那常常是在还原专题层加工时的内连接过滤
+      - 维表，方案里只引用了它的关联键，关联键包含它的全部粒度字段（N:1，不发散），关联另一侧是专题层或汇总层的表
+        （这两层与维表参照完整）。标准层、贴源层的表内连接维表不动：那常常是在还原专题层加工时的内连接过滤
     只处理结论是 ok 的方案，返回新方案，不修改传入的对象。去掉的表记进方案的 dropped_tables：
     ⑤ 不能再用它们（样例里常有这些关联，⑤ 容易照抄回来），校验时用到了就报错。
 

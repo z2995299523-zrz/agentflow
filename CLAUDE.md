@@ -45,6 +45,7 @@ start.bat                                 # Windows 同时起接口和界面（h
 ```
 
 - `metadata/store.py` 的 `MetadataStore` 是只读入口，构造时全部读进内存
+- 层级四层，从上到下：专题层（DM）、汇总层（DWS）、标准层（DWD）、贴源层（ODS）。专题层、汇总层的表在召回第 0 层直接查，按粒度键互相关联；旧名「整合层」读成标准层（`metadata.models.normalize_layer`），旧元数据库不用重导
 - 向量按「向量器、文本」复用上一版的，只算新文本，全部复用时不加载 BGE（第一次加载 BGE 在机械盘上要几分钟）
 - `metadata/versions.py` 版本：命令行导入写进 `build/versions/<版本号>/`（库、版本清单、报告、输入副本），资料和代码都没变不出新版本；切换就是把版本的库复制成 `build/metadata.db`，服务、打包、发布只读这个文件；`current.json` 记活动版本和上一个，回退就是切回上一个。直接调 `run_import` 不分版本，测试和转换器测试在用。设计和后续几块见 `notes/2026-10-23_design_元数据更新机制.md`
 - 切换前的关卡：导入后和基线版本（导入时的活动版本）比，差异报告写进版本目录（`metadata/diff.py`）；零成本回归在 `eval/regression.py`（题库静态核对、召回重放、会话影响，不调大模型）。需确认项（删了表或字段、疑似改名、失效样例、数量少 5% 以上或表字段多 20% 以上、向量不全、题库或召回变差）有一项就不自动切换，`promote --accept` 才切；回退不用确认。题库和逐题记录：模拟库用仓库的 `eval/nl2sql_questions.yaml` 和 `eval/reports/runs/` 最新的 C.jsonl，其它资料目录用自己的 `eval_questions.yaml` 和 `eval/*static_eval*.jsonl`
@@ -62,7 +63,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 ```
 
 - `schemas.py`：各步骤的输入输出，是模块之间的契约；`llm.py`：模型调用（`ChatModelClient`、测试用的 `ScriptedLLM`、带重试的 `structured_call`）
-- `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（加工链路里重复的跳和条件只写一次，第 5 张以后召回的表只列关键字段，上溯、样例带入的表照旧全列；超过 4 万字按九级收缩；每张表标出数仓分层 DM、DWS、DWD、ODS，`metadata.models.table_tier` 按模式名第一段认，④ 按分层从上往下选表）
+- `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（加工链路里重复的跳和条件只写一次，第 5 张以后召回的表只列关键字段，上溯、样例带入的表照旧全列；超过 4 万字按九级收缩；④ 按层级从上往下选表：专题层、汇总层、标准层、贴源层）
 - `retriever.py` 候选召回（关键字加向量，三层范围；表清单「标准表」填「否」的表单独排名，最多补 3 张，不占标准表的名额）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
 - `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
 - `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB

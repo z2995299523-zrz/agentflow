@@ -30,6 +30,7 @@ from itertools import product
 from metadata.checks import ReportSection
 from metadata.models import (
     DERIVED_CARDINALITIES,
+    DIRECT_LAYERS,
     LAYERS,
     RELATION_ORIGINS,
     FieldRef,
@@ -185,8 +186,13 @@ def key_domains(mart: Mart) -> dict[FieldRef, int]:
 # ── 排序 ──────────────────────────────────────────────────
 
 def _layer_number(table: TableMeta | None) -> int:
-    """层级的序号：贴源层 0、整合层 1、专题层 2，越大越下游；不认识的记 -1"""
+    """层级的序号：贴源层 0、标准层 1、专题层 2，越大越下游；不认识的记 -1"""
     return LAYERS.index(table.layer) if table is not None and table.layer in LAYERS else -1
+
+
+def _grain_level(table: TableMeta) -> int:
+    """同名粒度键比层级用的序号：专题层、汇总层都直接拿来查数，算同一级，两层的表互相能按粒度键关联"""
+    return min(_layer_number(table), min(LAYERS.index(layer) for layer in DIRECT_LAYERS))
 
 
 def relation_rank(rel: Relation, tables: dict[str, TableMeta]) -> tuple:
@@ -454,7 +460,7 @@ class _Deriver:
     # ── 同名粒度键 ──
 
     def _grain_relations(self) -> list[Relation]:
-        """同名粒度键：S 含有 T 的全部粒度字段（按字段名），S 的层级不低于 T，S 就按这些字段关联 T"""
+        """同名粒度键：S 含有 T 的全部粒度字段（按字段名），S 的层级不低于 T（专题层、汇总层算同一级），S 就按这些字段关联 T"""
         owners: dict[str, set[str]] = defaultdict(set)
         for table, names in self.columns.items():
             if table in self.tables:
@@ -467,7 +473,7 @@ class _Deriver:
             if not grain or all(name in GENERIC_KEY_NAMES for name in grain) or not self._real(target_id, grain):
                 continue
             holders = set.intersection(*(owners[name] for name in grain)) - {target_id}
-            sources = sorted(s for s in holders if _layer_number(self.tables[s]) >= _layer_number(target))
+            sources = sorted(s for s in holders if _grain_level(self.tables[s]) >= _grain_level(target))
             if len(sources) > MAX_GRAIN_FANIN:
                 self.stats.fanin_tables += 1
                 self.stats.fanin_avoided += len(sources)

@@ -5,23 +5,25 @@ from pydantic import ValidationError
 from metadata.models import (
     CARDINALITIES,
     DERIVED_CARDINALITIES,
+    DIRECT_LAYERS,
+    LAYERS,
     FieldRef,
     LineageEdge,
     Mart,
     ScriptColumn,
     ScriptStatement,
-    table_tier,
+    normalize_layer,
 )
 
 
-@pytest.mark.parametrize("table_id, layer, tier", [
-    ("dm_demo.project", "专题层", "DM"), ("dws_demo.project_sum", "专题层", "DWS"),   # 同在专题层，DM 在 DWS 前
-    ("dwd_demo.contract", "整合层", "DWD"), ("base_demo.org", "整合层", "DWD"), ("ods_demo.raw", "贴源层", "ODS"),
-    ("ads.corp_cust_dep_bal_d", "专题层", "DM"), ("dim.org", "整合层", "DWD"), ("DWS_DEMO.t", "专题层", "DWS"),
-    ("mart.t", "专题层", "DM"), ("stage.t", "贴源层", "ODS"),                         # 模式名认不出：按层级
-])
-def test_table_tier_comes_from_the_schema_prefix_or_else_the_layer(table_id, layer, tier):
-    assert table_tier(table_id, layer) == tier
+@pytest.mark.parametrize("layer, expected", [("整合层", "标准层"), ("汇总层", "汇总层"), ("其它", "其它")])
+def test_the_old_name_of_the_standard_layer_still_reads(layer, expected):
+    assert normalize_layer(layer) == expected
+
+
+def test_layers_run_from_source_to_mart_and_the_top_two_are_queried_directly():
+    assert LAYERS == ("贴源层", "标准层", "汇总层", "专题层")
+    assert DIRECT_LAYERS == ("专题层", "汇总层")
 
 
 def test_field_ref_is_hashable_and_frozen():

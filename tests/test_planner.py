@@ -329,7 +329,7 @@ DAY_FILTER = "= DATE '2026-09-30'"
 
 @pytest.fixture(scope="module")
 def wide(mock_store) -> Evidence:
-    """精简用的证据：专题层两张汇总表、整合层明细、两张维表"""
+    """精简用的证据：专题层两张汇总表、标准层明细、两张维表"""
     return Evidence(use_lineage=True, use_examples=False,
                     tables=[evidence_table(mock_store, table) for table in (CUST_BAL, ORG_BAL, DWD_ACCT, CUST, DIM_ORG)])
 

@@ -178,9 +178,9 @@ def test_merge_assumptions_trims_drops_empty_and_dedupes_in_order():
 # ── 提示语 ──────────────────────────────────────
 
 def test_upstream_failure_message_names_the_level_and_what_is_missing():
-    plan = QueryPlan(decision="need_upstream", missing=["币种", " 产品 ", "", "币种"], reason="整合层和贴源层都没有")
+    plan = QueryPlan(decision="need_upstream", missing=["币种", " 产品 ", "", "币种"], reason="标准层和贴源层都没有")
 
-    assert upstream_failure_message(plan, 2) == "上溯 2 层仍找不到：币种、产品。整合层和贴源层都没有"
+    assert upstream_failure_message(plan, 2) == "上溯 2 层仍找不到：币种、产品。标准层和贴源层都没有"
     assert upstream_failure_message(plan.model_copy(update={"reason": ""}), 1) == "上溯 1 层仍找不到：币种、产品"
 
 

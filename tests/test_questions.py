@@ -301,7 +301,7 @@ PLAUSIBLE_WRONG_ANSWERS = {
     "K06-all-customers": "SELECT COUNT(*) FROM dim.corp_cust",
     # 把时点余额当成年日均
     "T03": "SELECT org_no, dep_bal_rmb FROM ads.org_corp_dep_bal_d WHERE data_dt = DATE '2026-09-30'",
-    # 上溯到整合层但没有还原「剔除无效客户」这个加工条件
+    # 上溯到标准层但没有还原「剔除无效客户」这个加工条件
     "U01": "SELECT ccy_cd, SUM(acct_bal) FROM dwd.corp_dep_acct_d "
            "WHERE data_dt = DATE '2026-09-30' AND is_margin = '0' GROUP BY ccy_cd",
     "U02": "SELECT prod_cd, SUM(bal_rmb) FROM dwd.corp_loan_duebill_d "

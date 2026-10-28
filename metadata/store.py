@@ -23,6 +23,7 @@ from metadata.models import (
     ScriptJoin,
     ScriptStatement,
     TableMeta,
+    normalize_layer,
 )
 
 # 页大小必须在建第一张表之前设定。一行 512 维向量约 2 KB，默认的 4 KB 页一页只放得下一行，
@@ -257,7 +258,9 @@ def _read_store(db_path: Path) -> tuple[Mart, VectorBundle | None, str | None]:
             mart = Mart(
                 tables=[
                     TableMeta(
-                        table_id=row["table_id"], layer=row["layer"], schema_name=row["schema_name"],
+                        # 分成四层之前导入的库里，标准层叫整合层
+                        table_id=row["table_id"], layer=normalize_layer(row["layer"]),
+                        schema_name=row["schema_name"],
                         table_name=row["table_name"], table_cn=row["table_cn"],
                         table_type=row["table_type"],
                         grain_columns=[name for name in row["grain_columns"].split(",") if name],

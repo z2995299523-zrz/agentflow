@@ -65,7 +65,8 @@ export function formatCell(value: CellValue): string {
 /** 层级对应的颜色（Ant Design 的预设色）和简称，血缘图和标签共用 */
 export const LAYER_STYLES: Record<string, { color: string; short: string; key: string }> = {
   贴源层: { color: 'green', short: '贴源', key: 'ods' },
-  整合层: { color: 'blue', short: '整合', key: 'dwd' },
+  标准层: { color: 'blue', short: '标准', key: 'dwd' },
+  汇总层: { color: 'cyan', short: '汇总', key: 'dws' },
   专题层: { color: 'purple', short: '专题', key: 'ads' },
 }
 

@@ -41,10 +41,10 @@ CUST = "dim.corp_cust"
 ORG_INFO = "ods.org_info"
 DATE_PARAM = "CAST('${data_dt}' AS DATE)"          # 脚本里的 DATE '${data_dt}' 展开后的写法
 
-# 合并血缘用的小资料：贴源层 ods.src 加工出专题层 ads.tgt；专题层 ads.bare、整合层 dwd.mid 没有加工脚本
+# 合并血缘用的小资料：贴源层 ods.src 加工出专题层 ads.tgt；专题层 ads.bare、标准层 dwd.mid 没有加工脚本
 SRC, TGT, BARE, MID = "ods.src", "ads.tgt", "ads.bare", "dwd.mid"
 SMALL_FIELDS = {SRC: ["k", "v", "w"], TGT: ["k", "v", "n", "c", "t", "m", "u", "x"], BARE: ["k"], MID: ["k"]}
-SMALL_LAYERS = {SRC: "贴源层", TGT: "专题层", BARE: "专题层", MID: "整合层"}
+SMALL_LAYERS = {SRC: "贴源层", TGT: "专题层", BARE: "专题层", MID: "标准层"}
 
 
 @pytest.fixture(scope="module")
@@ -661,7 +661,7 @@ def test_scripts_section_lists_gaps_and_topic_tables_without_scripts(tmp_path):
 
     assert result.metadata_gaps == {ref(SRC, "ghost")}
     assert any("字段清单缺口 1 个" in line and "ods.src.ghost" in line for line in result.section.lines)
-    assert no_script == ["- 无加工脚本的专题层表 1 张：ads.bare"]          # 整合层的 dwd.mid 不列，只占一行
+    assert no_script == ["- 无加工脚本的专题层表 1 张：ads.bare"]          # 标准层的 dwd.mid 不列，只占一行
     assert not any("无加工脚本" in line for line in lineage_section.lines)  # 整份报告里只出现这一次
 
 

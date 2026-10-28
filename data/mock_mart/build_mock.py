@@ -3,7 +3,7 @@
 用法: python -m data.mock_mart.build_mock
 生成 build/mock.duckdb，步骤：按字段清单建表 → 生成贴源层数据 → 逐日执行加工脚本 → 对平检核
 
-只有贴源层是随机生成的，整合层和专题层由 scripts/ 里的加工脚本真实跑出来，
+只有贴源层是随机生成的，标准层和专题层由 scripts/ 里的加工脚本真实跑出来，
 所以数据字典、血缘、脚本、数据四者一致。
 """
 import csv
@@ -360,19 +360,19 @@ def run_scripts(con: duckdb.DuckDBPyConnection, scripts_dir: Path, dates: list[d
 
 # 每条检核是一句返回「不平的行数」的 DuckDB SQL，结果为 0 才算通过
 RECONCILE_CHECKS: list[tuple[str, str]] = [
-    ("整合层存款快照的行数 = 贴源层对公正常账户的行数", """
+    ("标准层存款快照的行数 = 贴源层对公正常账户的行数", """
         SELECT COUNT(*) FROM (
             SELECT (SELECT COUNT(*) FROM dwd.corp_dep_acct_d) AS actual,
                    (SELECT COUNT(*) FROM ods.core_dep_acct
                     WHERE cust_type = '1' AND acct_stat = '0') AS expected
         ) WHERE actual <> expected"""),
-    ("整合层贷款快照的行数 = 贴源层对公且余额大于零的借据行数", """
+    ("标准层贷款快照的行数 = 贴源层对公且余额大于零的借据行数", """
         SELECT COUNT(*) FROM (
             SELECT (SELECT COUNT(*) FROM dwd.corp_loan_duebill_d) AS actual,
                    (SELECT COUNT(*) FROM ods.core_loan_duebill
                     WHERE cust_type = '1' AND loan_bal > 0) AS expected
         ) WHERE actual <> expected"""),
-    ("客户存款汇总的全口径余额 = 整合层存款快照中有效客户的余额合计", """
+    ("客户存款汇总的全口径余额 = 标准层存款快照中有效客户的余额合计", """
         SELECT COUNT(*) FROM (
             SELECT data_dt, SUM(dep_bal_tot_rmb) AS total FROM ads.corp_cust_dep_bal_d GROUP BY data_dt
         ) summary FULL JOIN (
@@ -397,7 +397,7 @@ RECONCILE_CHECKS: list[tuple[str, str]] = [
            OR org.margin_bal_rmb IS DISTINCT FROM cust.margin
            OR org.dep_bal_tot_rmb IS DISTINCT FROM cust.total
            OR org.ytd_avg_bal_rmb IS DISTINCT FROM cust.ytd"""),
-    ("客户贷款汇总的余额 = 整合层贷款快照中有效客户的余额合计", """
+    ("客户贷款汇总的余额 = 标准层贷款快照中有效客户的余额合计", """
         SELECT COUNT(*) FROM (
             SELECT data_dt, SUM(loan_bal_rmb) AS total, SUM(npl_bal_rmb) AS npl
             FROM ads.corp_cust_loan_bal_d GROUP BY data_dt

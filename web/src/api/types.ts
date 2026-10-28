@@ -258,4 +258,4 @@ export interface Health {
   hint: string
 }
 
-export const LAYERS = ['贴源层', '整合层', '专题层'] as const
+export const LAYERS = ['贴源层', '标准层', '汇总层', '专题层'] as const

@@ -27,7 +27,7 @@ from nl2sql.schemas import (
 ORG_BAL = "ads.org_corp_dep_bal_d"          # 机构对公存款余额日汇总
 CUST_BAL = "ads.corp_cust_dep_bal_d"        # 对公客户存款余额日汇总
 DIM_ORG = "dim.org"                         # 机构维表
-DWD_ACCT = "dwd.corp_dep_acct_d"            # 对公存款账户日快照（整合层）
+DWD_ACCT = "dwd.corp_dep_acct_d"            # 对公存款账户日快照（标准层）
 EXAMPLE_ID = "01_存款余额.sql#2"
 EXAMPLE_SQL = """SELECT o.lvl2_org_nm,
        SUM(CASE WHEN b.data_dt = DATE '2026-06-30' THEN b.dep_bal_tot_rmb ELSE 0 END)
@@ -111,7 +111,7 @@ def make_evidence(store, *, use_lineage: bool = True, use_examples: bool = True,
                             relation="derived_from"),
         ]
         evidence.table_links = [TableLink(upstream=CUST_BAL, downstream=ORG_BAL)]
-        evidence.upstream_options = [UpstreamOption(table_id=DWD_ACCT, table_cn="对公存款账户日快照", layer="整合层")]
+        evidence.upstream_options = [UpstreamOption(table_id=DWD_ACCT, table_cn="对公存款账户日快照", layer="标准层")]
     if use_examples:
         evidence.examples = [
             EvidenceExample(example_id=EXAMPLE_ID, requirement="2026 年 6 月末各二级分行含保证金存款比年初多了多少",

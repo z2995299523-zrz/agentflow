@@ -10,7 +10,7 @@ def col(name: str, cn: str, enum: str = "", table: str = "dim.t") -> ColumnMeta:
     return ColumnMeta(table_id=table, column_name=name, ordinal=1, column_cn=cn, enum_values=enum)
 
 
-def table(table_id: str, grain: list[str], table_type: str = "维表", layer: str = "整合层") -> TableMeta:
+def table(table_id: str, grain: list[str], table_type: str = "维表", layer: str = "标准层") -> TableMeta:
     """一张表"""
     schema, name = table_id.split(".")
     return TableMeta(table_id=table_id, layer=layer, schema_name=schema, table_name=name, table_cn=name,
@@ -61,7 +61,7 @@ def test_code_tables_are_dimensions_with_one_grain_column_that_has_a_name_in_the
     index = code_tables(tables, lambda table_id: columns[table_id])
 
     assert index == {"industry_cd": [("ods.industry_dict", "industry_nm")],
-                     "org_no": [("dim.org", "org_nm"), ("ods.org_info", "org_nm")]}     # 整合层的排在贴源层前面
+                     "org_no": [("dim.org", "org_nm"), ("ods.org_info", "org_nm")]}     # 标准层的排在贴源层前面
 
 
 @pytest.mark.parametrize("text, expected", [

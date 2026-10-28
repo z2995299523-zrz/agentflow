@@ -27,7 +27,7 @@ ADS_DEP = "ads.corp_cust_dep_bal_d"
 ADS_LOAN = "ads.corp_cust_loan_bal_d"
 ADS_ORG = "ads.org_corp_dep_bal_d"
 
-SCHEMA_LAYER = {"ods": "贴源层", "dwd": "整合层", "dim": "整合层", "ads": "专题层"}
+SCHEMA_LAYER = {"ods": "贴源层", "dwd": "标准层", "dim": "标准层", "ads": "专题层"}
 
 
 def ref(text: str) -> FieldRef:
@@ -458,13 +458,13 @@ def test_upstream_tables_include_tables_that_only_appear_in_joins(graph, mock_st
 def test_upstream_tables_can_be_filtered_by_layer(graph):
     assert graph.upstream_tables(ADS_DEP, layers=["贴源层"]) == [
         "ods.ecif_corp_cust", "ods.industry_dict", "ods.core_dep_acct", "ods.exch_rate", "ods.gl_subject"]
-    assert graph.upstream_tables(ADS_DEP, layers={"整合层"}) == [CUST, DEP_D]
+    assert graph.upstream_tables(ADS_DEP, layers={"标准层"}) == [CUST, DEP_D]
     assert graph.upstream_tables(ADS_DEP, layers=()) == []
     assert graph.upstream_tables("ods.core_dep_acct") == []
 
 
 def test_upstream_tables_walk_through_layers_that_are_filtered_out(graph):
-    """贴源层的表经由整合层才到得了专题层：只要贴源层时，整合层只是路过"""
+    """贴源层的表经由标准层才到得了专题层：只要贴源层时，标准层只是路过"""
     assert "ods.core_dep_acct" in graph.upstream_tables(ADS_ORG, layers=["贴源层"])
 
 

@@ -84,7 +84,7 @@ def code_tables(tables: Iterable[TableMeta], columns_of: Callable[[str], Sequenc
         columns_of: 表标识 → 这张表的字段
 
     Returns:
-        粒度字段名（小写）→ [(码值表, 名称字段)]，层级高的在前（专题层、整合层、贴源层），同层按传入的先后
+        粒度字段名（小写）→ [(码值表, 名称字段)]，层级高的在前（专题层、标准层、贴源层），同层按传入的先后
     """
     index: dict[str, list[tuple[str, str]]] = {}
     rank = {layer: position for position, layer in enumerate(LAYERS)}

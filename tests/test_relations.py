@@ -49,7 +49,7 @@ ADS_DEP = "ads.corp_cust_dep_bal_d"
 ADS_LOAN = "ads.corp_cust_loan_bal_d"
 ADS_ORG = "ads.org_corp_dep_bal_d"
 
-SCHEMA_LAYER = {"ods": "贴源层", "dwd": "整合层", "dim": "整合层", "ads": "专题层"}
+SCHEMA_LAYER = {"ods": "贴源层", "dwd": "标准层", "dim": "标准层", "dws": "汇总层", "ads": "专题层"}
 LAYER_NUMBER = {"ods": 0, "dwd": 1, "dim": 1, "ads": 2}
 
 
@@ -731,13 +731,23 @@ def test_grain_with_one_generic_and_one_real_column_is_still_used():
 
 
 def test_layer_rule_upstream_table_does_not_join_downstream_table():
-    """贴源层、整合层的表虽然有 code 字段，但专题层 t 的粒度不能被上游表关联"""
+    """贴源层、标准层的表虽然有 code 字段，但专题层 t 的粒度不能被上游表关联"""
     mart = make_mart([("ads.t", ["code"], ["code"]), ("ods.s", ["s_id"], ["s_id", "code"]),
                       ("dwd.m", ["m_id"], ["m_id", "code"])])
 
     relations, _ = derive_relations(mart)
 
     assert relations == []
+
+
+def test_layer_rule_treats_the_summary_and_mart_layers_as_one_level():
+    """汇总层在专题层下面，但两层都直接拿来查数：汇总层的表照样能按粒度键关联专题层的表"""
+    mart = make_mart([("ads.t", ["code"], ["code"]), ("dws.s", ["s_id"], ["s_id", "code"]),
+                      ("dwd.m", ["m_id"], ["m_id", "code"])])
+
+    relations, _ = derive_relations(mart)
+
+    assert [(r.left_table, r.right_table) for r in relations] == [("dws.s", "ads.t")]       # 标准层的照旧不行
 
 
 def test_layer_rule_same_layer_and_downstream_to_upstream_are_allowed():

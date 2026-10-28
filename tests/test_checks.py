@@ -181,7 +181,13 @@ def test_issue_points_at_sheet_and_row(tmp_path, tiny_sheets):
     issue = run_checks(tmp_path, tiny_sheets)[0]
 
     assert (issue.sheet, issue.row_no) == ("表清单", 2)
-    assert "明细层" in issue.message and "贴源层、整合层、专题层" in issue.message
+    assert "明细层" in issue.message and "贴源层、标准层、汇总层、专题层" in issue.message
+
+
+def test_the_old_name_of_the_standard_layer_still_imports(tmp_path, tiny_sheets):
+    tiny_sheets["表清单"][0][0] = "整合层"                                  # 分成四层之前的写法
+
+    assert not [issue for issue in run_checks(tmp_path, tiny_sheets) if issue.rule == "M05"]
 
 
 def test_external_sources_are_grouped_per_table(tmp_path, tiny_sheets):
@@ -257,7 +263,7 @@ def test_bare_lineage_source_is_not_mistaken_for_external_source(tmp_path, tiny_
 
 
 def test_bare_name_matching_several_schemas_lists_the_candidates(tmp_path, tiny_sheets):
-    tiny_sheets["表清单"].append(["整合层", "dim", "cust", "客户维表", "维表", "cust_no", "", ""])
+    tiny_sheets["表清单"].append(["标准层", "dim", "cust", "客户维表", "维表", "cust_no", "", ""])
     tiny_sheets["字段清单"].append(["dim.cust", "cust_no", "客户号", "varchar(20)", "是", "", ""])
     tiny_sheets["血缘清单"].append(["dim.cust", "cust_no", "cust", "cust_no", "", ""])
 

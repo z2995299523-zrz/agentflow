@@ -27,7 +27,7 @@ const LABEL_CHARS = 18
 const FOCUS_COLUMNS = 2                     // 打开时让中心字段前后两跳占满画布，更远的拖动或看小地图
 const MIN_FIT_ZOOM = 0.4                    // 字段很多时不再缩小，免得字看不清
 const COLORS = { pass: '#94a3b8', calc: '#3b82f6', cond: '#f59e0b' }
-const LAYER_COLORS: Record<string, string> = { ods: '#16a34a', dwd: '#2563eb', ads: '#7c3aed', ext: '#94a3b8' }
+const LAYER_COLORS: Record<string, string> = { ods: '#16a34a', dwd: '#2563eb', dws: '#0891b2', ads: '#7c3aed', ext: '#94a3b8' }
 
 export type FieldNodeData = { brief: FieldBrief; center: boolean; column: number }
 type FieldNode = Node<FieldNodeData, 'field'>

@@ -443,7 +443,7 @@ def test_follow_up_sends_the_previous_requirement_to_the_parser(make):
 
 
 PREV_SQL = f"SELECT SUM(loan_bal_rmb) AS loan_bal_rmb FROM {LOAN} WHERE data_dt = DATE '2026-08-31'"
-DUEBILL = "dwd.corp_loan_duebill_d"            # 整合层的表：第 0 层召回不到，只能靠上一轮带进来
+DUEBILL = "dwd.corp_loan_duebill_d"            # 标准层的表：第 0 层召回不到，只能靠上一轮带进来
 
 
 def test_a_follow_up_builds_on_the_sql_and_tables_of_the_previous_round(make):

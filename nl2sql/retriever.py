@@ -4,12 +4,12 @@
 合并后按表归组，保留最多 MAX_TABLES 张候选表；同时找最相似的样例，样例用到的表直接加入候选。
 
 候选范围由上溯层数决定：
-    0  专题层全部表，加整合层的维表
-    1  再加入候选事实表的上游表中属于整合层的
+    0  专题层、汇总层的全部表，加标准层的维表
+    1  再加入候选事实表的上游表中属于标准层的
     2  再加入属于贴源层的
-上溯加入的上游表不占 MAX_TABLES 的名额，命中字段在这些表自己的范围里单独找，不与专题层的表争名次；
+上溯加入的上游表不占 MAX_TABLES 的名额，命中字段在这些表自己的范围里单独找，不与第 0 层的表争名次；
 但数量有上限：只留有命中字段的，按表得分最多 MAX_UPSTREAM_TABLES 张。一张也没命中时无从比较，取最近的前 MAX_UPSTREAM_TABLES 张，
-免得上溯一张表也不给。没留下的维表回到第 0 层，和专题层的表一起排名。
+免得上溯一张表也不给。没留下的维表回到第 0 层，和专题层、汇总层的表一起排名。
 表清单里标成非标准表的（设计文档没收录、只在实库里有）不进第 0 层：它们同样在自己的范围里单独找命中字段、单独排名，
 有命中的前 MAX_EXTRA_TABLES 张补进候选，不占标准表的名额。真实库上这类表比标准表还多，一起排名时会把标准表挤出候选。
 
@@ -35,7 +35,7 @@ import numpy as np
 
 from lineage.graph import LineageGraph
 from metadata.index import EXAMPLE_KIND, FIELD_KIND, TOKEN_PATTERN, Embedder, VectorIndex, field_ref_id
-from metadata.models import LAYERS
+from metadata.models import DIRECT_LAYERS, LAYERS
 from metadata.relations import GENERIC_KEY_NAMES
 from metadata.store import MetadataStore
 
@@ -58,7 +58,7 @@ DATA_DATE_CN = "数据日期"                      # 中文名是它的字段是
 BOILERPLATE_SHARE = 0.5                      # 同一层里超过这个比例的表都有的字段名（创建时间、年月日一类），按通用字段处理
 BOILERPLATE_MIN_TABLES = 10                  # 样本太小时比例没有意义：至少出现在这么多张表里才算
 SCORE_DIGITS = 10                            # 比较得分时保留的小数位：浮点误差不能打乱同分的先后
-UPSTREAM_LAYERS = {1: ("整合层",), 2: ("整合层", "贴源层")}    # 上溯层数 → 上游表的层级
+UPSTREAM_LAYERS = {1: ("标准层",), 2: ("标准层", "贴源层")}    # 上溯层数 → 上游表的层级
 REASON_RECALL, REASON_UPSTREAM, REASON_EXAMPLE = "recall", "upstream", "example"
 REASON_PREVIOUS, REASON_MISSING, REASON_EXTRA = "previous", "missing", "extra"
 VIA_VECTOR, VIA_KEYWORD = "vector", "keyword"
@@ -214,7 +214,7 @@ class Retriever:
         self._embedder = embedder
         self._tables = {table.table_id: table for table in store.tables()}
         first_level = [table for table in store.tables()
-                       if table.layer == "专题层" or (table.layer == "整合层" and table.table_type == "维表")]
+                       if table.layer in DIRECT_LAYERS or (table.layer == "标准层" and table.table_type == "维表")]
         self._level0 = sorted(table.table_id for table in first_level if table.standard)
         self._extra_pool = sorted(table.table_id for table in first_level if not table.standard)   # 非标准表，单独排名
 
@@ -300,8 +300,8 @@ class Retriever:
     def scope_tables(self, level: int, base_tables: Sequence[str] = ()) -> tuple[list[str], list[str]]:
         """返回 (范围内的表, 上溯加入的上游表)
 
-        第 0 层是专题层全部表加整合层的维表。第 1、2 层在此之上，对 base_tables 里不是维表的每张表，
-        加入它的上游表闭包里属于整合层（第 2 层再加贴源层）的表。后者是返回值的第二项，
+        第 0 层是专题层、汇总层的全部表加标准层的维表。第 1、2 层在此之上，对 base_tables 里不是维表的每张表，
+        加入它的上游表闭包里属于标准层（第 2 层再加贴源层）的表。后者是返回值的第二项，
         也包含在第一项里（维表本来就在第 0 层里，只出现一次）。
 
         Args:

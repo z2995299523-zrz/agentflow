@@ -257,6 +257,15 @@ def test_standard_flag_round_trips_and_old_databases_read_as_standard(tmp_path):
     assert all(t.standard for t in MetadataStore(tmp_path / "m.db").tables())
 
 
+def test_old_databases_with_the_old_layer_name_read_as_the_standard_layer(tmp_path):
+    write_store(tmp_path / "m.db", make_mart())
+    with closing(sqlite3.connect(tmp_path / "m.db")) as conn:             # 分成四层之前导入的库：标准层叫整合层
+        conn.execute("UPDATE meta_table SET layer = '整合层' WHERE table_id = 'ods.cust'")
+        conn.commit()
+
+    assert MetadataStore(tmp_path / "m.db").table("ods.cust").layer == "标准层"
+
+
 def test_columns_of_unlisted_table_do_not_break_the_store():
     mart = make_mart()
     mart.columns.append(ColumnMeta(table_id="ods.other", column_name="x", ordinal=1, column_cn="某字段"))

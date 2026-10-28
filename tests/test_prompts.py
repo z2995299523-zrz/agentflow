@@ -490,9 +490,10 @@ def test_a_follow_up_repair_round_still_shares_its_prefix_with_the_first_round(e
     assert repair.startswith(first.split("## 要求")[0])                 # 上一轮的 SQL 也在共同的前缀里
 
 
-def test_the_planner_picks_tables_tier_by_tier_from_dm_down():
+def test_the_planner_picks_tables_layer_by_layer_from_the_mart_down():
     rule = PLANNER_SYSTEM.split("\n4. 选表")[1].split("\n5. ")[0]
-    assert "DM、DWS、DWD、ODS" in rule and "满足不了才用 DWS 层" in rule and "汇总程度只在同一分层里比" in rule
+    assert "专题层、汇总层、标准层、贴源层" in rule and "满足不了才用汇总层" in rule and "汇总程度只在同一层级里比" in rule
+    assert "汇总层、标准层、贴源层的表也一样" in PLANNER_SYSTEM                       # 缺东西时下层的表照样能用
 
 
 def test_the_planner_is_told_to_use_non_standard_tables_only_as_a_last_resort():
@@ -562,7 +563,7 @@ def test_each_candidate_table_gets_a_block_with_its_facts(evidence):
     block = table_block(render_evidence(evidence), ORG_BAL)
 
     assert block.startswith(f"### {ORG_BAL} 机构对公存款余额日汇总")
-    assert "层级：专题层（DM）；类型：快照表；粒度：data_dt, org_no；数据日期字段：data_dt；入选原因：召回" in block
+    assert "层级：专题层；类型：快照表；粒度：data_dt, org_no；数据日期字段：data_dt；入选原因：召回" in block
     assert "说明：按开户机构汇总的对公存款余额" in block
     assert "字段：" in block
 
@@ -807,7 +808,7 @@ def test_table_links_and_upstream_options_are_listed(evidence):
     text = render_evidence(evidence)
 
     assert f"- {ORG_BAL} 由 {CUST_BAL} 加工而来" in section(text, "## 表之间的上下游")
-    assert f"- {DWD_ACCT} 对公存款账户日快照（整合层）" in section(text, "## 还可以上溯到的表")
+    assert f"- {DWD_ACCT} 对公存款账户日快照（标准层）" in section(text, "## 还可以上溯到的表")
 
 
 # ── render_evidence：关联路径、样例、说明 ──────

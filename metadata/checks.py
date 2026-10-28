@@ -14,7 +14,7 @@
     M13 字段所属的表不在表清单里
     M14 表名没有带模式名（给出正确写法；这类写法不会被当成外部源放过）
     W01 血缘的源表不在表清单里（外部源）
-    W02 血缘存在环                W03 整合层或专题层的表没有血缘
+    W02 血缘存在环                W03 标准层、汇总层或专题层的表没有血缘
     W04 表没有填粒度字段（按层级汇总）
     W05 表里有字段没有填数据类型
     W06 加工脚本里的语句无法结构化解析（只保存原文），或者 INSERT 的列数对不上
@@ -29,13 +29,13 @@ from dataclasses import dataclass
 import networkx as nx
 
 from metadata.loader import RawMart, RawRow
-from metadata.models import CARDINALITIES, LAYERS, STANDARD_MARKS, TABLE_TYPES
+from metadata.models import CARDINALITIES, LAYERS, STANDARD_MARKS, TABLE_TYPES, normalize_layer
 from metadata.template import COLUMN_SHEET, LINEAGE_SHEET, RELATION_SHEET, SHEETS, TABLE_SHEET
 
 ERROR = "错误"
 WARNING = "警告"
 SNAPSHOT_TYPE = "快照表"
-DOWNSTREAM_LAYERS = ("整合层", "专题层")   # 这两层的表应当有血缘
+DOWNSTREAM_LAYERS = ("标准层", "汇总层", "专题层")   # 这几层的表应当有血缘
 SUMMARY_EXAMPLES = 3                       # 汇总类警告里举几个例子
 
 
@@ -144,7 +144,7 @@ def _check_tables(raw: RawMart, issues: list[Issue]) -> dict[str, RawRow]:
                                 f"表 {table_id} 重复，首次出现在第 {tables[table_id].row_no} 行"))
             continue
         tables[table_id] = row
-        if values["layer"] and values["layer"] not in LAYERS:
+        if values["layer"] and normalize_layer(values["layer"]) not in LAYERS:
             issues.append(Issue(ERROR, "M05", sheet, row.row_no,
                                 f"层级「{values['layer']}」不在允许范围内（{'、'.join(LAYERS)}）"))
         if values["table_type"] and values["table_type"] not in TABLE_TYPES:
@@ -198,7 +198,7 @@ def _check_columns(raw: RawMart, tables: dict[str, RawRow],
             continue
         grains = split_list(row.values["grain_columns"])
         if not grains:
-            without_grain.setdefault(row.values["layer"], []).append(table_id)
+            without_grain.setdefault(normalize_layer(row.values["layer"]), []).append(table_id)
         if untyped[table_id]:
             issues.append(Issue(WARNING, "W05", COLUMN_SHEET.name, None,
                                 f"表 {table_id} 有 {untyped[table_id]} 个字段没有填数据类型"))
@@ -278,7 +278,7 @@ def _check_lineage(raw: RawMart, tables: dict[str, RawRow],
         issues.append(Issue(WARNING, "W02", sheet, None, f"血缘存在环：{path}"))
 
     for table_id, row in tables.items():
-        if row.values["layer"] in DOWNSTREAM_LAYERS and table_id not in tables_with_lineage:
+        if normalize_layer(row.values["layer"]) in DOWNSTREAM_LAYERS and table_id not in tables_with_lineage:
             issues.append(Issue(WARNING, "W03", TABLE_SHEET.name, row.row_no,
                                 f"{row.values['layer']}的表 {table_id} 没有任何血缘记录"))
 

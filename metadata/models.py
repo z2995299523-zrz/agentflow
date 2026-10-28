@@ -5,18 +5,12 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 # 允许的取值范围，模板说明和导入校验共用
-LAYERS: tuple[str, ...] = ("贴源层", "整合层", "专题层")
-# 数仓分层，用表优先级从上到下：上层的表能满足需求就不用下层。按模式名的第一段认（dm_xxx 是 DM），认不出时按层级
-TIERS: tuple[str, ...] = ("DM", "DWS", "DWD", "ODS")
-TIER_PREFIXES: dict[str, str] = {"dm": "DM", "ads": "DM", "app": "DM", "dws": "DWS",
-                                 "dwd": "DWD", "dim": "DWD", "base": "DWD", "ods": "ODS"}
-LAYER_TIERS: dict[str, str] = {"专题层": "DM", "整合层": "DWD", "贴源层": "ODS"}
-
-
-def table_tier(table_id: str, layer: str) -> str:
-    """表在数仓分层里是哪一档（TIERS 之一）：按模式名的第一段认，认不出时按层级"""
-    prefix = table_id.split(".", 1)[0].split("_", 1)[0].lower()
-    return TIER_PREFIXES.get(prefix) or LAYER_TIERS.get(layer, "DWD")
+# 层级从下到上：贴源层（ODS）、标准层（DWD）、汇总层（DWS）、专题层（DM）；查数用表从上往下取，上层能满足就不用下层
+LAYERS: tuple[str, ...] = ("贴源层", "标准层", "汇总层", "专题层")
+# 直接拿来查数的层级：召回第 0 层就放它们的全部表；它们的表与维表参照完整（ETL 保证）
+DIRECT_LAYERS: tuple[str, ...] = ("专题层", "汇总层")
+# 层级的旧名字：分成四层之前标准层叫整合层，表清单和旧元数据库里的旧名字照样能读
+LAYER_ALIASES: dict[str, str] = {"整合层": "标准层"}
 # 快照表：每个数据日期一份全量，查询必须带日期条件；全量表：每次清空重装，只有当前状态
 TABLE_TYPES: tuple[str, ...] = ("快照表", "流水表", "维表", "全量表")
 # 表清单「标准表」一列：空着算是；填「否」的是设计文档没收录、只在实库里有的表，召回时单独排名
@@ -32,6 +26,11 @@ LINEAGE_ORIGINS: tuple[str, ...] = ("list", "script")
 RELATION_ORIGINS: tuple[str, ...] = ("manual", "script", "lineage", "grain_key")
 # 加工脚本里目标字段的表达式类别：直取、加工、恒为空、常量、加工时间、追溯不到来源
 COLUMN_KINDS: tuple[str, ...] = ("passthrough", "derived", "null", "constant", "etl_time", "unresolved")
+
+
+def normalize_layer(layer: str) -> str:
+    """层级的旧名字换成现在的（整合层 → 标准层），其它原样返回"""
+    return LAYER_ALIASES.get(layer, layer)
 
 
 class FieldRef(BaseModel):

@@ -27,9 +27,9 @@ def test_mock_mart_size():
 def test_layers_map_to_schemas():
     mart, _ = load_mart(MOCK_MART)
 
-    assert Counter(table.layer for table in mart.tables) == {"贴源层": 7, "整合层": 4, "专题层": 3}
+    assert Counter(table.layer for table in mart.tables) == {"贴源层": 7, "标准层": 4, "专题层": 3}
     assert {table.schema_name for table in mart.tables if table.layer == "贴源层"} == {"ods"}
-    assert {table.schema_name for table in mart.tables if table.layer == "整合层"} == {"dwd", "dim"}
+    assert {table.schema_name for table in mart.tables if table.layer == "标准层"} == {"dwd", "dim"}
     assert {table.schema_name for table in mart.tables if table.layer == "专题层"} == {"ads"}
 
 

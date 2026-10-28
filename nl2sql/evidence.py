@@ -68,7 +68,7 @@ MAX_CONDS = 6
 
 ELLIPSIS = "…"
 REASON_JOIN = "join"
-NEXT_LAYER = {0: "整合层", 1: "贴源层"}        # 上溯一层能到的层级，按召回时已经上溯的层数
+NEXT_LAYER = {0: "标准层", 1: "贴源层"}        # 上溯一层能到的层级，按召回时已经上溯的层数
 # 脚本里关联的写法：类型 → 前缀。IMPLICIT 是写在 WHERE 里的等值关联；不认识的类型照写
 JOIN_PREFIXES = {"LEFT": "LEFT JOIN", "INNER": "INNER JOIN", "RIGHT": "RIGHT JOIN", "FULL": "FULL JOIN",
                  "JOIN": "JOIN", "IMPLICIT": "WHERE 等值关联"}
