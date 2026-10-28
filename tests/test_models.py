@@ -10,7 +10,18 @@ from metadata.models import (
     Mart,
     ScriptColumn,
     ScriptStatement,
+    table_tier,
 )
+
+
+@pytest.mark.parametrize("table_id, layer, tier", [
+    ("dm_demo.project", "专题层", "DM"), ("dws_demo.project_sum", "专题层", "DWS"),   # 同在专题层，DM 在 DWS 前
+    ("dwd_demo.contract", "整合层", "DWD"), ("base_demo.org", "整合层", "DWD"), ("ods_demo.raw", "贴源层", "ODS"),
+    ("ads.corp_cust_dep_bal_d", "专题层", "DM"), ("dim.org", "整合层", "DWD"), ("DWS_DEMO.t", "专题层", "DWS"),
+    ("mart.t", "专题层", "DM"), ("stage.t", "贴源层", "ODS"),                         # 模式名认不出：按层级
+])
+def test_table_tier_comes_from_the_schema_prefix_or_else_the_layer(table_id, layer, tier):
+    assert table_tier(table_id, layer) == tier
 
 
 def test_field_ref_is_hashable_and_frozen():

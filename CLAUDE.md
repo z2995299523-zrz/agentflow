@@ -62,7 +62,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 ```
 
 - `schemas.py`：各步骤的输入输出，是模块之间的契约；`llm.py`：模型调用（`ChatModelClient`、测试用的 `ScriptedLLM`、带重试的 `structured_call`）
-- `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（加工链路里重复的跳和条件只写一次，第 5 张以后召回的表只列关键字段，上溯、样例带入的表照旧全列；超过 4 万字按九级收缩）
+- `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（加工链路里重复的跳和条件只写一次，第 5 张以后召回的表只列关键字段，上溯、样例带入的表照旧全列；超过 4 万字按九级收缩；每张表标出数仓分层 DM、DWS、DWD、ODS，`metadata.models.table_tier` 按模式名第一段认，④ 按分层从上往下选表）
 - `retriever.py` 候选召回（关键字加向量，三层范围；表清单「标准表」填「否」的表单独排名，最多补 3 张，不占标准表的名额）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
 - `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
 - `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB

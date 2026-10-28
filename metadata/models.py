@@ -6,6 +6,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # 允许的取值范围，模板说明和导入校验共用
 LAYERS: tuple[str, ...] = ("贴源层", "整合层", "专题层")
+# 数仓分层，用表优先级从上到下：上层的表能满足需求就不用下层。按模式名的第一段认（dm_xxx 是 DM），认不出时按层级
+TIERS: tuple[str, ...] = ("DM", "DWS", "DWD", "ODS")
+TIER_PREFIXES: dict[str, str] = {"dm": "DM", "ads": "DM", "app": "DM", "dws": "DWS",
+                                 "dwd": "DWD", "dim": "DWD", "base": "DWD", "ods": "ODS"}
+LAYER_TIERS: dict[str, str] = {"专题层": "DM", "整合层": "DWD", "贴源层": "ODS"}
+
+
+def table_tier(table_id: str, layer: str) -> str:
+    """表在数仓分层里是哪一档（TIERS 之一）：按模式名的第一段认，认不出时按层级"""
+    prefix = table_id.split(".", 1)[0].split("_", 1)[0].lower()
+    return TIER_PREFIXES.get(prefix) or LAYER_TIERS.get(layer, "DWD")
 # 快照表：每个数据日期一份全量，查询必须带日期条件；全量表：每次清空重装，只有当前状态
 TABLE_TYPES: tuple[str, ...] = ("快照表", "流水表", "维表", "全量表")
 # 表清单「标准表」一列：空着算是；填「否」的是设计文档没收录、只在实库里有的表，召回时单独排名

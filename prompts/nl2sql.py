@@ -12,6 +12,7 @@ from collections import Counter
 from collections.abc import Sequence
 from datetime import date, timedelta
 
+from metadata.models import table_tier
 from nl2sql.schemas import (
     Clarify,
     Evidence,
@@ -378,7 +379,7 @@ PLANNER_SYSTEM = """你是银行数据仓库专题库的「选表定口径」助
    - 能反问时，不要替用户挑一个口径写进 assumptions。你要写「需求没说明……，按最常用的……处理」这样的假设，就说明这里该反问；
    - 只有本次不能反问时，才按最常用的理解选一个，写进 assumptions。
    只有这种口径分岔而需求没说清的情况才反问。其它不确定的地方（日期、排序、列的写法）一律按默认处理，写进 assumptions，不要反问。
-4. 选表：先找有需求要的那个指标字段、并且口径对得上的表，再在这些表里选满足需求粒度的、汇总程度最高的，例如只要机构粒度就用机构汇总表，不要用客户级的表再自己汇总；汇总程度高、但没有这个指标字段的表不能拿别的字段来凑（需求要的是某一类余额，汇总表只有总余额，就不能用总余额代替）。需要维度属性（名称、分行、行业）时，用带关联键的表去关联维表；维度字段已经在事实表里就不用再关联；没有用到维表里的字段（不分组、不过滤、不取名称）就不要关联维表，也不要把它写进 tables。样例只参考写法和口径，不要照搬样例里这次用不到的表和关联。入选原因是「非标准表」的表没有收进设计文档，口径没确认过：其它候选表能满足需求时不用它们，都满足不了时才用，并在 table_basis 里说明。
+4. 选表：先找有需求要的那个指标字段、并且口径对得上的表，再在这些表里选满足需求粒度的、汇总程度最高的，例如只要机构粒度就用机构汇总表，不要用客户级的表再自己汇总；汇总程度高、但没有这个指标字段的表不能拿别的字段来凑（需求要的是某一类余额，汇总表只有总余额，就不能用总余额代替）。这些表分属不同分层时（层级后面括号里的 DM、DWS、DWD、ODS，从上到下），按分层从上往下取：DM 层有满足需求（有要的指标字段、口径对得上、粒度够）的表就只用 DM 层的，满足不了才用 DWS 层，再满足不了才用 DWD 层，以此类推；汇总程度只在同一分层里比。关联维表取名称、分行这类属性不受分层限制。需要维度属性（名称、分行、行业）时，用带关联键的表去关联维表；维度字段已经在事实表里就不用再关联；没有用到维表里的字段（不分组、不过滤、不取名称）就不要关联维表，也不要把它写进 tables。样例只参考写法和口径，不要照搬样例里这次用不到的表和关联。入选原因是「非标准表」的表没有收进设计文档，口径没确认过：其它候选表能满足需求时不用它们，都满足不了时才用，并在 table_basis 里说明。
 5. 关联：只用证据「关联路径」里列出的关联，在 joins 里写清用哪个键。对应关系 N:1 表示左表每一行最多对应右表一行，不会重复。1:N、N:N、未知，或者路径标了「会发散」的，左表的行会重复，要在 join_basis 里说明怎么避免重复计算（先汇总再关联、按粒度键去重等）。
 6. 时间：
    - 快照表一定要有数据日期条件，写进 filters；全量表、维表不要加。
@@ -775,7 +776,8 @@ def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bo
     grain = ", ".join(table.grain_columns) or "无"
     lines = [
         f"### {table.table_id} {table.table_cn}",
-        f"层级：{table.layer}；类型：{table.table_type}；粒度：{grain}；数据日期字段：{table.date_column or '无'}；"
+        f"层级：{table.layer}（{table_tier(table.table_id, table.layer)}）；类型：{table.table_type}；粒度：{grain}；"
+        f"数据日期字段：{table.date_column or '无'}；"
         f"入选原因：{_REASON_NAMES.get(table.reason, table.reason)}",
     ]
     if table.description:
