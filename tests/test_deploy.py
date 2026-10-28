@@ -52,6 +52,20 @@ def test_site_config_must_exist_and_be_complete(tmp_path: Path) -> None:
         load_site(path)
     path.write_text(json.dumps(_SITE), encoding="utf-8")
     assert load_site(path)["watch_units"] == ["other-site"]
+    path.write_text(json.dumps({**_SITE, "nginx_template": str(tmp_path / "missing.conf")}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="nginx_template"):
+        load_site(path)
+
+
+def test_server_nginx_template_overrides_release(tmp_path: Path) -> None:
+    """站点配置写了服务器上的模板就用它（回退旧版本也一样），没写时用该版本仓库里的模板。"""
+    code = tmp_path / "release"
+    (code / "deploy").mkdir(parents=True)
+    (code / "deploy/nginx.conf").write_bytes(b"listen 8447 ssl;\n")
+    assert release.nginx_template(code, _SITE) == b"listen 8447 ssl;\n"
+    custom = tmp_path / "server-nginx.conf"
+    custom.write_bytes(b"listen 127.0.0.1:9443 ssl;\n")
+    assert release.nginx_template(code, {**_SITE, "nginx_template": str(custom)}) == custom.read_bytes()
 
 
 def test_nginx_template_is_filled_from_site_config() -> None:

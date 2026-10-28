@@ -20,6 +20,7 @@ BASE = Path("/opt/agentflow")
 REPO = BASE / "repo.git"
 DATA = Path("/var/lib/agentflow")
 # 服务器专属的值（公网地址、证书目录、uv 路径、同机要保持运行的服务）只放在服务器上，不进入 Git。
+# 可选的 nginx_template 指向服务器上自己的 Nginx 模板，见 nginx_template()。
 SITE_PATH = Path("/etc/agentflow/site.json")
 SITE_KEYS = ("public_url", "server_name", "cert_dir", "uv", "watch_units")
 NGINX_SITE = Path("/etc/nginx/sites-available/agentflow")
@@ -37,6 +38,8 @@ def load_site(path: Path = SITE_PATH) -> dict:
         raise RuntimeError(f"{path} 缺少：{', '.join(missing)}")
     if not str(site["public_url"]).startswith("https://") or not isinstance(site["watch_units"], list):
         raise RuntimeError(f"{path} 的 public_url 必须是 https 地址，watch_units 必须是列表")
+    if site.get("nginx_template") and not Path(site["nginx_template"]).is_file():
+        raise RuntimeError(f"{path} 的 nginx_template 指向的文件不存在：{site['nginx_template']}")
     return site
 
 
@@ -49,6 +52,16 @@ def render_nginx(template: bytes, site: dict) -> bytes:
     if left:
         raise ValueError(f"Nginx 模板还有没填的变量：{', '.join(left)}")
     return content
+
+
+def nginx_template(release: Path, site: dict) -> bytes:
+    """选 Nginx 模板：站点配置写了 nginx_template 就用服务器上的这份，否则用该版本仓库里的模板。
+
+    入口只在私人通道监听（本机转发、内网地址）的服务器，监听地址和证书写在服务器上的模板里；
+    回退到旧版本时也用这份，不会按旧版仓库模板改回所有地址监听。
+    """
+    custom = site.get("nginx_template")
+    return Path(custom).read_bytes() if custom else (release / "deploy/nginx.conf").read_bytes()
 
 
 def run(*arguments: str, cwd: Path | None = None, capture: bool = False) -> str:
@@ -208,7 +221,7 @@ def activate(commit: str, profile_override: dict | None = None) -> None:
     assert (evidence / "prepared.json").is_file(), "必须先完成 prepare"
     assert Path("/etc/agentflow/app.env").is_file(), "必须先配置仓库外的 app.env"
     site = load_site()
-    nginx_site = render_nginx((release / "deploy/nginx.conf").read_bytes(), site)
+    nginx_site = render_nginx(nginx_template(release, site), site)
     old = (BASE / "current").resolve() if (BASE / "current").exists() else None
     prepared = json.loads((evidence / "prepared.json").read_text())
     profile = profile_override or prepared.get("profile") or make_profile("./data/mock_mart", "duckdb", release)

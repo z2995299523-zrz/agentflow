@@ -61,7 +61,7 @@ SSH 登录示例：
 | `/etc/nginx/sites-available/agentflow` | 本站 HTTPS 和 `/api/` 转发 |
 | `/etc/nginx/agentflow-access.conf` | 独立访问控制；Nginx 版本配置通过 include 引用 |
 | `/etc/nginx/agentflow.htpasswd` | 密码摘要，root:www-data 0640，不写进源码 |
-| `/etc/agentflow/site.json` | 站点配置，root 所有、0644，不进入 Git：`public_url`、`server_name`、`cert_dir`（Nginx 模板里的变量）、`uv`（同机既有部署工具，使用前核对旁边 `uv.sha256`，不修改其它网站的运行环境）、`watch_units`（验收时要保持运行的同机服务）；实际内容见本机 `.runtime-deploy/private-docs/site.json` |
+| `/etc/agentflow/site.json` | 站点配置，root 所有、0644，不进入 Git：`public_url`、`server_name`、`cert_dir`（Nginx 模板里的变量）、`uv`（同机既有部署工具，使用前核对旁边 `uv.sha256`，不修改其它网站的运行环境）、`watch_units`（验收时要保持运行的同机服务）；可选 `nginx_template`（服务器上自己的 Nginx 模板，见「激活和验证」）；实际内容见本机 `.runtime-deploy/private-docs/site.json` |
 
 本机登录凭据单独保存在 `.runtime-deploy/服务器访问凭据.txt`；程序化验证可以读取同目录的 `access-credentials.json`。这些文件已被 Git 忽略。只将本文件交给 Claude Code，不需要把密码正文贴入提示词。
 
@@ -220,6 +220,8 @@ sudo python3 /opt/agentflow/current/deploy/release.py "$release_sha" verify
 ```
 
 如果当前指针已经指向同一 SHA，执行 `verify`，不要重复 `activate`，以免把“上一版”记录改成同一版本。
+
+`activate` 会重写本站的 Nginx 配置并重载 Nginx。仓库模板监听所有地址的 8447；入口只在私人通道监听的服务器（本机端口转发、内网地址，证书也不同），先把现场的站点配置存成服务器上的模板（如 `/etc/agentflow/nginx.conf`，root 所有、0644），再在 `site.json` 里加 `"nginx_template": "<模板路径>"`：`activate` 和 `rollback` 都改用这份，现场的监听地址和证书不变；模板里的站点变量照样会填。没有这一项时用该版本仓库里的模板。没有这项功能的旧版 `release.py` 仍套仓库模板，所以回退到旧版本以后，不要再用旧版的 `release.py` 做 `activate`、`rollback`。
 
 激活阶段先在线备份旧资料会话，保存旧配置及其权限，然后原子更新资料相关配置与代码指针，重启本应用，按准备时登记的契约检查健康状态，检查并平滑重载 Nginx，执行当前真实会话的备份恢复。
 
