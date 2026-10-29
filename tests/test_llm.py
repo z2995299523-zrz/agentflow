@@ -221,9 +221,9 @@ class FakeChatOpenAI:
 def fake_openai(monkeypatch):
     seen = {}
 
-    def kwargs(temperature=None):
-        seen["temperature"] = temperature
-        return {"model": "fake-chat", "api_key": "sk-test", "base_url": "http://127.0.0.1:9",
+    def kwargs(temperature=None, model=None):
+        seen.update(temperature=temperature, model=model)
+        return {"model": model or "fake-chat", "api_key": "sk-test", "base_url": "http://127.0.0.1:9",
                 "temperature": temperature}
 
     monkeypatch.setattr("config.get_llm_kwargs", kwargs)
@@ -245,6 +245,15 @@ def test_chat_client_defaults_the_timeout_from_config(fake_openai, monkeypatch):
     monkeypatch.setattr("config.LLM_TIMEOUT", 77.0)
 
     assert ChatModelClient()._model.kwargs["timeout"] == 77.0
+
+
+def test_chat_client_asks_config_for_the_chosen_model(fake_openai):
+    assert ChatModelClient().name == "fake-chat" and fake_openai["model"] is None      # 不指定：默认模型
+
+    client = ChatModelClient(model="qwen3.8-flash")
+
+    assert fake_openai["model"] == "qwen3.8-flash"
+    assert client.name == "qwen3.8-flash" and client._model.kwargs["model"] == "qwen3.8-flash"
 
 
 def test_chat_client_reads_text_and_tokens(fake_openai):
@@ -283,13 +292,91 @@ def test_deepseek_defaults_to_flash_with_thinking_off(monkeypatch):
     assert kwargs["temperature"] == 0.0
 
 
-def test_other_providers_send_no_thinking_switch(monkeypatch):
+def test_qwen_on_dashscope_turns_thinking_off_and_openai_sends_no_switch(monkeypatch):
     import config
 
     monkeypatch.setattr(config, "LLM_PROVIDER", "dashscope")
+    monkeypatch.setattr(config, "LLM_MODEL", "")
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+    assert config.get_llm_kwargs(0.0)["extra_body"] == {"enable_thinking": False}
 
+    monkeypatch.setattr(config, "LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     assert "extra_body" not in config.get_llm_kwargs(0.0)
+
+
+@pytest.fixture
+def deepseek_default(monkeypatch):
+    """默认模型是 DeepSeek，三家的 Key 都配了；LLM_API_BASE 指向一个代理地址"""
+    import config
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "deepseek")
+    monkeypatch.setattr(config, "LLM_MODEL", "deepseek-flash")
+    monkeypatch.setattr(config, "LLM_API_BASE", "http://proxy.local/v1")
+    monkeypatch.setattr(config, "LLM_API_KEY", "")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-dashscope")
+    monkeypatch.setenv("MIMO_API_KEY", "sk-mimo")
+    return config
+
+
+def test_choosing_qwen_uses_the_dashscope_key_and_address_with_thinking_off(deepseek_default):
+    config = deepseek_default
+
+    kwargs = config.get_llm_kwargs(0.0, "qwen3.8-flash")
+
+    assert kwargs == {"model": "qwen3.8-flash", "api_key": "sk-dashscope", "temperature": 0.0,
+                      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",   # LLM_API_BASE 只给 DeepSeek 用
+                      "extra_body": {"enable_thinking": False}}
+
+
+def test_choosing_mimo_uses_the_mimo_key_and_turns_thinking_off_like_deepseek(deepseek_default):
+    config = deepseek_default
+
+    kwargs = config.get_llm_kwargs(0.0, "mimo-v2.6-flash")
+
+    assert kwargs == {"model": "mimo-v2.6-flash", "api_key": "sk-mimo", "temperature": 0.0,
+                      "base_url": "https://api.xiaomimimo.com/v1",
+                      "extra_body": {"thinking": {"type": "disabled"}}}                 # v2.6 默认开着思考
+
+
+def test_naming_the_default_model_is_the_same_as_naming_none(deepseek_default):
+    config = deepseek_default
+
+    kwargs = config.get_llm_kwargs(0.0)
+
+    assert config.get_llm_kwargs(0.0, "deepseek-flash") == kwargs
+    assert kwargs == {"model": "deepseek-flash", "api_key": "sk-deepseek", "temperature": 0.0,
+                      "base_url": "http://proxy.local/v1", "extra_body": {"thinking": {"type": "disabled"}}}
+
+
+def test_unknown_models_and_missing_keys_are_refused(deepseek_default, monkeypatch):
+    config = deepseek_default
+
+    with pytest.raises(ValueError, match="不认识的模型：gpt-9"):
+        config.get_llm_kwargs(0.0, "gpt-9")
+    monkeypatch.delenv("DASHSCOPE_API_KEY")
+    monkeypatch.setattr(config, "LLM_API_KEY", "sk-generic")       # LLM_API_KEY 只给 LLM_PROVIDER 兜底
+    with pytest.raises(ValueError, match="dashscope 的 API Key"):
+        config.get_llm_kwargs(0.0, "qwen3.8-flash")
+
+
+def test_available_models_lists_the_default_first_and_only_those_with_a_key(deepseek_default, monkeypatch):
+    config = deepseek_default
+
+    assert [(item.name, item.label) for item in config.available_models()] == [
+        ("deepseek-flash", "DeepSeek Flash"), ("qwen3.8-flash", "千问 qwen3.8-flash"),
+        ("mimo-v2.6-flash", "小米 mimo-v2.6-flash")]
+
+    monkeypatch.delenv("DASHSCOPE_API_KEY")
+    monkeypatch.delenv("MIMO_API_KEY")
+    assert [item.name for item in config.available_models()] == ["deepseek-flash"]
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "dashscope")       # 默认换成千问：千问排第一，DeepSeek 照样能选
+    monkeypatch.setattr(config, "LLM_MODEL", "qwen3.8-flash")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-dashscope")
+    assert [item.name for item in config.available_models()] == ["qwen3.8-flash", "deepseek-flash"]
+    assert config.default_model() == "qwen3.8-flash"
 
 
 # ── 结果的对外字典 ────────────────────────────

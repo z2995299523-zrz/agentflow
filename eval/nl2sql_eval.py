@@ -6,9 +6,9 @@
 
 命令行：
     python -m eval.nl2sql_eval [--configs A,B,C] [--ids B01,K02] [--limit N] [--workers 4] [--today 2026-10-13]
-                               [--resume 目录] [--out eval/reports]
+                               [--resume 目录] [--out eval/reports] [--model qwen3.8-flash]
     python -m eval.nl2sql_eval --static 题目文件 --mart 资料目录 --out 输出目录
-真实库的静态评估必须写 --out，不给默认值，免得报告写进入库的目录。
+真实库的静态评估必须写 --out，不给默认值，免得报告写进入库的目录。--model 换模型，不写用默认模型。
 
 评估自己执行 SQL（标准 SQL 和生成的 SQL 都带行数上限和超时），所以取流水线时不让它执行。
 """
@@ -982,14 +982,14 @@ def _unique_path(directory: Path, stem: str, suffixes: Sequence[str] = (".md",))
         number += 1
 
 
-def _build_pipeline(mart_dir: Path | None) -> object:
-    """按资料目录装配评估用的流水线
+def _build_pipeline(mart_dir: Path | None, model: str | None = None) -> object:
+    """按资料目录装配评估用的流水线，model 是默认模型（None 时用 config.default_model）
 
     延迟导入 service：只有真的跑评估才加载模型相关的依赖。评估自己执行 SQL，流水线不执行。
     """
     from nl2sql import service
 
-    return service.build_pipeline(mart_dir, executor_kind="none")
+    return service.build_pipeline(mart_dir, executor_kind="none", model=model)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1003,11 +1003,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mart", default="", help="资料目录；模拟库评估默认用 data/mock_mart")
     parser.add_argument("--out", default="", help="输出目录；模拟库评估默认 eval/reports，真实库静态评估必须写")
     parser.add_argument("--static", default="", help="真实库静态评估：题目文件（YAML）")
+    parser.add_argument("--model", default="", help="用哪个模型（config.MODEL_CHOICES 里的模型名，如 qwen3.8-flash）；不写用默认模型")
     return parser
 
 
 def _check_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """检查并解析参数，有问题时调用 parser.error（打印用法和原因，以退出码 2 退出）"""
+    if args.model:
+        import config  # 延迟导入：不换模型时不用读模型配置
+
+        if args.model != config.default_model():
+            try:
+                config.model_choice(args.model)
+            except ValueError as error:
+                parser.error(str(error))
     if args.static:
         if not args.out:
             parser.error("真实库静态评估必须写 --out（输出目录）：不给默认值，免得报告写进入库的目录")
@@ -1063,7 +1072,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _main_static(args: argparse.Namespace, mart_dir: Path | None) -> int:
     questions = load_static_questions(Path(args.static))
-    pipeline = _build_pipeline(mart_dir)
+    pipeline = _build_pipeline(mart_dir, args.model or None)
     report = run_static_eval(pipeline, questions, Path(args.out))
     print(f"静态评估完成，共 {len(questions)} 题")
     print(f"报告：{report}")
@@ -1074,7 +1083,7 @@ def _main_static(args: argparse.Namespace, mart_dir: Path | None) -> int:
 def _main_mock(args: argparse.Namespace, mart_dir: Path) -> int:
     from data.mock_mart.build_mock import DEFAULT_DB_PATH, ensure_built
 
-    pipeline = _build_pipeline(mart_dir)
+    pipeline = _build_pipeline(mart_dir, args.model or None)
     ensure_built()
     executor = DuckDBExecutor(DEFAULT_DB_PATH)
     out_dir = Path(args.out) if args.out else REPORTS_DIR

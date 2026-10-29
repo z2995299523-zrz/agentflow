@@ -47,6 +47,7 @@ class QueryRequest(BaseModel):
     prev_sql: str = ""                        # 上一轮校验通过的 SQL；① 判断本轮是在上一轮上追问时，④ ⑤ 以它为底增量修改
     prev_tables: list[str] = Field(default_factory=list)      # 上一轮 SQL 用到的表；追问时直接放进候选
     today: date | None = None                 # None 时用系统日期
+    model: str | None = None                  # 本轮用的模型名（config.MODEL_CHOICES 之一）；None 时用流水线的默认模型
     use_lineage: bool = True                  # 对照开关：A 组 False/False，B 组 True/False，C 组 True/True
     use_examples: bool = True
 
@@ -349,6 +350,7 @@ class QueryResult(BaseModel):
     status: Status
     question: str
     metadata_version: str | None = None       # 本轮使用的元数据版本号；旧结果和内存元数据为 None
+    model: str | None = None                  # 本轮用的模型名；旧结果为 None
     requirement: str = ""                     # 调用方追问时把它作为下一轮的 prev_requirement
     parsed: ParsedRequest | None = None
     sql: str = ""                             # 排版后的 SQL；need_clarify、failed 时为空

@@ -1131,7 +1131,7 @@ def test_unusable_static_question_files_are_rejected(tmp_path, content, message)
 
 def test_static_mode_requires_out(tmp_path, capsys, monkeypatch):
     called = []
-    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir: called.append(mart_dir))
+    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir, model=None:called.append(mart_dir))
     path = tmp_path / "static.yaml"
     path.write_text("- {id: R01, turns: [一], today: 2026-10-13, gold_table_sets: [[a.b]]}\n", encoding="utf-8")
 
@@ -1145,7 +1145,7 @@ def test_static_mode_requires_out(tmp_path, capsys, monkeypatch):
 def test_static_mode_runs_and_writes_into_out(tmp_path, monkeypatch, capsys):
     pipeline = FakePipeline(lambda request: static_ok())
     seen = []
-    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir: seen.append(mart_dir) or pipeline)
+    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir, model=None:seen.append(mart_dir) or pipeline)
     path = tmp_path / "static.yaml"
     path.write_text("- {id: R01, turns: [一], today: 2026-10-13, gold_table_sets: [[ads.x1]]}\n", encoding="utf-8")
     out = tmp_path / "out"
@@ -1172,6 +1172,22 @@ def test_mock_mode_rejects_bad_arguments(capsys):
 def test_help_exits_cleanly(capsys):
     assert main(["--help"]) == 0
     assert "--static" in capsys.readouterr().out
+
+
+def test_model_option_picks_the_pipelines_model_and_rejects_unknown_ones(tmp_path, mock_db, mock_store, monkeypatch,
+                                                                         capsys):
+    pipeline = FakePipeline(lambda request: make_result())
+    pipeline.deps.store = mock_store
+    seen = []
+    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir, model=None: seen.append(model) or pipeline)
+
+    assert main(["--configs", "C", "--ids", "B01", "--out", str(tmp_path / "default")]) == 0
+    assert main(["--configs", "C", "--ids", "B01", "--model", "qwen3.8-flash", "--out", str(tmp_path / "qwen")]) == 0
+    assert seen == [None, "qwen3.8-flash"]                            # 不写 --model 用默认模型
+    capsys.readouterr()
+
+    assert main(["--configs", "C", "--model", "gpt-9"]) == 2           # 不认识的模型：不建流水线
+    assert "gpt-9" in capsys.readouterr().err and len(seen) == 2
 
 
 def test_unique_path_counts_up_until_no_listed_suffix_is_taken(tmp_path):
@@ -1280,7 +1296,7 @@ def test_main_runs_the_mock_evaluation_and_resumes(tmp_path, mock_db, mock_store
     questions = load_questions()
     pipeline = FakePipeline(perfect_responses(questions, mock_validator, False))
     pipeline.deps.store = mock_store
-    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir: pipeline)
+    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir, model=None:pipeline)
     out = tmp_path / "reports"
 
     code = main(["--configs", "A,C", "--ids", "B01,K02,A01", "--workers", "2", "--out", str(out)])
@@ -1308,7 +1324,7 @@ def test_main_limit_and_ids(tmp_path, mock_db, mock_store, mock_validator, monke
     questions = load_questions()
     pipeline = FakePipeline(perfect_responses(questions, mock_validator, False))
     pipeline.deps.store = mock_store
-    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir: pipeline)
+    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir, model=None:pipeline)
 
     main(["--configs", "C", "--limit", "3", "--out", str(tmp_path / "limit")])
     asked = sorted(request.question for request in pipeline.requests)
@@ -1320,7 +1336,7 @@ def test_main_limit_and_ids(tmp_path, mock_db, mock_store, mock_validator, monke
 
 
 def test_main_reports_a_missing_metadata_database_without_a_traceback(monkeypatch, capsys, tmp_path):
-    def missing(mart_dir):
+    def missing(mart_dir, model=None):
         raise FileNotFoundError("元数据库不存在，请先运行 python -m metadata.importer")
 
     monkeypatch.setattr(nl2sql_eval, "_build_pipeline", missing)
@@ -1369,7 +1385,7 @@ def test_main_survives_characters_the_console_cannot_encode(tmp_path, mock_db, m
                          message="关联（ads.x ↔ dim.y）的左表不在 tables 里")
     pipeline = FakePipeline(lambda request: failed)
     pipeline.deps.store = mock_store
-    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir: pipeline)
+    monkeypatch.setattr(nl2sql_eval, "_build_pipeline", lambda mart_dir, model=None:pipeline)
     monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="gbk"))   # 「↔」不在 GBK 里
 
     code = main(["--configs", "C", "--ids", "B01", "--out", str(tmp_path)])

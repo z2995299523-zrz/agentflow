@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 
 import { INTERNAL_STEP, STEP_LABELS, type QueryResult, type StepKey } from '../api/types'
 import type { PendingTurn } from '../state/chat'
+import { useModel } from '../state/model'
 import { describeStatus, formatMs } from '../utils/format'
 import ClarifyPanel from './ClarifyPanel'
 import ResultTabs from './ResultTabs'
@@ -13,8 +14,10 @@ import StepProgress from './StepProgress'
 
 const SLOW_STEP_MS = 15000            // 这么久没有新的一步就说明可能的原因
 
-function usageText(result: QueryResult): string {
+/** 回答头部的说明：用的模型（早先的轮次没记）、调用次数、用时、上溯和修正 */
+function usageText(result: QueryResult, modelLabel: string): string {
   const parts = [`模型调用 ${result.calls.length} 次`, `用时 ${formatMs(result.elapsed_ms)}`]
+  if (modelLabel) parts.unshift(modelLabel)
   if (result.scope_level) parts.push(`上溯 ${result.scope_level} 层`)
   if (result.repair_rounds) parts.push(`修正 ${result.repair_rounds} 次`)
   return parts.join(' · ')
@@ -70,11 +73,12 @@ interface AnswerProps {
 
 export function AnswerCard({ result, clarifyActive, clarifySkipped, busy, dialect, onPick }: AnswerProps) {
   const status = describeStatus(result)
+  const { labelOf } = useModel()
   return (
     <div className={`answer answer-${status.tone}`}>
       <div className="answer-head">
         <Tag color={status.color} className="status-tag">{status.text}</Tag>
-        <Typography.Text type="secondary" className="answer-meta">{usageText(result)}</Typography.Text>
+        <Typography.Text type="secondary" className="answer-meta">{usageText(result, labelOf(result.model))}</Typography.Text>
       </div>
       <StepProgress trace={result.trace} failedStep={result.failed_step} />
       {result.requirement && (

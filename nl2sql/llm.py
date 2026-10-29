@@ -1,6 +1,6 @@
 """
 模型调用
-- LLMClient：流水线只依赖这个接口。真实环境用 ChatModelClient（OpenAI 兼容接口，默认 DeepSeek），测试用 ScriptedLLM
+- LLMClient：流水线只依赖这个接口。真实环境用 ChatModelClient（OpenAI 兼容接口，默认 DeepSeek，可换千问），测试用 ScriptedLLM
 - structured_call：JSON 模式调用 → 解析 → Pydantic 校验 → 代码核对，不合格时把问题告诉模型再试一次，① ④ 用
 - text_call：只调一次，⑤ 生成 SQL 用
 
@@ -50,26 +50,28 @@ class LLMClient(Protocol):
 
 
 class ChatModelClient:
-    """OpenAI 兼容接口的模型（默认 DeepSeek），连接参数来自 config.get_llm_kwargs
+    """OpenAI 兼容接口的模型（默认 DeepSeek，也可以是千问等 config.MODEL_CHOICES 里的），连接参数来自 config.get_llm_kwargs
 
     json_mode 时要求接口按 JSON 对象输出（response_format=json_object）；token 数取回复的 usage_metadata。
     任何异常都包成 LLMError。
     """
 
-    def __init__(self, *, temperature: float = 0.0, timeout: float | None = None, max_retries: int = 2) -> None:
+    def __init__(self, *, temperature: float = 0.0, timeout: float | None = None, max_retries: int = 2,
+                 model: str | None = None) -> None:
         """
         Args:
             temperature: 温度，流水线一律用 0
             timeout: 单次调用的超时秒数，None 时用 config.LLM_TIMEOUT
             max_retries: 网络错误、限流时接口客户端自己重试的次数
+            model: 模型名，None 时用默认模型（config.default_model）
 
         Raises:
-            ValueError: 没有配置模型的 Key
+            ValueError: 模型不认识，或者没有配置模型的 Key
         """
         import config  # 延迟导入：测试和元数据页不需要模型配置
         from langchain_openai import ChatOpenAI
 
-        kwargs = config.get_llm_kwargs(temperature)
+        kwargs = config.get_llm_kwargs(temperature, model)
         self.name: str = kwargs["model"]
         self._model = ChatOpenAI(**kwargs, timeout=timeout if timeout is not None else config.LLM_TIMEOUT,
                                  max_retries=max_retries)

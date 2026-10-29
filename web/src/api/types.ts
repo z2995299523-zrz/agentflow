@@ -116,6 +116,7 @@ export interface CallRecord {
 export interface QueryResult {
   status: Status
   question: string
+  model?: string | null               // 这一轮用的模型；早先存下的轮次没有这一项
   requirement: string
   parsed: ParsedRequest | null
   sql: string
@@ -246,6 +247,18 @@ export interface LineageInfo {
 export interface ExampleInfo {
   example_id: string
   requirement: string
+}
+
+/** GET /nl2sql/models：能选的模型（只列配了 Key 的，默认模型排第一） */
+export interface ModelInfo {
+  name: string                        // 查数请求里的 model 填它
+  label: string
+  provider: string
+}
+
+export interface ModelList {
+  default: string
+  models: ModelInfo[]
 }
 
 export interface Health {

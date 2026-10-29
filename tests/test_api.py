@@ -187,6 +187,56 @@ def test_conversations_can_be_created_listed_renamed_and_deleted(api):
     assert [item["id"] for item in client.get("/conversations").json()] == [second["id"]]
 
 
+@pytest.fixture
+def three_models(monkeypatch):
+    """能选的模型固定成三个：默认 DeepSeek、千问、小米 MiMo，不看本机 .env 里配了哪些 Key"""
+    choices = [config.ModelChoice("deepseek-flash", "DeepSeek Flash", "deepseek"),
+               config.ModelChoice("qwen3.8-flash", "千问 qwen3.8-flash", "dashscope"),
+               config.ModelChoice("mimo-v2.6-flash", "小米 mimo-v2.6-flash", "mimo")]
+    monkeypatch.setattr(config, "available_models", lambda: choices)
+    monkeypatch.setattr(config, "default_model", lambda: "deepseek-flash")
+
+
+def test_models_lists_the_models_with_a_key_and_the_default(api, three_models):
+    client, _ = api
+
+    body = client.get("/nl2sql/models").json()
+
+    assert body["default"] == "deepseek-flash"
+    assert body["models"][1] == {"name": "qwen3.8-flash", "label": "千问 qwen3.8-flash", "provider": "dashscope"}
+    assert [item["name"] for item in body["models"]] == ["deepseek-flash", "qwen3.8-flash", "mimo-v2.6-flash"]
+
+
+def test_every_query_endpoint_hands_the_chosen_model_to_the_pipeline(api, three_models):
+    client, pipeline = api
+    conversation_id = client.post("/conversations").json()["id"]
+    pipeline.result = sample_result().model_copy(update={"model": "qwen3.8-flash"})
+
+    assert client.post("/nl2sql/query", json={"question": "查余额", "model": "qwen3.8-flash"}).status_code == 200
+    client.post("/nl2sql/stream", json={"question": "查余额", "model": "mimo-v2.6-flash"})
+    turn = sse_events(client.post(f"/conversations/{conversation_id}/turns",
+                                  json={"question": "查余额", "model": "qwen3.8-flash"}).text)[-1][1]["turn"]
+    client.post("/nl2sql/query", json={"question": "查余额", "model": " "})        # 空白当作没写：用默认模型
+
+    assert [request.model for request in pipeline.requests] == ["qwen3.8-flash", "mimo-v2.6-flash", "qwen3.8-flash",
+                                                                None]
+    assert turn["result"]["model"] == "qwen3.8-flash"                             # 会话历史记下了这一轮用的模型
+    saved = client.get(f"/conversations/{conversation_id}").json()["turns"][0]
+    assert saved["result"]["model"] == "qwen3.8-flash"
+
+
+def test_a_model_that_is_not_offered_is_a_400_and_never_runs(api, three_models):
+    client, pipeline = api
+    conversation_id = client.post("/conversations").json()["id"]
+
+    for path in ("/nl2sql/query", "/nl2sql/stream", f"/conversations/{conversation_id}/turns"):
+        response = client.post(path, json={"question": "查余额", "model": "gpt-9"})
+        assert response.status_code == 400 and "gpt-9" in response.json()["detail"]
+        assert "qwen3.8-flash" in response.json()["detail"]                       # 告诉用户能选哪些
+    assert pipeline.requests == []
+    assert client.get(f"/conversations/{conversation_id}").json()["turn_count"] == 0
+
+
 def test_turns_stream_the_steps_save_the_turn_and_carry_the_context(api):
     client, pipeline = api
     conversation_id = client.post("/conversations").json()["id"]
@@ -323,9 +373,10 @@ def test_openapi_schema_lists_every_endpoint(api):
 
     assert response.status_code == 200
     paths = response.json()["paths"]
-    assert set(paths) == {"/nl2sql/query", "/nl2sql/stream", "/conversations", "/conversations/{conversation_id}",
-                          "/conversations/{conversation_id}/turns", "/metadata/tables", "/metadata/columns",
-                          "/metadata/search", "/metadata/lineage", "/metadata/examples", "/health"}
+    assert set(paths) == {"/nl2sql/query", "/nl2sql/stream", "/nl2sql/models", "/conversations",
+                          "/conversations/{conversation_id}", "/conversations/{conversation_id}/turns",
+                          "/metadata/tables", "/metadata/columns", "/metadata/search", "/metadata/lineage",
+                          "/metadata/examples", "/health"}
     assert set(paths["/conversations/{conversation_id}"]) == {"get", "patch", "delete"}
     assert "text/event-stream" in paths["/nl2sql/stream"]["post"]["responses"]["200"]["content"]
 

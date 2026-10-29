@@ -3,6 +3,7 @@ AgentFlow 配置管理
 从 .env 文件读取，兼容 Hermes 已有的 DeepSeek / DashScope Key
 """
 import os
+from dataclasses import dataclass
 
 # ⚠️ 必须在所有其他 import 之前设置（huggingface_hub 读取此变量）
 # huggingface.co 国内被墙，用镜像加速 BGE 模型下载
@@ -19,12 +20,37 @@ load_dotenv("D:/hermes-agent-home/.env", override=False)  # Hermes Key（不覆�
 # ============================================
 # LLM 配置（日常开发用 DeepSeek，便宜）
 # ============================================
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")  # deepseek / openai / dashscope
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")  # deepseek / openai / dashscope / mimo
 
 LLM_API_BASE = os.getenv("LLM_API_BASE", "")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-flash")
+
+# 服务商：(Key 的环境变量, 默认地址, 默认模型)
+PROVIDERS: dict[str, tuple[str, str, str]] = {
+    "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com/v1", "deepseek-flash"),
+    "openai": ("OPENAI_API_KEY", "", "gpt-3.5-turbo"),
+    "dashscope": ("DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
+    "mimo": ("MIMO_API_KEY", "https://api.xiaomimimo.com/v1", "mimo-v2.6-flash"),     # 小米 MiMo
+}
+
+
+@dataclass(frozen=True)
+class ModelChoice:
+    """界面上可以选的一个模型"""
+
+    name: str                                 # 模型名，查数请求里带的就是它
+    label: str                                # 界面上显示的名字
+    provider: str                             # PROVIDERS 之一
+
+
+# 查数时可以按请求换的模型；不指定时用默认模型（LLM_PROVIDER、LLM_MODEL）。没配 Key 的不列，见 available_models
+MODEL_CHOICES: tuple[ModelChoice, ...] = (
+    ModelChoice("deepseek-flash", "DeepSeek Flash", "deepseek"),
+    ModelChoice("qwen3.8-flash", "千问 qwen3.8-flash", "dashscope"),
+    ModelChoice("mimo-v2.6-flash", "小米 mimo-v2.6-flash", "mimo"),
+)
 
 # ============================================
 # NL2SQL 专题库配置
@@ -45,41 +71,80 @@ FASTAPI_HOST = os.getenv("FASTAPI_HOST", "0.0.0.0")
 FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", "8000"))
 
 
-def get_llm_kwargs(temperature: float | None = None):
+def default_model() -> str:
+    """不指定模型时用的模型名：LLM_MODEL，没写时用服务商的默认模型"""
+    return LLM_MODEL or PROVIDERS.get(LLM_PROVIDER, ("", "", ""))[2]
+
+
+def model_choice(name: str) -> ModelChoice:
+    """按模型名取 MODEL_CHOICES 里的一项
+
+    Raises:
+        ValueError: 不认识的模型
+    """
+    for choice in MODEL_CHOICES:
+        if choice.name == name:
+            return choice
+    raise ValueError(f"不认识的模型：{name}，可选：{'、'.join(choice.name for choice in MODEL_CHOICES)}")
+
+
+def _api_key(provider: str) -> str:
+    """服务商的 Key；LLM_API_KEY 只给 LLM_PROVIDER 这个服务商兜底。服务商不认识时为空串"""
+    if provider not in PROVIDERS:
+        return ""
+    return os.getenv(PROVIDERS[provider][0], LLM_API_KEY if provider == LLM_PROVIDER else "")
+
+
+def _thinking_off(provider: str) -> dict | None:
+    """关掉思考模式的请求参数：DeepSeek、小米 MiMo 用 thinking，千问（DashScope）用 enable_thinking；OpenAI 不用"""
+    if provider in ("deepseek", "mimo"):
+        return {"thinking": {"type": "disabled"}}
+    if provider == "dashscope":
+        return {"enable_thinking": False}
+    return None
+
+
+def available_models() -> list[ModelChoice]:
+    """界面上能选的模型：默认模型排第一，其余按 MODEL_CHOICES 的顺序；没配 Key 的不列"""
+    default = default_model()
+    labels = {choice.name: choice.label for choice in MODEL_CHOICES}
+    first = ModelChoice(default, labels.get(default, default), LLM_PROVIDER)
+    rest = [choice for choice in MODEL_CHOICES if choice.name != default]
+    return [choice for choice in (first, *rest) if _api_key(choice.provider)]
+
+
+def get_llm_kwargs(temperature: float | None = None, model: str | None = None):
     """
     获取 LLM 初始化参数
-    日常开发默认用 DeepSeek（便宜），可通过 .env 切换 OpenAI。
-    DeepSeek 的思考模式默认打开：开着时温度不生效、思考内容按输出计费、回复也慢，这里显式关掉
+    日常开发默认用 DeepSeek（便宜），可通过 .env 切换 OpenAI；model 指定 MODEL_CHOICES 里的别的模型时，
+    按它的服务商取 Key 和地址。LLM_API_KEY、LLM_API_BASE 只给 LLM_PROVIDER 这个服务商用。
+    思考模式显式关掉：DeepSeek、小米 MiMo 默认打开，开着时温度不生效、思考内容按输出计费、回复也慢；千问（DashScope）同样关掉
 
     Args:
         temperature: 温度。None 时用 0.7；查询流水线传 0
-    """
-    provider = LLM_PROVIDER
-    extra_body = None
+        model: 模型名。None 或默认模型时用 LLM_PROVIDER、LLM_MODEL
 
-    if provider == "deepseek":
-        api_key = os.getenv("DEEPSEEK_API_KEY", LLM_API_KEY)
-        base_url = LLM_API_BASE or "https://api.deepseek.com/v1"
-        model = LLM_MODEL or "deepseek-flash"
-        extra_body = {"thinking": {"type": "disabled"}}
-    elif provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY", LLM_API_KEY)
-        base_url = LLM_API_BASE or ""
-        model = LLM_MODEL or "gpt-3.5-turbo"
-    elif provider == "dashscope":
-        api_key = os.getenv("DASHSCOPE_API_KEY", LLM_API_KEY)
-        base_url = LLM_API_BASE or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        model = LLM_MODEL or "qwen-plus"
+    Raises:
+        ValueError: 服务商不支持、模型不认识，或者没配 Key
+    """
+    if model is None or model == default_model():
+        provider, name = LLM_PROVIDER, default_model()
     else:
+        choice = model_choice(model)
+        provider, name = choice.provider, choice.name
+    if provider not in PROVIDERS:
         raise ValueError(f"不支持的 LLM Provider: {provider}")
 
+    api_key = _api_key(provider)
     if not api_key:
         raise ValueError(
             f"未找到 {provider} 的 API Key。请在项目 .env 或 Hermes .env 中配置"
         )
+    base_url = (LLM_API_BASE if provider == LLM_PROVIDER else "") or PROVIDERS[provider][1]
+    extra_body = _thinking_off(provider)
 
     kwargs = {
-        "model": model,
+        "model": name,
         "api_key": api_key,
         "temperature": 0.7 if temperature is None else temperature,
     }

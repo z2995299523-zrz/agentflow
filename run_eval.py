@@ -3,6 +3,7 @@ AgentFlow 评估入口：在模拟专题库上跑 A、B、C 三组对照评估�
 用法: python run_eval.py [参数同 python -m eval.nl2sql_eval]
   python run_eval.py                          # 三组全跑，43 题，4 个线程
   python run_eval.py --configs C --ids B01,K02  # 只跑 C 组的两道题
+  python run_eval.py --model qwen3.8-flash      # 换成千问跑（模型名见 config.MODEL_CHOICES），不写用默认模型
 报告写到 eval/reports/，逐题记录在 eval/reports/runs/（不入库）。
 真实库静态评估：python run_eval.py --static 题目文件 --mart 资料目录 --out 输出目录
 """

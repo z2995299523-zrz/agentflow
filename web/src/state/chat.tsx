@@ -1,13 +1,14 @@
 /**
  * 查数会话的状态：当前会话、正在跑的这一轮、会话列表
  * 放在路由外层：切到元数据页再切回来，正在跑的查询和进度都还在。
- * 追问、反问的上下文由服务端从会话里算，这里只发本轮的问题；服务端返回的 context 决定哪一轮的反问选项能点。
+ * 追问、反问的上下文由服务端从会话里算，这里只发本轮的问题和页头选的模型；服务端返回的 context 决定哪一轮的反问选项能点。
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
 
 import { api, errorText, streamTurn } from '../api/client'
 import type { ConversationDetail, ConversationSummary, TraceStep } from '../api/types'
+import { useModel } from './model'
 
 /** 正在跑（或者跑失败了）的一轮 */
 export interface PendingTurn {
@@ -40,6 +41,7 @@ const ChatContext = createContext<ChatState | null>(null)
 
 export function ChatProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
+  const { model } = useModel()
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
   const [loading, setLoading] = useState(false)
@@ -107,7 +109,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         refreshList()
       }
       const target = id
-      await streamTurn(target, text, {
+      await streamTurn(target, text, model, {
         onStep: (step) => {
           if (activeId.current !== target) return
           setPending((current) => (current ? { ...current, steps: [...current.steps, step] } : current))
@@ -135,7 +137,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setRunning(false)
       refreshList()
     }
-  }, [navigate, refreshList])
+  }, [navigate, refreshList, model])
 
   const dismissPending = useCallback(() => setPending(null), [])
 

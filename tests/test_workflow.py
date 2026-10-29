@@ -151,6 +151,7 @@ def test_normal_path_runs_the_seven_steps_in_order(make):
     assert result.assumptions == ["余额按人民币折算"]
     assert result.exec_result is None                                               # 执行层是 none，不执行
     assert result.metadata_version is None and result.public()["metadata_version"] is None
+    assert result.model == "scripted" and result.public()["model"] == "scripted"   # 没指定模型：用默认模型
     assert "messages" not in result.public()["calls"][0]                           # 给界面和接口的版本没有提示词
 
 
@@ -619,6 +620,60 @@ def test_groups_b_and_c_both_use_lineage_but_only_c_uses_examples(make, evidence
     assert evidence.use_lineage and evidence.lineage and evidence.upstream_options
     assert bool(evidence.examples) is use_examples
     assert pipeline.deps.structure_graph is None                # B、C 组用不到结构图，不建
+
+
+# ── 按请求换模型 ──────────────────────────────────
+
+@pytest.fixture
+def switchable(mock_store, mock_graph, mock_retriever, mock_validator):
+    """默认模型一条回复都没有（被调用就会出错）的流水线；llm_for 按模型名给出带三条合格回复的假模型，记下取过哪些"""
+    asked: list[str] = []
+
+    def llm_for(name: str) -> ScriptedLLM:
+        asked.append(name)
+        if name == "gpt-9":
+            raise ValueError("不认识的模型：gpt-9")
+        return ScriptedLLM([parsed_json(), plan_json(), sql_reply(GOOD_SQL)] * 2, name=name)
+
+    deps = PipelineDeps(store=mock_store, graph=mock_graph, retriever=mock_retriever, validator=mock_validator,
+                        llm=ScriptedLLM([], name="deepseek-flash"), llm_for=llm_for)
+    return Pipeline(deps), asked
+
+
+def test_a_request_can_switch_the_model_and_the_result_records_it(switchable):
+    pipeline, asked = switchable
+
+    first = pipeline.run(request(model="qwen3.8-flash"))
+    second = pipeline.run(request(model="qwen3.8-flash"))
+
+    assert first.status == "ok" and first.llm_calls == 3 and first.model == "qwen3.8-flash"
+    assert second.status == "ok" and second.model == "qwen3.8-flash"
+    assert asked == ["qwen3.8-flash"]                           # 同一个模型只取一次，图按模型名缓存
+    assert pipeline.deps.llm.remaining == 0 and pipeline.deps.llm.calls == []    # 默认模型没被调用
+
+
+def test_naming_the_default_model_does_not_ask_for_another_one(switchable):
+    pipeline, asked = switchable
+
+    result = pipeline.run(request(model="deepseek-flash"))
+
+    assert asked == [] and result.model == "deepseek-flash"
+    assert result.status == "failed" and "回复用完了" in result.message      # 走的是默认模型（它没有预制回复）
+
+
+def test_a_model_that_cannot_be_used_fails_before_parsing(switchable, mock_store, mock_graph, mock_retriever,
+                                                          mock_validator):
+    pipeline, _ = switchable
+
+    result = pipeline.run(request(model="gpt-9"))
+
+    assert result.status == "failed" and result.failed_step == "parse" and result.model == "gpt-9"
+    assert result.message == "模型用不了：不认识的模型：gpt-9" and result.trace == [] and result.calls == []
+
+    fixed = Pipeline(PipelineDeps(store=mock_store, graph=mock_graph, retriever=mock_retriever,
+                                  validator=mock_validator, llm=ScriptedLLM([])))     # 没配 llm_for：只能用默认模型
+    refused = fixed.run(request(model="qwen3.8-flash"))
+    assert refused.status == "failed" and "换不成 qwen3.8-flash" in refused.message
 
 
 # ── 没料到的错误、逐步进度 ─────────────────────────

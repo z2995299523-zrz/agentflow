@@ -16,7 +16,7 @@ python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel �
 python -m data.mock_mart.build_mock       # 重新生成模拟专题库（固态盘约 15 秒，机械盘约 1.5 分钟）
 python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
 
-python run_eval.py                        # 模拟库三组对照评估（调 DeepSeek，43 题约 3 分钟），流程见 /run-eval
+python run_eval.py                        # 模拟库三组对照评估（调 DeepSeek，43 题约 3 分钟；--model 换模型），流程见 /run-eval
 uvicorn main:app --port 8000              # 接口 → http://localhost:8000/docs，启动后在后台预热流水线
 cd web && npm install && npm run dev      # 界面开发 → http://localhost:5173，/api 转给 8000
 cd web && npm run build                   # 前端类型检查加构建；只查类型用 npm run typecheck
@@ -25,10 +25,10 @@ start.bat                                 # Windows 同时起接口和界面（h
 
 ## 环境
 
-- 配置从两个 `.env` 加载：项目 `.env` 优先，`D:/hermes-agent-home/.env` 兜底（见 `config.py`）。`DEEPSEEK_API_KEY`、`MART_DIR`、`SQL_DIALECT`、`EXECUTOR`、`LLM_TIMEOUT` 的说明在 `.env.example`
+- 配置从两个 `.env` 加载：项目 `.env` 优先，`D:/hermes-agent-home/.env` 兜底（见 `config.py`）。`DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`MIMO_API_KEY`、`MART_DIR`、`SQL_DIALECT`、`EXECUTOR`、`LLM_TIMEOUT` 的说明在 `.env.example`
 - `HF_ENDPOINT=https://hf-mirror.com` 在 `config.py` 顶部设置，要在其他 import 之前，否则 BGE 模型下载失败
 - 依赖版本：fastapi ≥ 0.124 加 starlette ≥ 0.49.1；langgraph 限定 1.x；sqlglot 限定 25.x
-- 技术栈：DeepSeek Flash（产品里调用的模型 `deepseek-flash`，思考模式在 `config.get_llm_kwargs` 里关掉）、LangGraph（不带检查点）、sqlglot（方言转换、作用域解析、静态校验）、BGE `bge-small-zh-v1.5`（向量存进元数据库，numpy 全量检索）、DuckDB（模拟库执行）、FastAPI、React + Ant Design。元数据库和会话历史都是 SQLite，放在 `data/<资料>/build/`，不入库。Docker Compose 两个容器：api（构建时导入模拟库元数据）、web（多阶段构建，nginx 托管）
+- 技术栈：DeepSeek Flash（默认模型 `deepseek-flash`；配了 Key 还能在界面右上角换千问 `qwen3.8-flash`、小米 `mimo-v2.6-flash`，可选模型在 `config.MODEL_CHOICES`；思考模式都在 `config.get_llm_kwargs` 里关掉）、LangGraph（不带检查点）、sqlglot（方言转换、作用域解析、静态校验）、BGE `bge-small-zh-v1.5`（向量存进元数据库，numpy 全量检索）、DuckDB（模拟库执行）、FastAPI、React + Ant Design。元数据库和会话历史都是 SQLite，放在 `data/<资料>/build/`，不入库。Docker Compose 两个容器：api（构建时导入模拟库元数据）、web（多阶段构建，nginx 托管）
 
 ## 架构
 
@@ -65,7 +65,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 - `schemas.py`：各步骤的输入输出，是模块之间的契约；`llm.py`：模型调用（`ChatModelClient`、测试用的 `ScriptedLLM`、带重试的 `structured_call`）
 - `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（加工链路里重复的跳和条件只写一次，第 5 张以后召回的表只列关键字段，上溯、样例带入的表照旧全列；超过 4 万字按九级收缩；④ 按层级从上往下选表：专题层、汇总层、标准层、贴源层）
 - `retriever.py` 候选召回（关键字加向量，三层范围；表清单「标准表」填「否」的表单独排名，最多补 3 张，不占标准表的名额）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
-- `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
+- `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；请求带 `model` 时由 `PipelineDeps.llm_for`（`service.model_client`）取那个模型，另编一张图按模型名缓存，结果记下 `model`；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
 - `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB
 - 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`，上一轮校验通过时还有 `prev_sql`、`prev_tables`，规则见 `QueryResult.next_context`）。① 判断本轮是在上一轮上追问（`follows_up`）时，② 把上一轮的表放进候选，④ ⑤ 以上一轮的 SQL 为底增量修改，不多调模型。以它为底之前先用当前元数据校验，元数据换过版本、表或字段没了就不以它为底，按完整需求重新生成，原因写进结果的假设；每一轮结果记下元数据版本号（`metadata_version`）
 - 对照实验开关 `use_lineage`、`use_examples`：A 组 False/False（全部层级召回、只给表结构推得出的关联、不上溯），B 组 True/False，C 组 True/True
@@ -74,12 +74,12 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 
 前后端分开：浏览器只访问界面，`/api` 开头的请求由 Vite 开发服务器（开发、start 脚本）或 nginx（Docker）去掉前缀转给接口。
 
-- `main.py`（FastAPI）：查数 `POST /nl2sql/query`、`/nl2sql/stream`（SSE）；会话 `/conversations`、`/conversations/{id}`、`/conversations/{id}/turns`（SSE）；元数据 `tables`、`columns`、`search`、`lineage`、`examples`；`GET /health`
+- `main.py`（FastAPI）：查数 `POST /nl2sql/query`、`/nl2sql/stream`（SSE），请求带 `model` 换模型，`GET /nl2sql/models` 列出配了 Key 的模型；会话 `/conversations`、`/conversations/{id}`、`/conversations/{id}/turns`（SSE）；元数据 `tables`、`columns`、`search`、`lineage`、`examples`；`GET /health`
   - SSE：流水线在后台线程跑，事件循环等队列，15 秒没有新事件发一行注释保活；浏览器断开时后台照样跑完、照样存历史
   - 元数据库文件变了（导入、promote、rollback）：`service.get_metadata` 在后台读好再换，期间照常返回旧版本，读失败继续用旧的、同一个文件不重试；`/health` 报 `metadata_reloading`、`reload_error`。服务器切资料是改 `MART_DIR` 再重启，不走这条
   - 启动时在后台线程预热（`service.warm_up`：装配流水线、加载 BGE）
 - `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问；那一轮校验通过时还有它的 SQL 和用到的表
-- `web/`：查数页（七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
+- `web/`：查数页（右上角选模型、七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
 - `eval/`：43 题题库（11 题登记了其它正确答案；「反问之后」3 题测上一轮停在反问上的下一轮，第一轮没反问按答错计）、结果比对、三组对照评估与错题归因、真实库静态评估；报告在 `eval/reports/`
 
 ## 约定

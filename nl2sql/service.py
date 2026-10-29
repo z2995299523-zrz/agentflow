@@ -1,6 +1,6 @@
 """
 按资料目录装配查询流水线，界面、接口、评估共用
-- build_pipeline：读元数据库，建血缘图、召回、校验器、模型和执行层
+- build_pipeline：读元数据库，建血缘图、召回、校验器、模型和执行层；请求里指定别的模型时由 model_client 按模型名取
 - get_metadata、get_pipeline：进程内缓存。元数据页和元数据接口只用 get_metadata，没配模型 Key 也能用；
   同路径的元数据库文件变了就在后台读好再换，期间继续用旧缓存，并在后台预装配流水线，不用重启；
   首次读取、文件不存在或资料路径变了时同步读。读库、建图和装配都不占缓存锁
@@ -43,6 +43,7 @@ _ASSEMBLE_LOCK = threading.Lock()            # 装配流水线时持有：第一
 _metadata: tuple[MetadataStore, LineageGraph] | None = None
 _metadata_key: tuple[str, int, int] | None = None  # 文件路径、修改时间纳秒、大小
 _pipeline: Pipeline | None = None
+_clients: dict[str, LLMClient] = {}          # 按模型名缓存的模型客户端，各条流水线共用
 _history: ConversationStore | None = None
 _reload_thread: threading.Thread | None = None
 _reload_generation: int | None = None
@@ -101,37 +102,53 @@ def _make_executor(kind: str) -> Executor:
     return get_executor(kind, None, config.SQL_DIALECT)
 
 
+def model_client(model: str) -> LLMClient:
+    """按模型名取模型客户端，进程内缓存，各条流水线共用；流水线的 llm_for 就是它
+
+    Raises:
+        ValueError: 模型不认识，或者没配它的 Key
+    """
+    with _LOCK:
+        client = _clients.get(model)
+    if client is None:
+        client = ChatModelClient(timeout=config.LLM_TIMEOUT, model=model)
+        with _LOCK:
+            client = _clients.setdefault(model, client)
+    return client
+
+
 def _assemble(store: MetadataStore, graph: LineageGraph, mart_dir: Path, llm: LLMClient | None,
-              executor_kind: str | None) -> Pipeline:
+              executor_kind: str | None, model: str | None = None) -> Pipeline:
     """用已经读好的元数据装配流水线。容易失败的先做（没配 Key、执行层名字不对），建召回索引放在最后"""
     if llm is None:
-        llm = ChatModelClient(timeout=config.LLM_TIMEOUT)
+        llm = ChatModelClient(timeout=config.LLM_TIMEOUT, model=model)
     executor = _make_executor(executor_kind or config.EXECUTOR)
     retriever = Retriever(store, graph, embedder_for(store))
     validator = SqlValidator(store, dialect=config.SQL_DIALECT)
     return Pipeline(PipelineDeps(store=store, graph=graph, retriever=retriever, validator=validator, llm=llm,
-                                 executor=executor, mart_dir=mart_dir))
+                                 executor=executor, mart_dir=mart_dir, llm_for=model_client))
 
 
 def build_pipeline(mart_dir: Path | None = None, *, llm: LLMClient | None = None,
-                   executor_kind: str | None = None) -> Pipeline:
+                   executor_kind: str | None = None, model: str | None = None) -> Pipeline:
     """装配一条查询流水线
 
     Args:
         mart_dir: 资料目录，默认 config.MART_DIR
-        llm: 模型，默认 ChatModelClient(timeout=config.LLM_TIMEOUT)
+        llm: 默认模型，默认 ChatModelClient(timeout=config.LLM_TIMEOUT, model=model)
         executor_kind: 执行层，默认 config.EXECUTOR；duckdb 用模拟库
+        model: 没给 llm 时默认模型用哪个（config.MODEL_CHOICES 之一），None 时用 config.default_model；评估的 --model 用它
 
     Returns:
         流水线
 
     Raises:
         FileNotFoundError: 元数据库不存在，信息里带导入命令
-        ValueError: 没有配置模型的 Key，或者执行层的名字不支持
+        ValueError: 模型不认识、没有配置模型的 Key，或者执行层的名字不支持
     """
     mart_dir = Path(mart_dir) if mart_dir is not None else Path(config.MART_DIR)
     store, graph = _load_metadata(mart_dir)
-    return _assemble(store, graph, mart_dir, llm, executor_kind)
+    return _assemble(store, graph, mart_dir, llm, executor_kind, model)
 
 
 def _db_key(mart_dir: Path) -> tuple[str, int, int] | None:
@@ -307,13 +324,14 @@ def get_history() -> ConversationStore:
 
 
 def reset_pipeline() -> None:
-    """清掉元数据、流水线、会话历史缓存和换版本错误，并使正在读取的旧结果失效"""
+    """清掉元数据、流水线、模型客户端、会话历史缓存和换版本错误，并使正在读取的旧结果失效"""
     global _metadata, _metadata_key, _pipeline, _history
     global _failed_key, _reload_error, _generation
     with _LOCK:
         _metadata = None
         _metadata_key = None
         _pipeline = None
+        _clients.clear()
         _history = None
         _failed_key, _reload_error = None, ""
         _generation += 1

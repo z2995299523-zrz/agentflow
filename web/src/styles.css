@@ -32,6 +32,7 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
 .status-bar { display: flex; align-items: center; gap: 6px; flex: none; min-width: 0; }
 .status-bar .ant-tag { margin-inline-end: 0; }
 .status-mart { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.model-picker { flex: none; width: 190px; }
 .app-body { flex: 1; min-height: 0; overflow: hidden; }
 .page-loading { height: 100%; display: flex; align-items: center; justify-content: center; }
 .service-alert { margin-bottom: 12px; }
@@ -240,5 +241,6 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
   .meta-side { width: auto; border-right: none; border-bottom: 1px solid var(--c-border); max-height: 50vh; }
   .brand-name { display: none; }
   .status-mart { max-width: 160px; }
+  .model-picker { width: 150px; }
   .chat-inner, .composer { padding-left: 16px; padding-right: 16px; }
 }

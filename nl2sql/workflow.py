@@ -8,6 +8,8 @@
 - ④ 结论是 ok 时先由 prune_plan 去掉用不到的表，再去 ⑤
 
 流水线本身无状态，不带检查点：追问、反问的上下文由调用方放进 QueryRequest。
+请求里指定了别的模型（QueryRequest.model）时，由 PipelineDeps.llm_for 按模型名取来，另编一张图按模型名缓存；
+结果里记下本轮用的模型名。
 上一轮停在反问上时，① 判断本轮是不是在回答它（ParsedRequest.answers_clarify）：是回答就 ① ④ 都不能再反问，
 免得来回反问；没理会反问、问了新问题时，新问题照常能反问。
 ① 判断本轮是在上一轮的需求上追问（ParsedRequest.follows_up）、请求里又有上一轮的 SQL 时，先在当前元数据上校验：
@@ -87,10 +89,11 @@ class PipelineDeps:
     graph: LineageGraph
     retriever: Retriever
     validator: SqlValidator
-    llm: LLMClient
+    llm: LLMClient                                    # 默认模型：请求里没指定模型时用
     executor: Executor = field(default_factory=NullExecutor)
     structure_graph: LineageGraph | None = None       # A 组求关联路径用；None 时第一次跑 A 组再建，建好留着
     mart_dir: Path | None = None
+    llm_for: Callable[[str], LLMClient] | None = None  # 按模型名取别的模型；None 时只能用 llm
 
 
 class PipelineState(TypedDict, total=False):
@@ -235,14 +238,15 @@ def _guarded(step: str, run: Callable[[PipelineState], tuple[dict[str, Any], str
 class _Steps:
     """七个节点的实现。除 output 外，每个方法返回（状态更新，一句话摘要），由 _guarded 包装成节点"""
 
-    def __init__(self, deps: PipelineDeps) -> None:
+    def __init__(self, deps: PipelineDeps, llm: LLMClient | None = None) -> None:
         self._deps = deps
+        self._llm = llm if llm is not None else deps.llm      # ① ④ ⑤ 用的模型，默认 deps.llm
 
     # ① 需求解析
     def parse(self, state: PipelineState) -> tuple[dict[str, Any], str]:
         """调模型解析需求；不是查数需求时流程结束，把模型给用户的回复作为原因；缺了没法默认的要素时反问。
         上一轮停在反问上时，摘要开头写明本轮是在回答它，还是按新问题处理"""
-        parsed, calls = parse_request(self._deps.llm, state["request"], state["today"])
+        parsed, calls = parse_request(self._llm, state["request"], state["today"])
         updates: dict[str, Any] = {"parsed": parsed, "calls": calls}
         if not parsed.is_query:
             updates.update(status=STATUS_FAILED, failed_step="parse", message=parsed.reply)
@@ -309,7 +313,7 @@ class _Steps:
         能反问（本轮不是在回答上一轮的反问）而需求只说「日均」时改成反问；结论是 ok 时先去掉用不到的表"""
         request = state["request"]
         allow_clarify = not state["parsed"].answers_clarify
-        plan, calls = plan_query(self._deps.llm, state["parsed"], state["evidence"], allow_clarify=allow_clarify,
+        plan, calls = plan_query(self._llm, state["parsed"], state["evidence"], allow_clarify=allow_clarify,
                                  allow_upstream=request.use_lineage, base_sql=_base_sql(state))
         if allow_clarify:
             plan = clarify_daily_average(state["parsed"], state["evidence"], plan)
@@ -339,7 +343,7 @@ class _Steps:
         rounds = state.get("repair_rounds", 0)
         previous = state.get("sql", "") if rounds else ""
         errors = state["validation"].errors if rounds and "validation" in state else []
-        sql, record = generate_sql(self._deps.llm, state["parsed"], state["plan"], state["evidence"],
+        sql, record = generate_sql(self._llm, state["parsed"], state["plan"], state["evidence"],
                                    previous_sql=previous, errors=errors, base_sql=_base_sql(state))
         if rounds == 0:
             summary = "第 1 次生成"
@@ -391,7 +395,8 @@ class _Steps:
         step = TraceStep(step="output", label=STEP_LABELS["output"],
                          elapsed_ms=int((time.perf_counter() - started) * 1000), summary=summary)
         result = _build_result(state, sql=sql, exec_result=exec_result, trace=[*state.get("trace", []), step],
-                               overrides=overrides, metadata_version=self._deps.store.version_id)
+                               overrides=overrides, metadata_version=self._deps.store.version_id,
+                               model=self._llm.name)
         return {"result": result, "trace": [step]}
 
     def _finalize(self, state: PipelineState) -> tuple[str, ExecSummary | None, str]:
@@ -433,7 +438,8 @@ class _Steps:
 
 
 def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | None, trace: list[TraceStep],
-                  overrides: dict[str, Any] | None = None, metadata_version: str | None = None) -> QueryResult:
+                  overrides: dict[str, Any] | None = None, metadata_version: str | None = None,
+                  model: str | None = None) -> QueryResult:
     """由流水线的最终状态组装 QueryResult
 
     Args:
@@ -443,6 +449,7 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
         trace: 全部轨迹，含 output 这一步
         overrides: 覆盖状态里的 status、failed_step、message（output 自己出错时用）
         metadata_version: 本轮使用的元数据版本号；内存构造的元数据为 None
+        model: 本轮用的模型名
     """
     values = {"status": state.get("status"), "failed_step": state.get("failed_step", ""),
               "message": state.get("message", ""), **(overrides or {})}
@@ -467,7 +474,7 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
         assumptions.append("元数据已更新，上一轮的 SQL 在当前版本上校验不过"
                            f"（{'；'.join(state['base_sql_rejected'])}），这一轮没有以它为底，按完整需求重新生成")
     return QueryResult(
-        status=values["status"], question=request.question, metadata_version=metadata_version,
+        status=values["status"], question=request.question, metadata_version=metadata_version, model=model,
         requirement=parsed.requirement.strip() if parsed is not None and parsed.is_query else "",
         parsed=parsed, sql=sql, plan=plan, clarify=clarify,
         message=values["message"] if values["status"] == STATUS_FAILED else "",
@@ -507,7 +514,7 @@ def _after_validate(state: PipelineState) -> str:
     return _node_name("output") if state.get("status") else _node_name("generate")
 
 
-def build_workflow(deps: PipelineDeps) -> Any:
+def build_workflow(deps: PipelineDeps, llm: LLMClient | None = None) -> Any:
     """建 LangGraph 图并编译，不带检查点
 
     START → parse → recall → evidence → plan → generate → validate → output → END。
@@ -516,11 +523,12 @@ def build_workflow(deps: PipelineDeps) -> Any:
 
     Args:
         deps: 流水线的依赖
+        llm: 这张图用的模型，None 时用 deps.llm
 
     Returns:
         编译好的图
     """
-    steps = _Steps(deps)
+    steps = _Steps(deps, llm)
     graph = StateGraph(PipelineState)
     runs = {"parse": steps.parse, "recall": steps.recall, "evidence": steps.evidence, "plan": steps.plan,
             "generate": steps.generate, "validate": steps.validate}
@@ -543,12 +551,12 @@ def build_workflow(deps: PipelineDeps) -> Any:
 # ── 对外的流水线 ──────────────────────────────────
 
 def _failure(request: QueryRequest, error: BaseException | str, trace: list[TraceStep], calls: list[CallRecord],
-             started: float, metadata_version: str | None = None) -> QueryResult:
-    """图本身出了错（节点里的错误已经在节点里接住了）时给出的 failed 结果，带上已经走过的轨迹、调用记录和元数据版本号"""
+             started: float, metadata_version: str | None = None, model: str | None = None) -> QueryResult:
+    """图本身出了错（节点里的错误已经在节点里接住了）时给出的 failed 结果，带上已经走过的轨迹、调用记录、元数据版本号和模型名"""
     message = _internal_message(error) if isinstance(error, BaseException) else f"内部错误：{error}"
     return QueryResult(status=STATUS_FAILED, question=request.question, message=message, failed_step=INTERNAL_STEP,
                        trace=trace, calls=calls, elapsed_ms=int((time.perf_counter() - started) * 1000),
-                       metadata_version=metadata_version)
+                       metadata_version=metadata_version, model=model)
 
 
 class Pipeline:
@@ -561,11 +569,30 @@ class Pipeline:
         """
         self._deps = deps
         self._app = build_workflow(deps)
+        self._apps: dict[str, Any] = {}               # 别的模型的图，按模型名缓存
+        self._apps_lock = threading.Lock()
 
     @property
     def deps(self) -> PipelineDeps:
         """流水线的依赖"""
         return self._deps
+
+    def _app_for(self, model: str | None) -> tuple[Any, str]:
+        """本轮用的图和模型名：没指定模型或者就是默认模型时用默认的图；别的模型第一次用到时由 deps.llm_for 取来编一张图
+
+        Raises:
+            ValueError: 流水线没配 llm_for，只能用默认模型；llm_for 取不到模型（不认识、没配 Key）时抛它自己的错
+        """
+        default = self._deps.llm.name
+        if not model or model == default:
+            return self._app, default
+        with self._apps_lock:
+            app = self._apps.get(model)
+            if app is None:
+                if self._deps.llm_for is None:
+                    raise ValueError(f"这条流水线只配了模型 {default}，换不成 {model}")
+                app = self._apps[model] = build_workflow(self._deps, self._deps.llm_for(model))
+        return app, model
 
     def run(self, request: QueryRequest) -> QueryResult:
         """跑一轮查询，不抛异常：任何错误都包成 status=failed 的结果"""
@@ -576,9 +603,17 @@ class Pipeline:
         """跑一轮查询，每走完一步给出一个 TraceStep，最后一个是 QueryResult；不抛异常
 
         Args:
-            request: 本轮请求；追问、反问的上下文由调用方放在里面
+            request: 本轮请求；追问、反问的上下文由调用方放在里面；model 指定本轮用的模型
         """
         started = time.perf_counter()
+        try:
+            app, model = self._app_for(request.model)
+        except Exception as error:  # noqa: BLE001 run、stream 不向外抛异常；模型用不了，① 就做不了
+            yield QueryResult(status=STATUS_FAILED, question=request.question, model=request.model,
+                              message=f"模型用不了：{error}", failed_step="parse",
+                              elapsed_ms=int((time.perf_counter() - started) * 1000),
+                              metadata_version=self._deps.store.version_id)
+            return
         state: PipelineState = {
             "request": request, "today": request.today or date.today(), "scope_level": 0, "base_tables": [],
             "extra_terms": [], "missing_terms": [], "repair_rounds": 0, "trace": [], "calls": [], "started": started,
@@ -588,7 +623,7 @@ class Pipeline:
         result: QueryResult | None = None
         failure: BaseException | str = "流程结束时没有产生结果"
         try:
-            for chunk in self._app.stream(state, {"recursion_limit": RECURSION_LIMIT}, stream_mode="updates"):
+            for chunk in app.stream(state, {"recursion_limit": RECURSION_LIMIT}, stream_mode="updates"):
                 for update in chunk.values():
                     if not isinstance(update, dict):
                         continue
@@ -602,5 +637,5 @@ class Pipeline:
             logger.exception("流水线运行出错")
             result, failure = None, error
         if result is None:
-            result = _failure(request, failure, trace, calls, started, self.deps.store.version_id)
+            result = _failure(request, failure, trace, calls, started, self.deps.store.version_id, model)
         yield result

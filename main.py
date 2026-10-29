@@ -1,8 +1,9 @@
 """
 专题库 NL2SQL 接口（FastAPI），前端（web/）通过它查数、看元数据
-查数：
+查数（请求里可以带 model 换模型，不带用默认模型；结果里的 model 是本轮用的模型）：
 - POST /nl2sql/query        自然语言查数，一次返回。流水线无状态：追问、反问的上下文由调用方放在请求里
 - POST /nl2sql/stream       同上，按 SSE 逐步返回：每走完一步一条 step 事件，最后一条 result
+- GET  /nl2sql/models       能选的模型（只列配了 Key 的）和默认模型
 会话（历史存在 资料目录/build/history.db；追问、反问的上下文由服务端从存下的轮次里算出来）：
 - GET  /conversations                 最近的会话；POST 新建会话
 - GET  /conversations/{id}            会话的全部轮次和当前上下文；PATCH 改标题；DELETE 删除
@@ -185,9 +186,11 @@ def _streaming(produce: Callable[[], Iterator[TraceStep | QueryResult]],
 # ── 查数 ──────────────────────────────────────────
 
 class QuestionBody(BaseModel):
-    """本轮输入"""
+    """本轮输入和用哪个模型"""
 
     question: str = Field(description="本轮输入", min_length=1, max_length=2000)
+    model: str | None = Field(None, description="本轮用的模型（GET /nl2sql/models 里的 name）；不写用默认模型",
+                              max_length=100)
 
     @field_validator("question")
     @classmethod
@@ -197,6 +200,14 @@ class QuestionBody(BaseModel):
         if not value:
             raise ValueError("question 不能是空白")
         return value
+
+    @field_validator("model")
+    @classmethod
+    def model_or_none(cls, value: str | None) -> str | None:
+        """模型名去掉首尾空白，空的当作没写"""
+        if value is None:
+            return None
+        return value.strip() or None
 
 
 class QueryBody(QuestionBody):
@@ -214,7 +225,40 @@ class QueryBody(QuestionBody):
     def to_request(self) -> QueryRequest:
         """转成流水线的请求；今天按系统日期，请求体里不收"""
         return QueryRequest(question=self.question, prev_requirement=self.prev_requirement,
-                            prev_clarify=self.prev_clarify, prev_sql=self.prev_sql, prev_tables=self.prev_tables)
+                            prev_clarify=self.prev_clarify, prev_sql=self.prev_sql, prev_tables=self.prev_tables,
+                            model=self.model)
+
+
+class ModelInfo(BaseModel):
+    """能选的一个模型"""
+
+    name: str = Field(description="模型名，查数请求里的 model 填它")
+    label: str = Field(description="界面上显示的名字")
+    provider: str = Field(description="服务商：deepseek、dashscope 等")
+
+
+class ModelList(BaseModel):
+    """能选的模型"""
+
+    default: str = Field(description="请求里不写 model 时用的模型")
+    models: list[ModelInfo] = Field(description="配了 Key 的模型，默认模型排第一")
+
+
+def _check_model(model: str | None) -> None:
+    """请求里指定的模型不在能选的模型里（不认识或者没配 Key）时回 400"""
+    if model is None:
+        return
+    names = [choice.name for choice in config.available_models()]
+    if model not in names:
+        raise HTTPException(400, f"模型「{model}」用不了（不认识或者没配 Key），可选：{'、'.join(names) or '无'}")
+
+
+@app.get("/nl2sql/models", response_model=ModelList, summary="能选的模型")
+def list_models() -> ModelList:
+    """能选的模型：只列配了 Key 的，默认模型排第一；界面右上角的模型下拉框用它"""
+    return ModelList(default=config.default_model(),
+                     models=[ModelInfo(name=choice.name, label=choice.label, provider=choice.provider)
+                             for choice in config.available_models()])
 
 
 @app.post("/nl2sql/query", summary="自然语言查数")
@@ -222,8 +266,9 @@ def query(body: QueryBody, pipeline: Pipeline = Depends(get_pipeline_dep)) -> di
     """跑一轮查询，返回 QueryResult（不含提示词和模型原始回复）
 
     status 是 ok、unvalidated（SQL 有校验错误，需人工检查）、need_clarify（要回答 clarify 里的问题）或 failed。
-    今天按系统日期，请求体里不收。
+    今天按系统日期，请求体里不收。model 不在能选的模型里时回 400。
     """
+    _check_model(body.model)
     return pipeline.run(body.to_request()).public()
 
 
@@ -232,8 +277,9 @@ def query_stream(body: QueryBody, pipeline: Pipeline = Depends(get_pipeline_dep)
     """和 /nl2sql/query 一样跑一轮查询，按 SSE 逐步返回
 
     事件：每走完一步一条 step（data 是 TraceStep），最后一条 result（data 同 /nl2sql/query 的返回）；
-    出了没预料到的错时最后一条是 error（data 是 {"detail": 原因}）。
+    出了没预料到的错时最后一条是 error（data 是 {"detail": 原因}）。model 不在能选的模型里时回 400。
     """
+    _check_model(body.model)
     request = body.to_request()
     return _streaming(lambda: pipeline.stream(request), lambda result: ("result", result.public()))
 
@@ -316,13 +362,16 @@ def ask_in_conversation(conversation_id: str, body: QuestionBody, pipeline: Pipe
     事件：每走完一步一条 step（data 是 TraceStep），最后一条 turn，data 是
     {"turn": 存下的这一轮（id、question、created_at、result）, "context": 下一轮的上下文}；
     出了没预料到的错时最后一条是 error（data 是 {"detail": 原因}）。
+    model 换模型，存下的这一轮的 result.model 是本轮用的模型；不在能选的模型里时回 400。
     """
+    _check_model(body.model)
     try:
         context = history.context(conversation_id)
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
     request = QueryRequest(question=body.question, prev_requirement=context.prev_requirement,
-                           prev_clarify=context.prev_clarify, prev_sql=context.prev_sql, prev_tables=context.prev_tables)
+                           prev_clarify=context.prev_clarify, prev_sql=context.prev_sql, prev_tables=context.prev_tables,
+                           model=body.model)
 
     def finish(result: QueryResult) -> tuple[str, Any]:
         turn = history.add_turn(conversation_id, body.question, result)

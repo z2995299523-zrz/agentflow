@@ -1,5 +1,5 @@
-/** 页头右侧：当前连的资料目录、执行层、模型；元数据没导入、模型没配置时标红；ServiceAlert 是页面里的提示条 */
-import { ApiOutlined, DatabaseOutlined, PlayCircleOutlined, RobotOutlined } from '@ant-design/icons'
+/** 页头右侧：当前连的资料目录、执行层（模型在旁边的下拉框里选）；元数据没导入、模型没配置时标红；ServiceAlert 是页面里的提示条 */
+import { ApiOutlined, DatabaseOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import { Alert, Spin, Tag, Tooltip } from 'antd'
 
 import { useHealth } from '../state/health'
@@ -19,7 +19,6 @@ export default function StatusBar() {
         <Tag color="blue" icon={<DatabaseOutlined />} className="status-mart">资料目录：{health.mart_dir}</Tag>
       </Tooltip>
       <Tag icon={<PlayCircleOutlined />} className="status-extra">{EXECUTOR_LABELS[health.executor] ?? `执行：${health.executor}`}</Tag>
-      <Tag icon={<RobotOutlined />} className="status-extra">{health.model}</Tag>
       {health.status !== 'ok' && (
         <Tooltip title={health.hint}><Tag color="error">{health.status === 'no_metadata' ? '元数据没导入' : '元数据出错'}</Tag></Tooltip>
       )}

@@ -9,6 +9,7 @@ import type {
   ExampleInfo,
   Health,
   LineageInfo,
+  ModelList,
   SearchResult,
   TableInfo,
   TraceStep,
@@ -120,11 +121,12 @@ export interface TurnHandlers {
   onTurn: (event: TurnEvent) => void
 }
 
-/** 在会话里问一轮：边跑边回调每一步，最后回调存下的这一轮；出错或没收到结果时抛 ApiError */
-export async function streamTurn(conversationId: string, question: string, handlers: TurnHandlers): Promise<void> {
+/** 在会话里问一轮：边跑边回调每一步，最后回调存下的这一轮；出错或没收到结果时抛 ApiError。model 不传用默认模型 */
+export async function streamTurn(conversationId: string, question: string, model: string | undefined,
+                                 handlers: TurnHandlers): Promise<void> {
   const response = await send(`/conversations/${encodeURIComponent(conversationId)}/turns`, {
     method: 'POST',
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, model }),
     headers: { Accept: 'text/event-stream' },
   })
   let finished = false
@@ -151,6 +153,7 @@ export async function streamTurn(conversationId: string, question: string, handl
 
 export const api = {
   health: () => getJson<Health>('/health'),
+  models: () => getJson<ModelList>('/nl2sql/models'),
 
   conversations: (limit = 100) => getJson<ConversationSummary[]>(`/conversations${query({ limit })}`),
   createConversation: () => getJson<ConversationSummary>('/conversations', { method: 'POST', body: '{}' }),

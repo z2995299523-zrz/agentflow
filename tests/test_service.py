@@ -110,6 +110,26 @@ def test_build_pipeline_assembles_a_pipeline_that_answers_a_query(imported_mart)
     assert pipeline.deps.llm is llm and llm.remaining == 0
 
 
+def test_build_pipeline_can_start_from_another_model_and_switches_models_per_request(imported_mart, monkeypatch):
+    created = []
+
+    def fake_client(**kwargs):
+        created.append(kwargs)
+        return ScriptedLLM(tiny_replies() * 2, name=kwargs["model"] or "deepseek-flash")
+
+    monkeypatch.setattr(service, "ChatModelClient", fake_client)
+
+    pipeline = service.build_pipeline(imported_mart, executor_kind="none", model="qwen3.8-flash")    # 评估的 --model
+    assert pipeline.deps.llm.name == "qwen3.8-flash" and created == [{"timeout": config.LLM_TIMEOUT,
+                                                                      "model": "qwen3.8-flash"}]
+
+    request = QueryRequest(question="查 9 月末的客户余额", today=date(2026, 10, 13), model="mimo-v2.6-flash")
+    first, second = pipeline.run(request), pipeline.run(request)
+    assert first.status == "ok" and first.model == second.model == "mimo-v2.6-flash"
+    assert service.model_client("mimo-v2.6-flash") is service.model_client("mimo-v2.6-flash")   # 客户端按模型名缓存
+    assert [item["model"] for item in created] == ["qwen3.8-flash", "mimo-v2.6-flash"]
+
+
 def test_build_pipeline_with_the_duckdb_executor_uses_the_mock_mart(imported_mart, mock_db):
     pipeline = service.build_pipeline(imported_mart, llm=ScriptedLLM([]), executor_kind="duckdb")
 
@@ -156,7 +176,7 @@ def test_get_pipeline_is_cached_shared_across_threads_and_cleared_by_reset(impor
 
     pipeline = found[0]
     assert all(item is pipeline for item in found) and len(created) == 1          # 并发时也只建一份
-    assert created[0] == {"timeout": config.LLM_TIMEOUT}
+    assert created[0] == {"timeout": config.LLM_TIMEOUT, "model": None}           # 默认模型
     store, graph = service.get_metadata()
     assert service.get_pipeline() is pipeline and service.get_metadata()[0] is store
     assert pipeline.deps.store is store and pipeline.deps.graph is graph          # 流水线复用元数据的缓存
