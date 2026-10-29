@@ -6,8 +6,8 @@ paths:
 
 # 查询流水线与提示词
 
-- 默认模型是 DeepSeek Flash（`deepseek-flash`，OpenAI 兼容接口，langchain-openai）；请求带 `model` 可换千问 `qwen3.8-flash`、小米 `mimo-v2.6-flash`、智谱 `glm-4.7-flash`（同样 OpenAI 兼容，见 `config.MODEL_CHOICES`）；① 解析、④ 方案用 JSON 模式，温度 0
-- DeepSeek、MiMo 的思考模式默认打开，开着时温度不生效、思考内容按输出计费，`config.get_llm_kwargs` 用 `extra_body` 关掉（DeepSeek、MiMo、智谱用 `thinking`，千问用 `enable_thinking`），改连接参数时别丢
+- 默认模型是 DeepSeek Flash（`deepseek-flash`，OpenAI 兼容接口，langchain-openai）；请求带 `model` 可换千问 `qwen3.8-flash`、小米 `mimo-v2.6-flash`、智谱 `glm-4.7-flash`、OpenAI `gpt-6.1-terra`（同样 OpenAI 兼容，见 `config.MODEL_CHOICES`）；① 解析、④ 方案用 JSON 模式，温度 0
+- DeepSeek、MiMo 的思考模式默认打开，开着时温度不生效、思考内容按输出计费，`config.get_llm_kwargs` 用 `extra_body` 关掉（DeepSeek、MiMo、智谱用 `thinking`，千问用 `enable_thinking`，GPT-5 以后用 `reasoning_effort=none`，不关推理时 GPT 的温度只能是 1），改连接参数时别丢
 - `nl2sql/schemas.py` 是步骤之间的契约：改字段要连同调用方和测试一起改
 - 新的提示词写进 `prompts/`，不在代码里拼字符串
 

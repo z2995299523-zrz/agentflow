@@ -307,7 +307,7 @@ def test_qwen_on_dashscope_turns_thinking_off_and_openai_sends_no_switch(monkeyp
 
 @pytest.fixture
 def deepseek_default(monkeypatch):
-    """默认模型是 DeepSeek，四家的 Key 都配了；LLM_API_BASE 指向一个代理地址"""
+    """默认模型是 DeepSeek，五家的 Key 都配了；LLM_API_BASE 指向一个代理地址"""
     import config
 
     monkeypatch.setattr(config, "LLM_PROVIDER", "deepseek")
@@ -318,6 +318,7 @@ def deepseek_default(monkeypatch):
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-dashscope")
     monkeypatch.setenv("MIMO_API_KEY", "sk-mimo")
     monkeypatch.setenv("ZHIPUAI_API_KEY", "zhipu-id.secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     return config
 
 
@@ -351,6 +352,15 @@ def test_choosing_glm_uses_the_zhipu_key_and_turns_thinking_off_like_deepseek(de
                       "extra_body": {"thinking": {"type": "disabled"}}}
 
 
+def test_choosing_gpt_turns_reasoning_off_so_temperature_zero_is_allowed(deepseek_default):
+    config = deepseek_default
+
+    kwargs = config.get_llm_kwargs(0.0, "gpt-6.1-terra")
+
+    assert kwargs == {"model": "gpt-6.1-terra", "api_key": "sk-openai", "temperature": 0.0,       # 用接口默认地址
+                      "extra_body": {"reasoning_effort": "none"}}
+
+
 def test_naming_the_default_model_is_the_same_as_naming_none(deepseek_default):
     config = deepseek_default
 
@@ -377,11 +387,13 @@ def test_available_models_lists_the_default_first_and_only_those_with_a_key(deep
 
     assert [(item.name, item.label) for item in config.available_models()] == [
         ("deepseek-flash", "DeepSeek Flash"), ("qwen3.8-flash", "千问 qwen3.8-flash"),
-        ("mimo-v2.6-flash", "小米 mimo-v2.6-flash"), ("glm-4.7-flash", "智谱 GLM-4.7-Flash")]
+        ("mimo-v2.6-flash", "小米 mimo-v2.6-flash"), ("glm-4.7-flash", "智谱 GLM-4.7-Flash"),
+        ("gpt-6.1-terra", "GPT-6.1 Terra")]
 
     monkeypatch.delenv("DASHSCOPE_API_KEY")
     monkeypatch.delenv("MIMO_API_KEY")
     monkeypatch.delenv("ZHIPUAI_API_KEY")
+    monkeypatch.delenv("OPENAI_API_KEY")
     assert [item.name for item in config.available_models()] == ["deepseek-flash"]
 
     monkeypatch.setattr(config, "LLM_PROVIDER", "dashscope")       # 默认换成千问：千问排第一，DeepSeek 照样能选

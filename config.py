@@ -52,6 +52,7 @@ MODEL_CHOICES: tuple[ModelChoice, ...] = (
     ModelChoice("qwen3.8-flash", "千问 qwen3.8-flash", "dashscope"),
     ModelChoice("mimo-v2.6-flash", "小米 mimo-v2.6-flash", "mimo"),
     ModelChoice("glm-4.7-flash", "智谱 GLM-4.7-Flash", "zhipu"),
+    ModelChoice("gpt-6.1-terra", "GPT-6.1 Terra", "openai"),          # 服务器连不上 OpenAI，只有本机走代理能用
 )
 
 # ============================================
@@ -97,12 +98,15 @@ def _api_key(provider: str) -> str:
     return os.getenv(PROVIDERS[provider][0], LLM_API_KEY if provider == LLM_PROVIDER else "")
 
 
-def _thinking_off(provider: str) -> dict | None:
-    """关掉思考模式的请求参数：DeepSeek、小米 MiMo、智谱用 thinking，千问（DashScope）用 enable_thinking；OpenAI 不用"""
+def _thinking_off(provider: str, model: str) -> dict | None:
+    """关掉思考模式的请求参数：DeepSeek、小米 MiMo、智谱用 thinking，千问（DashScope）用 enable_thinking；
+    OpenAI 的 GPT-5、GPT-6 系列用 reasoning_effort=none（关了推理温度才能设成 0），更早的模型不用"""
     if provider in ("deepseek", "mimo", "zhipu"):
         return {"thinking": {"type": "disabled"}}
     if provider == "dashscope":
         return {"enable_thinking": False}
+    if provider == "openai" and model.startswith(("gpt-5", "gpt-6")):
+        return {"reasoning_effort": "none"}
     return None
 
 
@@ -120,7 +124,8 @@ def get_llm_kwargs(temperature: float | None = None, model: str | None = None):
     获取 LLM 初始化参数
     日常开发默认用 DeepSeek（便宜），可通过 .env 切换 OpenAI；model 指定 MODEL_CHOICES 里的别的模型时，
     按它的服务商取 Key 和地址。LLM_API_KEY、LLM_API_BASE 只给 LLM_PROVIDER 这个服务商用。
-    思考模式显式关掉：DeepSeek、小米 MiMo 默认打开，开着时温度不生效、思考内容按输出计费、回复也慢；千问（DashScope）、智谱同样关掉
+    思考模式显式关掉：DeepSeek、小米 MiMo 默认打开，开着时温度不生效、思考内容按输出计费、回复也慢；千问（DashScope）、智谱、
+    GPT-5 以后的 OpenAI 模型同样关掉
 
     Args:
         temperature: 温度。None 时用 0.7；查询流水线传 0
@@ -143,7 +148,7 @@ def get_llm_kwargs(temperature: float | None = None, model: str | None = None):
             f"未找到 {provider} 的 API Key。请在项目 .env 或 Hermes .env 中配置"
         )
     base_url = (LLM_API_BASE if provider == LLM_PROVIDER else "") or PROVIDERS[provider][1]
-    extra_body = _thinking_off(provider)
+    extra_body = _thinking_off(provider, name)
 
     kwargs = {
         "model": name,
