@@ -307,7 +307,7 @@ def test_qwen_on_dashscope_turns_thinking_off_and_openai_sends_no_switch(monkeyp
 
 @pytest.fixture
 def deepseek_default(monkeypatch):
-    """默认模型是 DeepSeek，三家的 Key 都配了；LLM_API_BASE 指向一个代理地址"""
+    """默认模型是 DeepSeek，四家的 Key 都配了；LLM_API_BASE 指向一个代理地址"""
     import config
 
     monkeypatch.setattr(config, "LLM_PROVIDER", "deepseek")
@@ -317,6 +317,7 @@ def deepseek_default(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-dashscope")
     monkeypatch.setenv("MIMO_API_KEY", "sk-mimo")
+    monkeypatch.setenv("ZHIPUAI_API_KEY", "zhipu-id.secret")
     return config
 
 
@@ -338,6 +339,16 @@ def test_choosing_mimo_uses_the_mimo_key_and_turns_thinking_off_like_deepseek(de
     assert kwargs == {"model": "mimo-v2.6-flash", "api_key": "sk-mimo", "temperature": 0.0,
                       "base_url": "https://api.xiaomimimo.com/v1",
                       "extra_body": {"thinking": {"type": "disabled"}}}                 # v2.6 默认开着思考
+
+
+def test_choosing_glm_uses_the_zhipu_key_and_turns_thinking_off_like_deepseek(deepseek_default):
+    config = deepseek_default
+
+    kwargs = config.get_llm_kwargs(0.0, "glm-4.7-flash")
+
+    assert kwargs == {"model": "glm-4.7-flash", "api_key": "zhipu-id.secret", "temperature": 0.0,
+                      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                      "extra_body": {"thinking": {"type": "disabled"}}}
 
 
 def test_naming_the_default_model_is_the_same_as_naming_none(deepseek_default):
@@ -366,10 +377,11 @@ def test_available_models_lists_the_default_first_and_only_those_with_a_key(deep
 
     assert [(item.name, item.label) for item in config.available_models()] == [
         ("deepseek-flash", "DeepSeek Flash"), ("qwen3.8-flash", "千问 qwen3.8-flash"),
-        ("mimo-v2.6-flash", "小米 mimo-v2.6-flash")]
+        ("mimo-v2.6-flash", "小米 mimo-v2.6-flash"), ("glm-4.7-flash", "智谱 GLM-4.7-Flash")]
 
     monkeypatch.delenv("DASHSCOPE_API_KEY")
     monkeypatch.delenv("MIMO_API_KEY")
+    monkeypatch.delenv("ZHIPUAI_API_KEY")
     assert [item.name for item in config.available_models()] == ["deepseek-flash"]
 
     monkeypatch.setattr(config, "LLM_PROVIDER", "dashscope")       # 默认换成千问：千问排第一，DeepSeek 照样能选
