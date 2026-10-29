@@ -385,11 +385,13 @@ def _join_hints(store: MetadataStore, graph: LineageGraph, table_ids: list[str],
                 ) -> tuple[list[JoinHint], list[str]]:
     """候选表两两的关联路径
 
-    直连的排在经过中间表的前面，同类的按候选表的先后；最多 MAX_JOIN_HINTS 条。
+    直连的排在经过中间表的前面，同类的按候选表的先后；最多 MAX_JOIN_HINTS 条。名额先保底：挑一组路径让每张连得上的
+    候选表至少有一条（每次挑能多照顾一张表的，一样多时挑靠前的），剩下的名额再按顺序补；列出来的仍按上面的顺序。
+    只按先后截时，排在后面的表可能一条也没有，模型就当它连不上别的表。
     中间表不在候选里时要补进证据，最多补 MAX_JOIN_TABLES 张，超出名额的那条路径不记。
 
     Returns:
-        (关联路径, 要补进证据的中间表，按补进的先后)
+        (关联路径, 要补进证据的中间表，按关联路径的先后)
     """
     found = []
     for left, right in combinations(table_ids, 2):
@@ -402,13 +404,23 @@ def _join_hints(store: MetadataStore, graph: LineageGraph, table_ids: list[str],
         found.append(JoinHint(left_table=left, right_table=right, hops=hops, fan_out=path.fan_out))
     found.sort(key=lambda hint: len(hint.hops))                     # 稳定排序：直连在前，同类仍按候选表的先后
 
+    uncovered = {table for hint in found for table in (hint.left_table, hint.right_table)}
+    order: list[int] = []                                           # 先保底的几条，再按顺序的其余
+    while uncovered:
+        index = max(range(len(found)),
+                    key=lambda i: (len(uncovered & {found[i].left_table, found[i].right_table}), -i))
+        order.append(index)
+        uncovered -= {found[index].left_table, found[index].right_table}
+    order += [index for index in range(len(found)) if index not in order]
+
     present = set(table_ids)
-    middles: list[str] = []
-    hints: list[JoinHint] = []
+    middles: set[str] = set()
+    kept: list[int] = []
     no_room = 0
-    for hint in found:
-        if len(hints) >= MAX_JOIN_HINTS:
-            notes.append(f"关联路径超过 {MAX_JOIN_HINTS} 条，只列了前 {MAX_JOIN_HINTS} 条（直连的排在前面）")
+    for index in order:
+        hint = found[index]
+        if len(kept) >= MAX_JOIN_HINTS:
+            notes.append(f"关联路径超过 {MAX_JOIN_HINTS} 条，只列了 {MAX_JOIN_HINTS} 条（每张候选表先保底一条，其余直连的排在前面）")
             break
         if len(hint.hops) > 1:
             middle = hint.hops[0].right_table
@@ -418,11 +430,13 @@ def _join_hints(store: MetadataStore, graph: LineageGraph, table_ids: list[str],
                 if len(middles) >= MAX_JOIN_TABLES:
                     no_room += 1
                     continue
-                middles.append(middle)
-        hints.append(hint)
+                middles.add(middle)
+        kept.append(index)
     if no_room:
         notes.append(f"关联路径要补充的中间表超过 {MAX_JOIN_TABLES} 张，有 {no_room} 条路径没有列出")
-    return hints, middles
+    hints = [found[index] for index in sorted(kept)]
+    added = [hint.hops[0].right_table for hint in hints if len(hint.hops) > 1 and hint.hops[0].right_table not in present]
+    return hints, list(dict.fromkeys(added))
 
 
 def _upstream_options(store: MetadataStore, tables: list[EvidenceTable], closures: dict[str, list[str]],

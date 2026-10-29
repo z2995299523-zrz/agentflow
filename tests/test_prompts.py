@@ -690,6 +690,37 @@ def test_tables_from_the_fifth_on_list_only_key_columns_and_their_name_columns(m
     assert prompts.COMPACT_NOTE not in render_evidence(make_evidence(mock_store))          # 三张表时不提
 
 
+def test_tables_from_the_fifth_on_also_list_the_keys_their_join_paths_use(mock_store):
+    """关联键只写在「关联路径」里时，模型不把它当成这张表有的字段，会认定别的表才是唯一带这个键的表"""
+    evidence = make_evidence(mock_store)
+    evidence.tables.append(evidence_table(mock_store, DWD_ACCT, reason="upstream"))
+    fifth = evidence.tables[0].model_copy(deep=True)
+    fifth.table_id = "ads.extra_05"
+    fifth.columns.append(EvidenceColumn(name="contract_no", cn="合同号", data_type="varchar(32)"))
+    evidence.tables.append(fifth)
+    evidence.joins = [JoinHint(left_table=DWD_ACCT, right_table="ads.extra_05", fan_out=True, hops=[
+        JoinHop(left_table=DWD_ACCT, left_columns=["acct_no"], right_table="ads.extra_05",
+                right_columns=["contract_no"], cardinality="1:N", origin="lineage")])]
+
+    text = render_evidence(evidence)
+
+    kept = table_block(text, "ads.extra_05")
+    assert "- contract_no 合同号 varchar(32)" in kept
+    assert "- margin_bal_rmb " not in kept
+    assert "- （另有 3 个字段未列出）" in kept
+    assert "关联键" in prompts.COMPACT_NOTE and prompts.COMPACT_NOTE in section(text, "## 说明")
+
+
+def test_shrunk_tables_listing_only_hit_and_grain_columns_keep_their_join_keys(mock_store):
+    table = make_evidence(mock_store).tables[0]
+    table.columns.append(EvidenceColumn(name="contract_no", cn="合同号", data_type="varchar(32)"))
+
+    block = prompts._table_block(table, key_only=True, join_keys={"contract_no"})
+
+    assert "- contract_no 合同号 varchar(32)" in block
+    assert "- margin_bal_rmb " not in block
+
+
 @pytest.mark.parametrize("reason", ["upstream", "example", "previous", "missing"])
 def test_tables_brought_in_by_lifting_or_examples_are_listed_in_full_even_after_the_fourth(mock_store, reason):
     """上溯、样例带入的表是模型要从里面找缺的字段的地方：压成只列关键字段，模型看不到就会一直要求上溯"""
@@ -889,7 +920,7 @@ def heavy_evidence(mock_store) -> Evidence:
     return evidence
 
 
-NOTES = ["去掉非命中字段的码值", "第 9 张以后的表只列命中字段和粒度字段", "每跳的条件截到 120 字", "样例 SQL 截到 1500 字"]
+NOTES = ["去掉非命中字段的码值", "第 9 张以后的表只列命中字段、粒度字段和关联键", "每跳的条件截到 120 字", "样例 SQL 截到 1500 字"]
 
 
 def shrunk_texts(evidence: Evidence, monkeypatch, levels: int = 4) -> list[str]:

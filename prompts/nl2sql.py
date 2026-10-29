@@ -8,8 +8,8 @@
 RETRY_PROMPT 由 nl2sql.llm.structured_call 使用：输出不合格时带着问题再试一次。
 """
 from calendar import monthrange
-from collections import Counter
-from collections.abc import Sequence
+from collections import Counter, defaultdict
+from collections.abc import Collection, Sequence
 from datetime import date, timedelta
 
 from nl2sql.schemas import (
@@ -42,16 +42,16 @@ LINEAGE_FIELD_CHARS = 1500                    # 收缩第 8 级：每个字段�
 FULL_FIELD_TABLES = 4                         # 前几张候选表列全部字段，后面召回的表和关联中间表只列关键字段和名称字段
 COMPACT_REASONS = ("recall", "join", "extra")  # 其余入选原因（上溯、样例、上一轮用过、缺的东西单独召回）照旧全列：模型正要从这些表里找东西
 SHARED_CONDITION_MIN_CHARS = 20               # 加工链路里出现两次以上、至少这么长的条件，提到本节开头编号共用
-COMPACT_NOTE = (f"第 {FULL_FIELD_TABLES + 1} 张以后召回的表、非标准表和关联路径经过的中间表只列命中、粒度、数据日期、主键字段，"
-                "以及这些字段的名称字段；其它入选原因的表照旧全列")
+COMPACT_NOTE = (f"第 {FULL_FIELD_TABLES + 1} 张以后召回的表、非标准表和关联路径经过的中间表只列命中、粒度、数据日期、主键字段"
+                "和关联路径里用到的关联键，以及这些字段的名称字段；其它入选原因的表照旧全列")
 SHRINK_ACTIONS = (                            # 收缩的顺序，先轻后重，每级在「说明」里记一句
     "去掉非命中字段的码值",
-    f"第 {FULL_TABLES + 1} 张以后的表只列命中字段和粒度字段",
+    f"第 {FULL_TABLES + 1} 张以后的表只列命中字段、粒度字段和关联键",
     f"每跳的条件截到 {SHRINK_CONDITION_CHARS} 字",
     f"样例 SQL 截到 {SHRINK_EXAMPLE_SQL_CHARS} 字",
     "命中、粒度、数据日期、主键以外的字段不写口径说明",
     f"加工表达式截到 {SHRINK_EXPRESSION_CHARS} 字、每跳的条件截到 {SHRINK_CONDITION_CHARS_MIN} 字",
-    f"第 {KEY_TABLES + 1} 张以后的表只列命中字段和粒度字段",
+    f"第 {KEY_TABLES + 1} 张以后的表只列命中字段、粒度字段和关联键",
     f"每个字段的加工链路最多写 {LINEAGE_FIELD_CHARS} 字",
     "关联路径只列直连，不列经过中间表的",
 )
@@ -754,24 +754,39 @@ def _column_line(column: EvidenceColumn, table: EvidenceTable, *, drop_enum: boo
     return " ".join(parts)
 
 
-def _compact_columns(table: EvidenceTable) -> set[str]:
-    """排在后面的候选表要列的字段：关键字段（命中、粒度、数据日期、主键），加上它们在同表的名称字段"""
-    key = {column.name for column in table.columns if _is_key_column(column, table)}
+def _join_keys(hints: Sequence[JoinHint]) -> dict[str, set[str]]:
+    """关联路径里每张表用到的关联键"""
+    keys: dict[str, set[str]] = defaultdict(set)
+    for hint in hints:
+        for hop in hint.hops:
+            keys[hop.left_table].update(hop.left_columns)
+            keys[hop.right_table].update(hop.right_columns)
+    return keys
+
+
+def _compact_columns(table: EvidenceTable, join_keys: Collection[str] = ()) -> set[str]:
+    """排在后面的候选表要列的字段：关键字段（命中、粒度、数据日期、主键）和关联键，加上它们在同表的名称字段
+
+    关联键只写在「关联路径」一节时，模型不把它当成这张表有的字段：例如合同号只在关联路径里出现，
+    模型就认定别的表才是唯一带合同号的表，选错了表。
+    """
+    key = {column.name for column in table.columns if _is_key_column(column, table) or column.name in join_keys}
     return key | {column.name_column for column in table.columns if column.name in key and column.name_column}
 
 
 def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bool = False,
-                 bare: bool = False, compact: bool = False) -> str:
+                 bare: bool = False, compact: bool = False, join_keys: Collection[str] = ()) -> str:
     """一张表一段：标题、层级类型粒度、说明、字段清单
 
     Args:
         table: 证据里的表
         drop_enums: 去掉非命中字段的码值（收缩第 1 级）
-        key_only: 只列命中字段、粒度字段和数据日期字段（收缩第 2、7 级），比 compact 列得还少
+        key_only: 只列命中字段、粒度字段、数据日期字段和关联键（收缩第 2、7 级），比 compact 列得还少
         bare: 关键字段以外的字段不写口径说明（收缩第 5 级）
-        compact: 只列关键字段和它们的名称字段（不收缩时第 FULL_FIELD_TABLES 张以后召回的表、关联中间表）
+        compact: 只列关键字段、关联键和它们的名称字段（不收缩时第 FULL_FIELD_TABLES 张以后召回的表、关联中间表）
+        join_keys: 关联路径里这张表用到的关联键，compact、key_only 时也列
     """
-    listed = _compact_columns(table) if compact else None
+    listed = _compact_columns(table, join_keys) if compact else None
     grain = ", ".join(table.grain_columns) or "无"
     lines = [
         f"### {table.table_id} {table.table_cn}",
@@ -783,7 +798,8 @@ def _table_block(table: EvidenceTable, *, drop_enums: bool = False, key_only: bo
     lines.append("字段：")
     shown = 0
     for column in table.columns:
-        if key_only and not (column.hit_terms or column.name in table.grain_columns or column.name == table.date_column):
+        if key_only and not (column.hit_terms or column.name in table.grain_columns or column.name == table.date_column
+                             or column.name in join_keys):
             continue
         if listed is not None and column.name not in listed:
             continue
@@ -956,9 +972,11 @@ def _render(evidence: Evidence, level: int) -> str:
     full_tables = KEY_TABLES if level >= 7 else FULL_TABLES
     compacted = [index >= FULL_FIELD_TABLES and table.reason in COMPACT_REASONS
                  for index, table in enumerate(evidence.tables)]
+    hints = [hint for hint in evidence.joins if level < 9 or len(hint.hops) == 1]
+    join_keys = _join_keys(hints)
     for index, table in enumerate(evidence.tables):
         tables.append(_table_block(table, drop_enums=level >= 1, key_only=level >= 2 and index >= full_tables,
-                                   bare=level >= 5, compact=compacted[index]))
+                                   bare=level >= 5, compact=compacted[index], join_keys=join_keys.get(table.table_id, ())))
     condition_chars = (SHRINK_CONDITION_CHARS_MIN if level >= 6 else SHRINK_CONDITION_CHARS if level >= 3 else None)
     sections = [_section("## 候选表", ["\n\n".join(tables)] if tables else [])]
     if evidence.use_lineage:
@@ -971,7 +989,6 @@ def _render(evidence: Evidence, level: int) -> str:
         sections.append(_section("## 还可以上溯到的表",
                                  [f"- {option.table_id} {option.table_cn}（{option.layer}）"
                                   for option in evidence.upstream_options]))
-    hints = [hint for hint in evidence.joins if level < 9 or len(hint.hops) == 1]
     sections.append(_section("## 关联路径", [line for hint in hints for line in _render_join(hint)]))
     if evidence.use_examples:
         examples = _render_examples(evidence.examples, sql_chars=SHRINK_EXAMPLE_SQL_CHARS if level >= 4 else None)

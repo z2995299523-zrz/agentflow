@@ -842,7 +842,21 @@ def test_join_hints_are_limited_in_number_and_the_note_says_so(monkeypatch):
 
     evidence = evidence_of(store, graph, recall_of(*[cand(name) for name in names]))
 
-    assert [(h.left_table, h.right_table) for h in evidence.joins] == [("ads.a", "ads.b"), ("ads.a", "ads.c")]
+    assert [(h.left_table, h.right_table) for h in evidence.joins] == [("ads.a", "ads.b"), ("ads.c", "ads.d")]  # c-d 经过 a，两条就照顾到四张表
+    assert any("超过 2 条" in note for note in evidence.notes)
+
+
+def test_when_join_hints_hit_the_limit_every_candidate_still_keeps_one(monkeypatch):
+    """只按先后截时 a-b、a-c 先占满名额，d 一条也没有，模型会以为 d 连不上别的表"""
+    names = ["ads.a", "ads.b", "ads.c", "ads.d"]
+    store, graph = make_store([(name, [("k", "键")]) for name in names],
+                              relations=[relation(left, ["k"], right, ["k"], "N:1")
+                                         for left, right in (("ads.a", "ads.b"), ("ads.a", "ads.c"), ("ads.c", "ads.d"))])
+    monkeypatch.setattr(evidence_module, "MAX_JOIN_HINTS", 2)
+
+    evidence = evidence_of(store, graph, recall_of(*[cand(name) for name in names]))
+
+    assert [(h.left_table, h.right_table) for h in evidence.joins] == [("ads.a", "ads.b"), ("ads.c", "ads.d")]
     assert any("超过 2 条" in note for note in evidence.notes)
 
 
