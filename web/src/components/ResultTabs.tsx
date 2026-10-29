@@ -1,9 +1,17 @@
-/** 结果的说明：口径说明、执行结果、用表与字段、运行过程，分标签页放 */
-import { Descriptions, Empty, Table, Tabs, Tag, Timeline, Typography } from 'antd'
+/** 结果的说明：口径说明、执行结果、用表与字段、运行过程（含每次模型调用的 token），分标签页放 */
+import { Descriptions, Empty, Table, Tabs, Tag, Timeline, Tooltip, Typography } from 'antd'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 
-import type { PlanField, PlanTable, QueryPlan, QueryResult } from '../api/types'
+import {
+  STEP_LABELS,
+  type CallRecord,
+  type PlanField,
+  type PlanTable,
+  type QueryPlan,
+  type QueryResult,
+  type StepKey,
+} from '../api/types'
 import { formatMs } from '../utils/format'
 import ExecTable from './ExecTable'
 
@@ -110,9 +118,64 @@ function PlanTables({ plan, result }: { plan: QueryPlan; result: QueryResult }) 
   )
 }
 
+/** 每次调用写成哪一步：同一步又调了一轮（上溯后重新选表、修正 SQL）加「第 N 轮」，输出不合格后的重试加「重试」 */
+function callLabels(calls: CallRecord[]): string[] {
+  const rounds: Record<string, number> = {}
+  return calls.map((call) => {
+    const label = STEP_LABELS[call.step as StepKey] ?? call.step
+    if (call.attempt > 1) return `${label}（重试）`
+    rounds[call.step] = (rounds[call.step] ?? 0) + 1
+    return rounds[call.step] > 1 ? `${label}（第 ${rounds[call.step]} 轮）` : label
+  })
+}
+
+function callResult(call: CallRecord): ReactNode {
+  if (call.ok) return <Tag color="success">成功</Tag>
+  const text = call.error.startsWith('模型调用失败') ? '调用失败' : '输出不合格'
+  return <Tooltip title={call.error}><Tag color="error">{text}</Tag></Tooltip>
+}
+
+/** 每次模型调用一行：哪一步、输入和输出的 token、用时、结果；最后一行合计 */
+function CallTable({ calls }: { calls: CallRecord[] }) {
+  const labels = callLabels(calls)
+  const rows = calls.map((call, index) => ({ ...call, index, label: labels[index] }))
+  const tokensIn = calls.reduce((sum, call) => sum + call.input_tokens, 0)
+  const tokensOut = calls.reduce((sum, call) => sum + call.output_tokens, 0)
+  return (
+    <div className="call-table">
+      <Typography.Title level={5}>模型调用（{calls.length} 次）</Typography.Title>
+      <Table
+        size="small"
+        rowKey="index"
+        pagination={false}
+        scroll={{ x: 'max-content' }}
+        dataSource={rows}
+        columns={[
+          { key: 'index', title: '#', width: 44, render: (_, row) => row.index + 1 },
+          { key: 'step', title: '步骤', dataIndex: 'label' },
+          { key: 'in', title: '输入 tokens', align: 'right', render: (_, row) => row.input_tokens.toLocaleString() },
+          { key: 'out', title: '输出 tokens', align: 'right', render: (_, row) => row.output_tokens.toLocaleString() },
+          { key: 'ms', title: '用时', align: 'right', render: (_, row) => formatMs(row.elapsed_ms) },
+          { key: 'ok', title: '结果', render: (_, row) => callResult(row) },
+        ]}
+        summary={() => (
+          <Table.Summary.Row>
+            <Table.Summary.Cell index={0} colSpan={2}>合计</Table.Summary.Cell>
+            <Table.Summary.Cell index={2} align="right">{tokensIn.toLocaleString()}</Table.Summary.Cell>
+            <Table.Summary.Cell index={3} align="right">{tokensOut.toLocaleString()}</Table.Summary.Cell>
+            <Table.Summary.Cell index={4} colSpan={2} />
+          </Table.Summary.Row>
+        )}
+      />
+    </div>
+  )
+}
+
 function TraceTimeline({ result }: { result: QueryResult }) {
-  const tokensIn = result.calls.reduce((sum, call) => sum + call.input_tokens, 0)
-  const tokensOut = result.calls.reduce((sum, call) => sum + call.output_tokens, 0)
+  const notes = [
+    result.first_pass_ok !== null ? `第一次生成的 SQL ${result.first_pass_ok ? '通过' : '没通过'}校验` : '',
+    result.recall_notes.length > 0 ? `召回说明：${result.recall_notes.join('；')}` : '',
+  ].filter(Boolean)
   return (
     <div className="trace">
       <Timeline
@@ -128,11 +191,10 @@ function TraceTimeline({ result }: { result: QueryResult }) {
           ),
         }))}
       />
-      <Typography.Text type="secondary">
-        模型调用 {result.calls.length} 次，输入 {tokensIn.toLocaleString()} tokens、输出 {tokensOut.toLocaleString()} tokens
-        {result.first_pass_ok !== null && `；第一次生成的 SQL ${result.first_pass_ok ? '通过' : '没通过'}校验`}
-        {result.recall_notes.length > 0 && `；召回说明：${result.recall_notes.join('；')}`}
-      </Typography.Text>
+      {result.calls.length > 0
+        ? <CallTable calls={result.calls} />
+        : <Typography.Text type="secondary">这一轮没有调用模型</Typography.Text>}
+      {notes.length > 0 && <Typography.Text type="secondary" className="trace-notes">{notes.join('；')}</Typography.Text>}
     </div>
   )
 }

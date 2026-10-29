@@ -14,9 +14,13 @@ import StepProgress from './StepProgress'
 
 const SLOW_STEP_MS = 15000            // 这么久没有新的一步就说明可能的原因
 
-/** 回答头部的说明：用的模型（早先的轮次没记）、调用次数、用时、上溯和修正 */
+/** 回答头部的说明：用的模型（早先的轮次没记）、调用次数、输入和输出的 token 合计、用时、上溯和修正 */
 function usageText(result: QueryResult, modelLabel: string): string {
-  const parts = [`模型调用 ${result.calls.length} 次`, `用时 ${formatMs(result.elapsed_ms)}`]
+  const parts = [`模型调用 ${result.calls.length} 次`]
+  const tokensIn = result.calls.reduce((sum, call) => sum + call.input_tokens, 0)
+  const tokensOut = result.calls.reduce((sum, call) => sum + call.output_tokens, 0)
+  if (tokensIn || tokensOut) parts.push(`输入 ${tokensIn.toLocaleString()} / 输出 ${tokensOut.toLocaleString()} tokens`)
+  parts.push(`用时 ${formatMs(result.elapsed_ms)}`)
   if (modelLabel) parts.unshift(modelLabel)
   if (result.scope_level) parts.push(`上溯 ${result.scope_level} 层`)
   if (result.repair_rounds) parts.push(`修正 ${result.repair_rounds} 次`)

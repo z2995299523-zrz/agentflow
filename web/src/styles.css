@@ -127,6 +127,9 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
 .plan-tables p { margin: 10px 0 0; }
 .link-tag { cursor: pointer; margin-bottom: 4px; }
 .trace .ant-timeline { margin-top: 6px; }
+.call-table { margin-bottom: 10px; }
+.call-table h5 { margin: 0 0 8px !important; font-size: 13.5px !important; }
+.trace-notes { display: block; }
 
 /* 欢迎页 */
 .welcome { padding: 36px 8px 8px; }
