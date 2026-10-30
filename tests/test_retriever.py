@@ -238,18 +238,34 @@ def test_non_standard_tables_rank_on_their_own_and_take_no_slot():
     result = retriever.recall(query)
 
     assert retriever.scope_tables(0)[0] == [f"ads.t{number:02d}" for number in range(1, 11)]     # 第 0 层只有标准表
-    assert [item.reason for item in result.tables] == ["recall"] * MAX_TABLES + ["extra"] * MAX_EXTRA_TABLES
-    extras = result.tables[MAX_TABLES:]
+    reasons = [item.reason for item in result.tables]
+    assert reasons.count("recall") == MAX_TABLES and reasons.count("extra") == MAX_EXTRA_TABLES
+    extras = [item for item in result.tables if item.reason == "extra"]
     assert {item.table_id for item in extras} < {"ads.x1", "ads.x2", "ads.x3", "ads.x4"}           # 只要有命中的
     assert all(item.hits for item in extras)
     # 标准表的先后和得分，和元数据里没有非标准表时完全一样
     standard_only = make_retriever(make_mart(standard_tables()))
-    assert [(item.table_id, item.score) for item in result.tables[:MAX_TABLES]] == [
+    assert [(item.table_id, item.score) for item in result.tables if item.reason == "recall"] == [
         (item.table_id, item.score) for item in standard_only.recall(query).tables]
     # 对照实验 A 组：全部表一起排名，不分是不是标准表，非标准表照样占名额，没有 extra
     group_a = retriever.recall(query, all_layers=True)
     assert any(item.table_id.startswith("ads.x") for item in group_a.tables[:MAX_TABLES])
     assert {item.reason for item in group_a.tables} == {"recall"}
+
+
+def test_non_standard_tables_are_ordered_together_with_the_standard_ones_by_score():
+    # 两类各自按名额取够，再合在一起按得分排：非标准表得分高就排在前面，证据里才全列它的字段；同分时标准表在前
+    mart = make_mart(standard_tables()[:3] + [("ads.x1", "费用实库表", [("dep_amt", "存款金额"), ("book_code", "账簿编码")]),
+                                              ("ads.x2", "存款实库表", [("dep_amt2", "存款金额二")])])
+    mart = mart.model_copy(update={"tables": [table.model_copy(update={"standard": table.table_id.startswith("ads.t")})
+                                              for table in mart.tables]})
+    retriever = make_retriever(mart, with_embedder=False)
+
+    result = retriever.recall(RecallQuery("按账簿编码统计存款金额", ["存款金额", "账簿编码"]))
+
+    # x1 两个检索词都命中，排第一；x2 和 t01 都是各自范围里「存款金额」的第一名，同分，标准表在前
+    assert [(item.table_id, item.reason) for item in result.tables] == [
+        ("ads.x1", "extra"), ("ads.t01", "recall"), ("ads.x2", "extra"), ("ads.t02", "recall"), ("ads.t03", "recall")]
 
 
 def test_a_term_that_only_hits_non_standard_tables_is_not_reported_as_missing():

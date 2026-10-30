@@ -12,6 +12,9 @@
 免得上溯一张表也不给。没留下的维表回到第 0 层，和专题层、汇总层的表一起排名。
 表清单里标成非标准表的（设计文档没收录、只在实库里有）不进第 0 层：它们同样在自己的范围里单独找命中字段、单独排名，
 有命中的前 MAX_EXTRA_TABLES 张补进候选，不占标准表的名额。真实库上这类表比标准表还多，一起排名时会把标准表挤出候选。
+两类各自按名额取够之后，再合在一起按得分排先后：证据里只有前几张候选表全列字段，非标准表一律排在标准表后面时，
+得分再高也只列关键字段，④ 看不全它的字段，同一道题时用时说「没有这个字段」。在真实库 215 道题上离线比过，
+标准用表进前 4 名 97→173 题（标准用表含非标准表的 100 题 0→79，全是标准表的 115 题 97→94）；模拟库没有非标准表，不受影响。
 
 打分：
     关键字路  汉字二元组和英文单词的覆盖率：字段中文名占 0.7，表中文名占 0.3，检索词是字段中文名的子串再加 0.2
@@ -358,7 +361,8 @@ class Retriever:
                missing_terms: Sequence[str] = ()) -> RecallResult:
         """召回候选表和相似样例
 
-        候选表分六类，按 recall、previous、missing、upstream、extra、example 的顺序排列：
+        候选表分六类：recall 和 extra 合在一起按得分排在最前（同分时标准表在前），后面依次是 previous、missing、
+        upstream、example。
         recall 是范围内（第 0 层，只有标准表）得分最高的前 MAX_TABLES 张；
         previous 是追问时上一轮 SQL 用到的表（carry_tables），原样带进来；
         missing 是 ④ 最近一次说缺的东西（missing_terms）逐条单独在第 0 层排名，轮流各取一张，每条最多
@@ -410,7 +414,13 @@ class Retriever:
 
         ranked = sorted((table_id for table_id, item in scored.items() if item.score > 0),
                         key=lambda table_id: self._order_key(table_id, scored.get(table_id)))
-        tables = [self._candidate(table_id, REASON_RECALL, scored) for table_id in ranked[:MAX_TABLES]]
+        blocked = taken | set(carry_tables)     # 上溯留下的、上一轮用过的表照原来的入选原因排在后面
+        extras = sorted((table_id for table_id, item in extra_scored.items() if item.score > 0 and table_id not in blocked),
+                        key=lambda table_id: self._order_key(table_id, extra_scored[table_id]))[:MAX_EXTRA_TABLES]
+        # 标准表、非标准表各自按名额取够，再合在一起按得分排；sorted 是稳定排序，两类各自的先后不变，同分时标准表在前
+        tables = sorted([self._candidate(table_id, REASON_RECALL, scored) for table_id in ranked[:MAX_TABLES]]
+                        + [self._candidate(table_id, REASON_EXTRA, extra_scored) for table_id in extras],
+                        key=lambda candidate: (-_round(candidate.score), candidate.reason == REASON_EXTRA))
         have = {candidate.table_id for candidate in tables}
         all_scored = {**upstream_scored, **extra_scored, **scored}
         for table_id in carry_tables:
@@ -421,10 +431,6 @@ class Retriever:
             tables += self._missing_candidates(missing_terms, have)
         tables += [self._candidate(table_id, REASON_UPSTREAM, upstream_scored) for table_id in kept if table_id not in have]
         have.update(kept)
-        extras = sorted((table_id for table_id, item in extra_scored.items() if item.score > 0 and table_id not in have),
-                        key=lambda table_id: self._order_key(table_id, extra_scored[table_id]))[:MAX_EXTRA_TABLES]
-        tables += [self._candidate(table_id, REASON_EXTRA, extra_scored) for table_id in extras]
-        have.update(extras)
 
         examples = self._similar_examples(query.requirement, requirement_vector)
         if self._examples and self._vector_note is None and self._example_index is None:
