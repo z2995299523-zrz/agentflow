@@ -20,6 +20,7 @@ from metadata import index as index_module
 from metadata.importer import default_db_path, load_mart, main, run_import
 from metadata.index import (
     EMBEDDER_ENV,
+    TABLE_TEXT_FIELD_CHARS,
     BgeEmbedder,
     HashEmbedder,
     VectorIndex,
@@ -28,8 +29,9 @@ from metadata.index import (
     example_text,
     field_ref_id,
     field_text,
+    table_text,
 )
-from metadata.models import Example, Mart
+from metadata.models import ColumnMeta, Example, Mart, TableMeta
 from metadata.store import MetadataStore, VectorBundle, VectorSet, read_vectors, write_store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,6 +228,30 @@ def test_build_vectors_covers_every_field_in_mart_order(tiny_mart):
     assert "example" not in bundle.sets                # 没有样例就不建样例集
 
 
+def test_build_vectors_adds_one_table_vector_per_table_in_mart_order(tiny_mart):
+    mart, _ = load_mart(tiny_mart)
+    columns = {t.table_id: [c for c in mart.columns if c.table_id == t.table_id] for t in mart.tables}
+
+    table = build_vectors(mart, HashEmbedder())[0].sets["table"]
+
+    assert table.kind == "table"
+    assert table.ref_ids == [t.table_id for t in mart.tables]
+    assert table.texts == [table_text(t, columns[t.table_id]) for t in mart.tables]
+    assert np.array_equal(table.matrix, HashEmbedder().embed(table.texts))
+
+
+def test_table_text_has_the_name_description_and_field_names_cut_to_a_limit():
+    table = TableMeta(table_id="ads.loan", layer="专题层", schema_name="ads", table_name="loan", table_cn="贷款余额表",
+                      table_type="快照表", grain_columns=[], description="按客户统计的对公贷款余额")
+    columns = [ColumnMeta(table_id="ads.loan", column_name=f"c{n}", ordinal=n, column_cn=f"字段{n:03d}") for n in range(100)]
+
+    text = table_text(table, columns)
+
+    assert text.startswith("贷款余额表 按客户统计的对公贷款余额 字段：字段000、字段001、")
+    assert len(text.split("字段：", 1)[1]) == TABLE_TEXT_FIELD_CHARS
+    assert table_text(table.model_copy(update={"description": ""}), []) == "贷款余额表"     # 没有说明、没有字段就只剩表名
+
+
 def test_build_vectors_adds_example_vectors_when_there_are_examples(tiny_mart):
     mart, _ = load_mart(tiny_mart)
     mart = mart.model_copy(update={"examples": [make_example(1, "查询各客户的账户余额", "原币"),
@@ -247,8 +273,9 @@ def test_build_vectors_embeds_in_batches_without_changing_the_result():
     batched, _ = build_vectors(mart, embedder, batch_size=40)
     whole, _ = build_vectors(mart, HashEmbedder(), batch_size=1000)
 
-    assert embedder.batches == [40, 40, 13]            # 93 个字段
+    assert embedder.batches == [40, 40, 27]            # 93 个字段、14 张表
     assert np.array_equal(batched.sets["field"].matrix, whole.sets["field"].matrix)
+    assert np.array_equal(batched.sets["table"].matrix, whole.sets["table"].matrix)
     with pytest.raises(ValueError):
         build_vectors(mart, HashEmbedder(), batch_size=0)
 
@@ -275,6 +302,7 @@ def test_build_vectors_report_section(tiny_mart):
     assert "向量器：hash-bigram-512" in text
     assert "维度：512" in text
     assert "字段向量：9 条" in text
+    assert f"表向量：{len(mart.tables)} 条" in text
     assert "样例向量：1 条" in text
     assert "耗时：" in text
 
@@ -373,7 +401,7 @@ def test_reimport_with_another_embedder_replaces_every_vector(tiny_mart):
     assert store.embedder_name == "hash-bigram-512"
     assert store.vectors("field").matrix.shape == (9, 512)
     with closing(sqlite3.connect(report.db_path)) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM meta_vector").fetchone() == (9,)         # 没有旧向量残留
+        assert conn.execute("SELECT COUNT(*) FROM meta_vector").fetchone() == (12,)        # 9 个字段、3 张表，没有旧向量残留
         assert dict(conn.execute("SELECT key, value FROM meta_info")) == {"embedder": "hash-bigram-512", "dim": "512"}
 
 
@@ -454,11 +482,11 @@ def test_unchanged_texts_reuse_previous_vectors_without_calling_the_embedder(tin
 
     bundle, section = build_vectors(mart, RefusingHashEmbedder(), previous=previous, before_embed=hints.append)
 
-    for kind in ("field", "example"):
+    for kind in ("field", "table", "example"):
         assert np.array_equal(bundle.sets[kind].matrix, previous.sets[kind].matrix)   # 逐位就是上一版的
     assert hints == []                                 # 不用加载模型，也就不提示
     text = "\n".join(section.lines)
-    assert "不同的文本 10 条：复用上一版 10 条，新算 0 条" in text
+    assert "不同的文本 13 条：复用上一版 13 条，新算 0 条" in text
     assert "全部复用，没有调用向量器" in text
 
 
@@ -474,14 +502,15 @@ def test_only_new_texts_are_embedded_and_a_sample_of_reused_ones_is_checked():
     field = bundle.sets["field"]
     renamed = field.ref_ids.index("dim.org.org_nm")
     assert field.texts[renamed].endswith("机构全称")
-    assert embedder.batches == hints == [33]           # 1 条新文本，加上从 92 条复用的文本里抽查的 32 条
+    assert embedder.batches == hints == [34]           # 2 条新文本（改名的字段、它所在表的表文本），加上抽查的 32 条
     assert embedder.texts[0] == field.texts[renamed]
-    assert len(set(embedder.texts[1:])) == 32 and field.texts[renamed] not in embedder.texts[1:]
+    assert embedder.texts[1] == bundle.sets["table"].texts[bundle.sets["table"].ref_ids.index("dim.org")]
+    assert len(set(embedder.texts[2:])) == 32 and field.texts[renamed] not in embedder.texts[2:]
     assert np.array_equal(field.matrix[renamed], HashEmbedder().embed([field.texts[renamed]])[0])
     others = [row for row in range(len(field.ref_ids)) if row != renamed]
     assert np.array_equal(field.matrix[others], previous.sets["field"].matrix[others])     # 抽查过的也用上一版的
     text = "\n".join(section.lines)
-    assert "不同的文本 93 条：复用上一版 92 条，新算 1 条" in text
+    assert "不同的文本 107 条：复用上一版 105 条，新算 2 条" in text      # 93 个字段、14 张表
     assert "抽查复用的 32 条，与重算的余弦最低 1.0000" in text
 
 
@@ -500,9 +529,9 @@ def test_reused_vectors_that_disagree_with_the_model_are_all_recomputed():
 
     field = bundle.sets["field"]
     assert np.array_equal(field.matrix, HashEmbedder().embed(field.texts))
-    assert embedder.batches == [33, 60]                # 抽查对不上，剩下的 60 条也重算
+    assert embedder.batches == [47, 60]                # 新的 15 条（改名的字段、14 条表文本）加抽查的 32 条；对不上，剩下 60 条也重算
     text = "\n".join(section.lines)
-    assert "不同的文本 93 条：全部新算（抽查复用的 32 条" in text and "向量模型可能换过" in text
+    assert "不同的文本 107 条：全部新算（抽查复用的 32 条" in text and "向量模型可能换过" in text
 
 
 def test_vectors_from_another_embedder_are_not_reused(tiny_mart):
@@ -512,7 +541,7 @@ def test_vectors_from_another_embedder_are_not_reused(tiny_mart):
 
     bundle, section = build_vectors(mart, embedder, previous=previous)
 
-    assert embedder.batches == [9]
+    assert embedder.batches == [12]                    # 9 个字段、3 张表
     assert np.array_equal(bundle.sets["field"].matrix, HashEmbedder().embed(bundle.sets["field"].texts))
     assert ("全部新算（上一版的向量器是 hash-bigram-256（256 维），这次是 hash-bigram-512（512 维））"
             in "\n".join(section.lines))
@@ -529,11 +558,12 @@ def test_identical_texts_are_embedded_once(tiny_mart):
 
     bundle, section = build_vectors(mart, embedder)
 
-    field = bundle.sets["field"]
-    assert len(field.ref_ids) == 13 and embedder.batches == [9]
+    field, table = bundle.sets["field"], bundle.sets["table"]
+    assert len(field.ref_ids) == 13 and embedder.batches == [12]          # 9 个字段文本、3 个表文本（两张账户表的一样）
     assert np.array_equal(field.matrix[field.ref_ids.index("ods.acct_hist.bal")],
                           field.matrix[field.ref_ids.index("ods.acct.bal")])
-    assert "不同的文本 9 条：全部新算（没有上一版的向量）" in "\n".join(section.lines)
+    assert np.array_equal(table.matrix[table.ref_ids.index("ods.acct_hist")], table.matrix[table.ref_ids.index("ods.acct")])
+    assert "不同的文本 12 条：全部新算（没有上一版的向量）" in "\n".join(section.lines)
 
 
 def test_texts_without_any_feature_do_not_look_like_a_changed_model(tiny_mart):
@@ -545,7 +575,7 @@ def test_texts_without_any_feature_do_not_look_like_a_changed_model(tiny_mart):
                                     previous=previous)
 
     text = "\n".join(section.lines)
-    assert "复用上一版 9 条，新算 1 条" in text and "可能换过" not in text      # 零向量也被抽查到了
+    assert "复用上一版 11 条，新算 2 条" in text and "可能换过" not in text     # 改名的字段和它的表文本；零向量也被抽查到了
     assert not bundle.sets["example"].matrix.any()
 
 
@@ -556,7 +586,7 @@ def test_reimport_reuses_every_vector_without_calling_the_embedder(tiny_mart):
 
     assert dump(report.db_path) == first
     text = (tiny_mart / "build" / "import_report.md").read_text(encoding="utf-8")
-    assert "复用上一版 9 条，新算 0 条" in text and "全部复用，没有调用向量器" in text
+    assert "复用上一版 12 条，新算 0 条" in text and "全部复用，没有调用向量器" in text
 
 
 def test_reindex_recomputes_every_vector(tiny_mart):
@@ -565,7 +595,7 @@ def test_reindex_recomputes_every_vector(tiny_mart):
 
     report = run_import(tiny_mart, embedder=embedder, reindex=True)
 
-    assert embedder.batches == [9]
+    assert embedder.batches == [12]                    # 9 个字段、3 张表
     assert "全部新算（加了 --reindex）" in report.to_markdown()
 
 

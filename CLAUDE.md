@@ -41,7 +41,7 @@ start.bat                                 # Windows 同时起接口和界面（h
 ```
 四张清单（表、字段、血缘、关联关系）+ 加工脚本 + 历史样例
   → metadata/loader 读取 → checks 校验 → script_parser 解析脚本、补血缘 → relations 推导关联
-  → examples 收样例（入库前过静态校验）→ index 算字段和样例向量 → store 写进 SQLite 元数据库
+  → examples 收样例（入库前过静态校验）→ index 算字段、表和样例向量 → store 写进 SQLite 元数据库
 ```
 
 - `metadata/store.py` 的 `MetadataStore` 是只读入口，构造时全部读进内存
@@ -64,7 +64,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 
 - `schemas.py`：各步骤的输入输出，是模块之间的契约；`llm.py`：模型调用（`ChatModelClient`、测试用的 `ScriptedLLM`、带重试的 `structured_call`）
 - `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（加工链路里重复的跳和条件只写一次，第 5 张以后召回的表只列关键字段，上溯、样例带入的表照旧全列；超过 4 万字按九级收缩；④ 按层级从上往下选表：专题层、汇总层、标准层、贴源层）
-- `retriever.py` 候选召回（关键字加向量，三层范围；表清单「标准表」填「否」的表单独排名，最多补 3 张，不占标准表的名额）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
+- `retriever.py` 候选召回（关键字、字段向量两路找字段，加上表向量（表中文名、说明、字段中文名）和整句按表排名，三层范围；表清单「标准表」填「否」的表单独排名，最多补 3 张，不占标准表的名额）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
 - `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；请求带 `model` 时由 `PipelineDeps.llm_for`（`service.model_client`）取那个模型，另编一张图按模型名缓存，结果记下 `model`；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
 - `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB
 - 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`，上一轮校验通过时还有 `prev_sql`、`prev_tables`，规则见 `QueryResult.next_context`）。① 判断本轮是在上一轮上追问（`follows_up`）时，② 把上一轮的表放进候选，④ ⑤ 以上一轮的 SQL 为底增量修改，不多调模型。以它为底之前先用当前元数据校验，元数据换过版本、表或字段没了就不以它为底，按完整需求重新生成，原因写进结果的假设；每一轮结果记下元数据版本号（`metadata_version`）

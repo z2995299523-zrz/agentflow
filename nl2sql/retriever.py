@@ -16,8 +16,14 @@
 打分：
     关键字路  汉字二元组和英文单词的覆盖率：字段中文名占 0.7，表中文名占 0.3，检索词是字段中文名的子串再加 0.2
     向量路    字段向量与检索词向量的余弦相似度
-    每个检索词两路各取前 PER_TERM_K 名，按名次做 RRF 合并；
-    表得分 = 各检索词在该表命中字段里的最高分，乘以角色权重后相加。
+    表向量路  表向量（表中文名、说明、字段中文名清单）与检索词向量的余弦相似度，按表排名
+    整句      完整需求的向量与表向量的余弦相似度，按表排名
+    每个检索词的字段两路各取前 PER_TERM_K 名，按名次做 RRF 合并；表向量路、整句各取前 TABLE_PATH_K 张表，也按名次算 RRF。
+    表得分 = 各检索词（在该表命中字段里的最高分 + 表向量路 RRF × TABLE_VECTOR_WEIGHT）乘以角色权重后相加，
+    再加整句 RRF × REQUIREMENT_WEIGHT。表向量路、整句只用在第 0 层和非标准表的排名上；元数据库里没有表向量
+    （表向量加进来之前导入的）时不走这两路，其余照旧。
+    这两路补的是字段两路看不到的东西：表名、字段名里没有检索词，说明和整张表的字段构成却正是在讲这件事的表。
+    在真实库 215 道题上离线比过，标准用表进候选 184→193 题，模拟库 37 题不变。
 通用字段（表的数据日期、行编号一类的通用键名、同一层里半数以上的表都有的样板字段）只在检索词本身提到它们的名字时才计分：
 真实库上检索词恰好是表名的一部分时，表名会给这张表的每个字段都加分，它们就会占满命中字段的前几位。
 加工脚本里恒为空、取加工时间的字段不参与召回。
@@ -34,7 +40,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from lineage.graph import LineageGraph
-from metadata.index import EXAMPLE_KIND, FIELD_KIND, TOKEN_PATTERN, Embedder, VectorIndex, field_ref_id
+from metadata.index import EXAMPLE_KIND, FIELD_KIND, TABLE_KIND, TOKEN_PATTERN, Embedder, VectorIndex, field_ref_id
 from metadata.models import DIRECT_LAYERS, LAYERS
 from metadata.relations import GENERIC_KEY_NAMES
 from metadata.store import MetadataStore
@@ -48,6 +54,9 @@ MAX_EXAMPLES = 3
 PER_TERM_K = 30
 RRF_K = 60
 ROLE_WEIGHTS = {"metric": 1.0, "dimension": 0.7, "filter": 0.5}
+TABLE_PATH_K = 20                            # 表向量路、整句各取前几张表；离线比过取 30 张时变差的多
+TABLE_VECTOR_WEIGHT = 1.0                    # 表向量路的 RRF 分再乘以它（之后和字段的分一样乘角色权重）
+REQUIREMENT_WEIGHT = 2.0                     # 整句的 RRF 分乘以它；离线比过 1 和 2，2 稍好
 
 MAX_HITS_PER_TABLE = 5                       # 每张候选表最多列出的命中字段
 COLUMN_WEIGHT = 0.7                          # 关键字路：字段中文名覆盖率的权重
@@ -228,6 +237,7 @@ class Retriever:
             self._add_table(table.table_id)
 
         self._field_index, self._example_index, self._vector_note = self._open_vectors()
+        self._table_index = self._open_table_vectors()
         self._examples = store.examples()
         self._example_features = {example.example_id: _features(example.requirement) for example in self._examples}
 
@@ -294,6 +304,13 @@ class Retriever:
             example_vectors = self._store.vectors(EXAMPLE_KIND)
             return VectorIndex(field_vectors), VectorIndex(example_vectors) if example_vectors else None, None
         return None, None, f"{reason}，字段只走关键字路，样例只按文字相似度排序"
+
+    def _open_table_vectors(self) -> VectorIndex | None:
+        """表向量索引；向量路用不了，或元数据库里没有表向量（表向量加进来之前导入的）时为 None，不走表向量路和整句"""
+        if self._vector_note is not None:
+            return None
+        table_vectors = self._store.vectors(TABLE_KIND)
+        return VectorIndex(table_vectors) if table_vectors is not None and table_vectors.ref_ids else None
 
     # ── 范围 ──
 
@@ -384,9 +401,10 @@ class Retriever:
         kept = self._keep_upstream(upstream, upstream_scored)
         taken = set(kept)       # 上游表单独排名；没留下的维表仍在第 0 层里，回到池子里和专题层的表一起排
         pool = [table_id for table_id in (scope if all_layers else self._level0) if table_id not in taken]
-        scored, matched = self._score_tables(terms, vectors, pool)
+        scored, matched = self._score_tables(terms, vectors, pool, requirement_vector, table_paths=True)
         # 非标准表在自己的范围里单独找命中字段，不和标准表争字段名次和候选名额
-        extra_scored, extra_matched = ({}, set()) if all_layers else self._score_tables(terms, vectors, self._extra_pool)
+        extra_scored, extra_matched = ({}, set()) if all_layers else self._score_tables(
+            terms, vectors, self._extra_pool, requirement_vector, table_paths=True)
         notes += [f"检索词「{term.text}」没有命中任何字段"
                   for position, term in enumerate(terms) if position not in matched | upstream_matched | extra_matched]
 
@@ -465,7 +483,7 @@ class Retriever:
         if self._vector_note is not None or self._embedder is None:
             return None, None
         texts = [term.text for term in terms]
-        with_requirement = bool(requirement.strip()) and self._example_index is not None
+        with_requirement = bool(requirement.strip()) and (self._example_index is not None or self._table_index is not None)
         if with_requirement:
             texts.append(requirement)
         if not texts:
@@ -487,12 +505,20 @@ class Retriever:
 
     # ── 字段两路召回 ──
 
-    def _score_tables(self, terms: list[_Term], vectors: np.ndarray | None,
-                      tables: Collection[str]) -> tuple[dict[str, _TableScore], set[int]]:
+    def _score_tables(self, terms: list[_Term], vectors: np.ndarray | None, tables: Collection[str],
+                      requirement_vector: np.ndarray | None = None, *,
+                      table_paths: bool = False) -> tuple[dict[str, _TableScore], set[int]]:
         """在给定的这些表里，为每个检索词两路找字段、RRF 合并，再按表归组
 
+        Args:
+            terms: 检索词
+            vectors: 检索词的向量，向量路用不了时为 None
+            tables: 范围
+            requirement_vector: 完整需求的向量，table_paths 时用来走整句
+            table_paths: 加上表向量路和整句（元数据库里有表向量时）；只靠这两路得分的表也算有命中，但没有命中字段
+
         Returns:
-            (有命中的表 → 得分, 有命中的检索词序号)
+            (有命中的表 → 得分, 字段有命中的检索词序号)
         """
         scope = set(tables)
         if not scope or not terms:
@@ -527,15 +553,44 @@ class Retriever:
                         table_id=item.table_id, column_name=item.column_name, column_cn=item.column_cn,
                         term=term.text, score=weighted, via=via))
 
+        whole = self._add_table_paths(terms, vectors, scope, requirement_vector, best) if table_paths else {}
+
         by_table: dict[str, list[tuple[float, int, str, FieldHit]]] = defaultdict(list)
         for index, (weighted, position, hit) in hits.items():
             by_table[hit.table_id].append((-_round(weighted), position, self._fields[index].ref, hit))
         scored = {}
-        for table_id, row in best.items():
-            ordered = sorted(by_table[table_id], key=lambda entry: entry[:3])
-            scored[table_id] = _TableScore(score=sum(row), terms=sum(1 for value in row if value > 0),
+        for table_id in sorted(set(best) | set(whole)):
+            row = best.get(table_id, ())
+            ordered = sorted(by_table.get(table_id, ()), key=lambda entry: entry[:3])
+            scored[table_id] = _TableScore(score=sum(row) + whole.get(table_id, 0.0),
+                                           terms=sum(1 for value in row if value > 0),
                                            hits=[entry[3] for entry in ordered[:MAX_HITS_PER_TABLE]])
         return scored, matched
+
+    def _add_table_paths(self, terms: list[_Term], vectors: np.ndarray | None, scope: set[str],
+                         requirement_vector: np.ndarray | None, best: dict[str, list[float]]) -> dict[str, float]:
+        """表向量路和整句：范围内的表按表向量与检索词、与完整需求的相似度排名，名次的 RRF 分加到表上
+
+        表向量路的分乘以 TABLE_VECTOR_WEIGHT 和角色权重，直接加进 best（表 → 每个检索词的得分）；
+        整句的分乘以 REQUIREMENT_WEIGHT，不算在哪个检索词上，作为返回值另加。没有表向量时什么也不做。
+
+        Returns:
+            表 → 整句的得分
+        """
+        whole: dict[str, float] = {}
+        if self._table_index is None:
+            return whole
+        if vectors is not None:
+            for position, term in enumerate(terms):
+                if not np.any(vectors[position]):
+                    continue
+                for rank, (table_id, _) in enumerate(self._table_index.search(vectors[position], TABLE_PATH_K, scope), 1):
+                    row = best.setdefault(table_id, [0.0] * len(terms))
+                    row[position] += TABLE_VECTOR_WEIGHT * term.weight * _rrf(rank)
+        if requirement_vector is not None and np.any(requirement_vector):
+            for rank, (table_id, _) in enumerate(self._table_index.search(requirement_vector, TABLE_PATH_K, scope), 1):
+                whole[table_id] = REQUIREMENT_WEIGHT * _rrf(rank)
+        return whole
 
     def _allowed_refs(self, scope: Collection[str]) -> set[str]:
         """向量路可以检索的字段编号：范围内的非通用字段"""

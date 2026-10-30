@@ -18,7 +18,7 @@ from lineage.graph import LineageGraph
 from metadata.importer import enrich_mart, load_mart
 from metadata.index import HashEmbedder, build_vectors
 from metadata.models import ColumnMeta, Example, LineageEdge, Mart, ScriptColumn, TableMeta
-from metadata.store import MetadataStore
+from metadata.store import MetadataStore, VectorBundle
 from nl2sql import retriever as retriever_module
 from nl2sql.retriever import (
     MAX_EXAMPLES,
@@ -592,3 +592,27 @@ def test_a_field_written_by_several_statements_is_excluded_only_when_every_one_i
     result = make_retriever(make_mart(tables, script_columns=script_columns)).recall(RecallQuery("x", ["存款余额"]))
 
     assert hit_names(result) == {"null_then_real", "real_then_null", "plain", "unscripted"}      # 第一条是空值也不能排除
+
+
+# ── 表向量路、整句 ──────────────────────────────────────
+
+def test_the_table_whose_description_matches_ranks_first_through_the_table_vector():
+    """两张表字段一模一样，只有 b 的说明讲的是对公贷款余额：字段两路分不出来，表向量和整句把 b 排到前面；
+    表向量加进来之前导入的元数据库没有表向量，召回照旧，不报错"""
+    mart = make_mart([("ads.a_bal", "余额表", [("cust_no", "客户号"), ("bal", "余额")]),
+                      ("ads.b_bal", "余额表", [("cust_no", "客户号"), ("bal", "余额")])])
+    mart = mart.model_copy(update={"tables": [
+        table.model_copy(update={"description": "按客户统计的对公贷款余额"}) if table.table_id == "ads.b_bal" else table
+        for table in mart.tables]})
+    bundle = build_vectors(mart, HashEmbedder())[0]
+    old = VectorBundle(embedder=bundle.embedder, dim=bundle.dim,
+                       sets={kind: vector_set for kind, vector_set in bundle.sets.items() if kind != "table"})
+    query = RecallQuery("查询对公贷款余额", ["对公贷款余额"])
+
+    def order(vectors: VectorBundle) -> tuple[list[str], list[str]]:
+        store = MetadataStore.from_mart(mart, vectors)
+        result = Retriever(store, LineageGraph(store), HashEmbedder()).recall(query)
+        return [item.table_id for item in result.tables], result.notes
+
+    assert order(bundle) == (["ads.b_bal", "ads.a_bal"], [])
+    assert order(old) == (["ads.a_bal", "ads.b_bal"], [])          # 没有表向量：字段两路上 a 的字段编号小，排在前面

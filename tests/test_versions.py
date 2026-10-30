@@ -180,7 +180,7 @@ def test_reuses_latest_candidate_vectors(tiny_mart, tiny_sheets):
     candidate = versions.import_version(tiny_mart, promote=False, embedder=recording, now=NOW)
     assert any(text.endswith("账户余额") for text in recording.texts)
     assert candidate.active == first.version_id
-    tiny_sheets["表清单"][0][7] = "补充表说明，不影响向量文本"
+    tiny_sheets["字段清单"][3][5] = "原币，补充的口径说明不进向量文本"     # 表说明会进表向量，字段口径说明哪里都不进
     write_mart(tiny_mart, tiny_sheets)
     recording.texts.clear()
 

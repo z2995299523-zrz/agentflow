@@ -33,6 +33,7 @@ from metadata.store import MetadataStore
 from nl2sql.executor import DuckDBExecutor, ExecResult, Executor
 from nl2sql.schemas import INTERNAL_STEP, QueryRequest, QueryResult
 from nl2sql.validator import SqlValidator
+from prompts.nl2sql import FULL_FIELD_TABLES
 
 CONFIGS: dict[str, tuple[bool, bool]] = {"A": (False, False), "B": (True, False), "C": (True, True)}  # (use_lineage, use_examples)
 CONFIG_NAMES = {"A": "仅模型结构", "B": "加血缘", "C": "加血缘和样例"}
@@ -911,10 +912,14 @@ def _render_static_report(outcomes: list[StaticOutcome]) -> str:
         "## 一、汇总", "",
         "| 指标 | 结果 |", "|---|---|",
         f"| 标准用表进入候选 | {_rate_text(sum(item.recall_ok for item in outcomes), total)} |",
+        f"| 标准用表进前 {FULL_FIELD_TABLES} 名（证据里全列字段） | "
+        f"{_rate_text(sum(1 for item in outcomes if item.best_rank and item.best_rank <= FULL_FIELD_TABLES), total)} |",
         f"| SQL 用的表包含标准用表 | {_rate_text(sum(item.tables_ok for item in outcomes), total)} |",
         f"| 有 SQL 的题里校验通过（0 错误） | {_rate_text(sum(item.validation_ok is True for item in with_sql), len(with_sql))} |",
         f"| 给出了 SQL | {_rate_text(len(with_sql), total)} |",
         f"| 反问过 | 一次 {asked_once} 题，两次 {asked_twice} 题（题目给了口径的，第一次反问自动回答） |", "",
+        f"前 {FULL_FIELD_TABLES} 名的候选表在证据里列全部字段，后面召回的表只列关键字段和关联键，所以标准用表排进前 "
+        f"{FULL_FIELD_TABLES} 名才算模型看得全。",
         "名次的算法：一组标准用表的名次，是这组表里排得最靠后的那张在候选里的位置（从 1 开始），"
         "也就是取前几张候选才能把这一组凑齐；组里有一张表不在候选里，这一组没有名次；"
         "有几组时取名次最小的一组；没有任何一组有名次时记为「—」。", "",

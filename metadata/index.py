@@ -1,6 +1,6 @@
 """
 向量索引
-字段文本（表中文名、字段中文名）和样例文本（需求、口径）的向量化与检索。
+字段文本（表中文名、字段中文名）、表文本（表中文名、说明、字段中文名清单）和样例文本（需求、口径）的向量化与检索。
 向量和元数据存在同一个元数据库里，检索时用 numpy 算全量相似度，不用向量数据库。
 重新导入时按文本复用上一次的向量，只算新出现的文本，全部能复用时不加载模型。
 
@@ -28,6 +28,8 @@ EMBEDDER_ENV = "METADATA_EMBEDDER"     # bge（默认）或 hash
 SECTION_VECTORS = "向量"
 FIELD_KIND = "field"                   # 向量集的类别：字段
 EXAMPLE_KIND = "example"               # 向量集的类别：样例
+TABLE_KIND = "table"                   # 向量集的类别：表
+TABLE_TEXT_FIELD_CHARS = 300           # 表文本里字段中文名清单最多留多少字
 NORM_TOLERANCE = 1e-3                  # 向量长度与 1 相差不超过这个数，就认为已经归一化
 REUSE_CHECK_SAMPLES = 32               # 这次要调向量器时，顺带重算几条复用的文本，核对向量模型没有换过
 REUSE_MIN_COSINE = 0.9999              # 复用的向量与重算的余弦低于这个数，就认为向量模型换过，全部重算
@@ -252,6 +254,17 @@ def field_text(table: TableMeta, column: ColumnMeta) -> str:
     return " ".join(part for part in (table.table_cn, column.column_cn) if part)
 
 
+def table_text(table: TableMeta, columns: Sequence[ColumnMeta]) -> str:
+    """表向量化用的文本：表中文名、说明、字段中文名清单（截到 TABLE_TEXT_FIELD_CHARS 字），用空格连接
+
+    字段向量回答「哪个字段像检索词」，表向量回答「哪张表讲的是这件事」：说明里的业务域、粒度和整张表有哪些字段，
+    能把表名里没有检索词、却正是在讲这件事的表找出来。在真实库 215 道题上离线比过：只用中文名和说明时，
+    说明里碰巧提到检索词的表会被抬上来，变差的比变好的多；加上字段中文名清单后变好的多。
+    """
+    names = "、".join(column.column_cn for column in columns if column.column_cn)[:TABLE_TEXT_FIELD_CHARS]
+    return " ".join(part for part in (table.table_cn, table.description, f"字段：{names}" if names else "") if part)
+
+
 def example_text(example: Example) -> str:
     """样例向量化用的文本：需求、口径，用空格连接，没有口径就省去"""
     return " ".join(part for part in (example.requirement, example.caliber_note) if part)
@@ -330,9 +343,10 @@ def _cosine(first: np.ndarray, second: np.ndarray) -> float:
 def build_vectors(mart: Mart, embedder: Embedder, batch_size: int = 256, *,
                   previous: VectorBundle | None = None, previous_note: str = "",
                   before_embed: Callable[[int], None] | None = None) -> tuple[VectorBundle, ReportSection]:
-    """为全部字段和样例算向量；给了上一版的向量时，文本相同的直接复用，只算新出现的文本
+    """为全部字段、表和样例算向量；给了上一版的向量时，文本相同的直接复用，只算新出现的文本
 
-    字段向量的顺序与 mart.columns 一致，样例向量的顺序与 mart.examples 一致，同样的资料每次得到同样的结果。
+    字段向量的顺序与 mart.columns 一致，表向量与 mart.tables 一致，样例向量与 mart.examples 一致，
+    同样的资料每次得到同样的结果。
     同样的文本只算一次。上一版的向量器名称或维度与这次的不同时，一条也不复用。
     全部能复用时不调用向量器，BGE 也就不用加载。复用了一部分、又要调向量器算新文本时，顺带从复用的文本里
     均匀抽 REUSE_CHECK_SAMPLES 条重算核对：余弦低于 REUSE_MIN_COSINE 说明向量模型换过（名字没变），全部重算；
@@ -359,16 +373,19 @@ def build_vectors(mart: Mart, embedder: Embedder, batch_size: int = 256, *,
     started = time.perf_counter()
 
     tables = {table.table_id: table for table in mart.tables}
+    columns_of: dict[str, list[ColumnMeta]] = {table_id: [] for table_id in tables}
     field_ids: list[str] = []
     field_texts: list[str] = []
     for column in mart.columns:
         table = tables.get(column.table_id)
         if table is not None:
+            columns_of[column.table_id].append(column)
             field_ids.append(field_ref_id(column.table_id, column.column_name))
             field_texts.append(field_text(table, column))
+    table_texts = [table_text(table, columns_of[table.table_id]) for table in mart.tables]
     example_texts = [example_text(example) for example in mart.examples]
 
-    unique = list(dict.fromkeys(field_texts + example_texts))         # 去重，保持首次出现的顺序
+    unique = list(dict.fromkeys(field_texts + table_texts + example_texts))   # 去重，保持首次出现的顺序
     reusable, reason = _reusable_vectors(previous, previous_note, embedder, unique)
     missing = [text for text in unique if text not in reusable]
     samples = _spread([text for text in unique if text in reusable], REUSE_CHECK_SAMPLES) if missing else []
@@ -390,7 +407,9 @@ def build_vectors(mart: Mart, embedder: Embedder, batch_size: int = 256, *,
         return np.array([vectors[text] for text in texts], dtype=np.float32).reshape(len(texts), embedder.dim)
 
     sets = {FIELD_KIND: VectorSet(kind=FIELD_KIND, ref_ids=field_ids, texts=field_texts,
-                                  matrix=matrix_of(field_texts))}
+                                  matrix=matrix_of(field_texts)),
+            TABLE_KIND: VectorSet(kind=TABLE_KIND, ref_ids=[table.table_id for table in mart.tables],
+                                  texts=table_texts, matrix=matrix_of(table_texts))}
     if mart.examples:
         sets[EXAMPLE_KIND] = VectorSet(kind=EXAMPLE_KIND, ref_ids=[example.example_id for example in mart.examples],
                                        texts=example_texts, matrix=matrix_of(example_texts))
@@ -408,6 +427,7 @@ def build_vectors(mart: Mart, embedder: Embedder, batch_size: int = 256, *,
         f"- 向量器：{embedder.name}",
         f"- 维度：{embedder.dim}",
         f"- 字段向量：{len(field_ids)} 条",
+        f"- 表向量：{len(mart.tables)} 条",
         f"- 样例向量：{len(mart.examples)} 条",
         *reuse_lines,
         f"- 耗时：{elapsed:.2f} 秒",
