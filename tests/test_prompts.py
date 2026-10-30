@@ -106,6 +106,11 @@ def evidence_for(plan: QueryPlan) -> Evidence:
 
 # ── 系统提示词是固定的，带 JSON 格式示例 ────────
 
+@pytest.mark.parametrize("system", [PARSER_SYSTEM, PLANNER_SYSTEM, GENERATOR_SYSTEM])
+def test_system_prompts_introduce_a_laboratory_mart_and_never_say_bank(system):
+    assert system.startswith("你是实验室数据仓库专题库的") and "银行" not in system
+
+
 @pytest.mark.parametrize("system", [PARSER_SYSTEM, PLANNER_SYSTEM])
 def test_json_steps_ask_for_json_only_and_show_the_format(system):
     assert "只输出 JSON" in system and "json" in system.lower()
