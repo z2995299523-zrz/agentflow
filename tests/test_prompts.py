@@ -109,6 +109,7 @@ def evidence_for(plan: QueryPlan) -> Evidence:
 @pytest.mark.parametrize("system", [PARSER_SYSTEM, PLANNER_SYSTEM, GENERATOR_SYSTEM])
 def test_system_prompts_introduce_a_laboratory_mart_and_never_say_bank(system):
     assert system.startswith("你是实验室数据仓库专题库的") and "银行" not in system
+    assert not re.search("贷款|存款|保证金|客户经理|分行", system)        # 示例也是实验室领域的，不让回复里冒出银行用语
 
 
 @pytest.mark.parametrize("system", [PARSER_SYSTEM, PLANNER_SYSTEM])
@@ -147,18 +148,18 @@ def test_the_parser_examples_show_both_an_answer_and_a_new_question_after_a_clar
     assert answer.answers_clarify and answer.clarify is None and "第一个选项" in answer.assumptions[0]
     assert not new_question.answers_clarify and new_question.clarify is not None
     assert "没有回答上一轮的反问" in new_question.assumptions[0]
-    assert "保证金" not in new_question.requirement                     # 上一轮的需求和反问都不带过来
+    assert "外拨" not in new_question.requirement                       # 上一轮的需求和反问都不带过来
 
 
 def test_the_parser_example_lists_objects_as_a_query_even_after_an_unrelated_round():
     """只列某类对象的信息也是查数需求：指标写对象的叫法、不带被计数的实体；和上一轮接不上时按新需求解析"""
-    before, _, after = PARSER_SYSTEM.partition("用户输入：查询客户经理的信息")
+    before, _, after = PARSER_SYSTEM.partition("用户输入：查询项目负责人的信息")
     parsed = ParsedRequest.model_validate(json.loads(json_blocks(after)[0]))
 
     assert before.rstrip().splitlines()[-1].startswith("上一轮的完整需求：")
     assert parsed.is_query and parsed.clarify is None and parsed.dimensions == []
-    assert [(metric.name, metric.entity) for metric in parsed.metrics] == [("客户经理", "")]     # 列明细，不是计数
-    assert "合同" not in parsed.requirement                                                 # 上一轮的合同数不带过来
+    assert [(metric.name, metric.entity) for metric in parsed.metrics] == [("项目负责人", "")]   # 列明细，不是计数
+    assert "协议" not in parsed.requirement                                                 # 上一轮的协议数不带过来
 
 
 def test_planner_examples_are_valid_plans_covering_the_four_decisions():

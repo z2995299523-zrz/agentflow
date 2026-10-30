@@ -157,7 +157,7 @@ def check_plan(plan: QueryPlan, evidence: Evidence, *, allow_clarify: bool, allo
             return ["本次不能上溯（没有可用的上游表），请改用 ok：在候选的表里按最可能的理解给出方案并写进 assumptions；"
                     "确实做不到就用 cannot_answer 并在 reason 里写明原因"]
         if not any(item.strip() for item in plan.missing):
-            return ["decision 是 need_upstream 时必须在 missing 里写缺什么，写成字段的叫法，例如 [\"币种\"]"]
+            return ["decision 是 need_upstream 时必须在 missing 里写缺什么，写成字段的叫法，例如 [\"预算科目\"]"]
         return []
     if not plan.reason.strip():
         return ["decision 是 cannot_answer 时必须在 reason 里写明元数据里做不到的原因"]

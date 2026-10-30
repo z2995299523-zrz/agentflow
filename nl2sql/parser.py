@@ -141,8 +141,8 @@ def check_parsed(parsed: ParsedRequest, *, pending_clarify: bool = False, has_pr
         allow_clarify = not (pending_clarify and parsed.answers_clarify)
         return problems + _check_clarify(parsed, allow_clarify) + _check_time(parsed.time)
     if not any(metric.name.strip() for metric in parsed.metrics):
-        problems.append("metrics 里没有指标，至少要写一个指标（业务叫法，如「对公贷款余额」；明细查询写最主要的度量字段，"
-                        "只列某类对象的信息时写这类对象的叫法，如「客户经理」）；"
+        problems.append("metrics 里没有指标，至少要写一个指标（业务叫法，如「预算余额」；明细查询写最主要的度量字段，"
+                        "只列某类对象的信息时写这类对象的叫法，如「项目负责人」）；"
                         "如果用户既没说指标、也没说要看哪类对象，请把 is_query 改成 false，在 reply 里请用户补充")
     return problems + _check_time(parsed.time)
 
