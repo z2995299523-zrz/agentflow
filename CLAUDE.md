@@ -71,6 +71,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 - `executor.py`：执行层（none、duckdb 或 sqlite，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB、SQLite（SQLite 没有日期类型，`to_sqlite` 改写语法树，ROLLUP、百分位函数跑不了）
 - 查询结果不能发给大模型：执行在第 ⑦ 步，三次模型调用都在它之前，结果和执行报错只给界面，追问的上下文也不带，`test_query_results_and_execution_errors_never_reach_the_model` 守着。别加把数据发给模型的功能（结果解读、取样本值、把数据库报错原文喂回模型）
 - sqlite 执行层用的是 `metadata/testdata.py` 按元数据造的假数据（结果的 note 和界面写明不是业务数据），`TEST_DATA_DB` 指文件，空着用资料目录里的
+- 看板：输入框下面的开关默认打开，请求带 `execute`，关掉只生成 SQL。问题里写明形式时 `output.detect_display` 认出来放进结果的 `display`；没写时界面反问，列出 `web/src/utils/chartPlan.ts` 算出的这份结果能用的形式（指标卡、折线图、条形图、柱状图、饼图、表格），点一下用 ECharts 在浏览器里画，不再查询，也不调模型
 - 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`，上一轮校验通过时还有 `prev_sql`、`prev_tables`，规则见 `QueryResult.next_context`）。① 判断本轮是在上一轮上追问（`follows_up`）时，② 把上一轮的表放进候选，④ ⑤ 以上一轮的 SQL 为底增量修改，不多调模型。以它为底之前先用当前元数据校验，元数据换过版本、表或字段没了就不以它为底，按完整需求重新生成，原因写进结果的假设；每一轮结果记下元数据版本号（`metadata_version`）
 - 对照实验开关 `use_lineage`、`use_examples`：A 组 False/False（全部层级召回、只给表结构推得出的关联、不上溯），B 组 True/False，C 组 True/True
 
@@ -83,7 +84,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
   - 元数据库文件变了（导入、promote、rollback）：`service.get_metadata` 在后台读好再换，期间照常返回旧版本，读失败继续用旧的、同一个文件不重试；`/health` 报 `metadata_reloading`、`reload_error`。服务器切资料是改 `MART_DIR` 再重启，不走这条
   - 启动时在后台线程预热（`service.warm_up`：装配流水线、加载 BGE）
 - `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问；那一轮校验通过时还有它的 SQL 和用到的表
-- `web/`：查数页（右上角选模型、七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果图表（按字段选图，`utils/chartPlan.ts`）和分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
+- `web/`：查数页（右上角选模型、七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果看板和分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
 - `eval/`：43 题题库（11 题登记了其它正确答案；「反问之后」3 题测上一轮停在反问上的下一轮，第一轮没反问按答错计）、结果比对、三组对照评估与错题归因、真实库静态评估、召回重放命令（`recall_replay.py`，结果存在 `build/replay/`，只测得了第 ② 步，改了 ① 的提示词要重跑评估）；报告在 `eval/reports/`
 
 ## 约定

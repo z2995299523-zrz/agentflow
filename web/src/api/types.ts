@@ -132,6 +132,7 @@ export interface QueryResult {
   candidate_tables: string[]
   recall_notes: string[]
   exec_result: ExecSummary | null
+  display?: string                    // 问题里写明的展示形式，没写时为空串；早先存下的轮次没有这一项
   trace: TraceStep[]
   calls: CallRecord[]
   elapsed_ms: number

@@ -41,6 +41,7 @@ from nl2sql.executor import Executor, NullExecutor
 from nl2sql.generator import generate_sql
 from nl2sql.llm import LLMClient, StepError
 from nl2sql.output import (
+    detect_display,
     format_sql,
     merge_assumptions,
     no_candidate_message,
@@ -403,14 +404,14 @@ class _Steps:
         """SQL 排版、执行，返回（排版后的 SQL，执行结果摘要，轨迹里的一句话）
 
         ok 时把校验器传给 format_sql，核对排版没有引入新错误；unvalidated 本来就有错误，不传。
-        只有 ok 并且配置了执行层才执行。摘要里只写状态、行数这类元数据，不写数据。
+        只有 ok、配置了执行层、请求没有关掉查询（execute）才执行。摘要里只写状态、行数这类元数据，不写数据。
         """
         status = state.get("status")
         sql = ""
         exec_result: ExecSummary | None = None
         if status in (STATUS_OK, STATUS_UNVALIDATED):
             sql = format_sql(state.get("sql", ""), self._deps.validator if status == STATUS_OK else None)
-        if status == STATUS_OK and getattr(self._deps.executor, "name", "none") != "none":
+        if status == STATUS_OK and state["request"].execute and getattr(self._deps.executor, "name", "none") != "none":
             exec_result = self._execute(sql)
         if status == STATUS_OK:
             if exec_result is None:
@@ -483,8 +484,8 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
         validation=state.get("validation"), first_pass_ok=state.get("first_pass_ok"),
         repair_rounds=state.get("repair_rounds", 0), scope_level=state.get("scope_level", 0),
         candidate_tables=candidates, recall_notes=list(recall.notes) if recall is not None else [],
-        exec_result=exec_result, trace=trace, calls=list(state.get("calls", [])),
-        elapsed_ms=int((time.perf_counter() - started) * 1000),
+        exec_result=exec_result, display=detect_display(request.question), trace=trace,
+        calls=list(state.get("calls", [])), elapsed_ms=int((time.perf_counter() - started) * 1000),
     )
 
 

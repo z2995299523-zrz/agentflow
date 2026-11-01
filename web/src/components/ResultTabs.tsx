@@ -210,7 +210,7 @@ export default function ResultTabs({ result }: { result: QueryResult }) {
   if (result.exec_result) {
     const exec = result.exec_result
     items.push({ key: 'exec', label: exec.executed ? `执行结果（${exec.row_count} 行）` : '执行结果',
-                 children: <ExecTable exec={exec} /> })
+                 children: <ExecTable exec={exec} display={result.display ?? ''} /> })
   }
   if (plan && plan.tables.length > 0) {
     items.push({ key: 'tables', label: `用表与字段（${plan.tables.length} 张表）`,

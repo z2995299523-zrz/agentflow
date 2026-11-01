@@ -207,6 +207,18 @@ def test_models_lists_the_models_with_a_key_and_the_default(api, three_models):
     assert [item["name"] for item in body["models"]] == ["deepseek-flash", "qwen3.8-flash", "mimo-v2.6-flash"]
 
 
+def test_every_query_endpoint_hands_the_query_switch_to_the_pipeline(api):
+    client, pipeline = api
+    conversation_id = client.post("/conversations").json()["id"]
+
+    client.post("/nl2sql/query", json={"question": "查余额", "execute": False})
+    client.post("/nl2sql/stream", json={"question": "查余额", "execute": False})
+    client.post(f"/conversations/{conversation_id}/turns", json={"question": "查余额", "execute": False})
+    client.post("/nl2sql/query", json={"question": "查余额"})                     # 不写时默认查询
+
+    assert [request.execute for request in pipeline.requests] == [False, False, False, True]
+
+
 def test_every_query_endpoint_hands_the_chosen_model_to_the_pipeline(api, three_models):
     client, pipeline = api
     conversation_id = client.post("/conversations").json()["id"]

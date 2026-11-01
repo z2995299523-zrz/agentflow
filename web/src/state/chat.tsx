@@ -26,6 +26,8 @@ interface ChatState {
   loadError: string
   pending: PendingTurn | null
   busy: boolean                       // 有一轮正在跑（不管是不是当前会话的）：一次只跑一轮
+  execute: boolean                    // 输入框下面的开关：查询结果并生成看板，默认打开；关掉只生成 SQL
+  setExecute: (value: boolean) => void
   conversations: ConversationSummary[]
   listError: string
   open: (id: string | null) => void
@@ -50,6 +52,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [listError, setListError] = useState('')
   const [running, setRunning] = useState(false)
+  const [execute, setExecute] = useState(true)
   const activeId = useRef<string | null>(null)       // 回调里判断事件是不是当前会话的
   const runningRef = useRef(false)
 
@@ -109,7 +112,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         refreshList()
       }
       const target = id
-      await streamTurn(target, text, model, {
+      await streamTurn(target, text, model, execute, {
         onStep: (step) => {
           if (activeId.current !== target) return
           setPending((current) => (current ? { ...current, steps: [...current.steps, step] } : current))
@@ -137,7 +140,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setRunning(false)
       refreshList()
     }
-  }, [navigate, refreshList, model])
+  }, [navigate, refreshList, model, execute])
 
   const dismissPending = useCallback(() => setPending(null), [])
 
@@ -162,9 +165,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<ChatState>(() => ({
     conversationId, detail, loading, loadError, pending,
-    busy: running,
+    busy: running, execute, setExecute,
     conversations, listError, open, ask, dismissPending, reloadDetail, refreshList, rename, remove,
-  }), [conversationId, detail, loading, loadError, pending, running, conversations, listError, open, ask,
+  }), [conversationId, detail, loading, loadError, pending, running, execute, conversations, listError, open, ask,
        dismissPending, reloadDetail, refreshList, rename, remove])
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>

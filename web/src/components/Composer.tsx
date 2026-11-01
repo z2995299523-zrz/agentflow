@@ -2,9 +2,10 @@
  * 输入框：Enter 发送，Shift+Enter 换行；输入法选字时按 Enter 不发送
  * 上面一行写明这一句会怎么理解：回答上一轮的反问、接着上一轮追问，还是一个新需求。
  * 有反问没回答时也可以直接问新问题（是不是在回答由服务端的 ① 判断），或者开新会话
+ * 下面的开关决定要不要查询结果并生成看板，默认打开；服务端没配执行层时不显示
  */
 import { BranchesOutlined, QuestionCircleOutlined, SendOutlined } from '@ant-design/icons'
-import { Button, Input } from 'antd'
+import { Button, Input, Switch, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import type { KeyboardEvent, Ref } from 'react'
 import { useNavigate } from 'react-router'
@@ -22,9 +23,12 @@ interface Props {
   disabled: boolean
   context: ConversationContext | null
   inputRef: Ref<TextAreaRef>
+  canExecute: boolean                 // 服务端配了执行层
+  execute: boolean
+  onExecute: (value: boolean) => void
 }
 
-export default function Composer({ value, onChange, onSend, busy, disabled, context, inputRef }: Props) {
+export default function Composer({ value, onChange, onSend, busy, disabled, context, inputRef, canExecute, execute, onExecute }: Props) {
   const navigate = useNavigate()
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -65,8 +69,18 @@ export default function Composer({ value, onChange, onSend, busy, disabled, cont
           {busy ? '处理中' : '发送'}
         </Button>
       </div>
-      <div className="composer-hint">
-        Enter 发送，Shift+Enter 换行 · 「现在」「今年」「9 月末」这类说法按今天 {todayText()} 换算 · SQL 请审核后再使用
+      <div className="composer-foot">
+        <div className="composer-hint">
+          Enter 发送，Shift+Enter 换行 · 「现在」「今年」「9 月末」这类说法按今天 {todayText()} 换算 · SQL 请审核后再使用
+        </div>
+        {canExecute && (
+          <Tooltip title="打开时查出结果并生成看板，结果不发给模型；关掉只生成 SQL">
+            <label className="composer-switch">
+              <Switch size="small" checked={execute} onChange={onExecute} aria-label="查询结果并生成看板" />
+              查询结果并生成看板
+            </label>
+          </Tooltip>
+        )}
       </div>
     </div>
   )

@@ -121,12 +121,15 @@ export interface TurnHandlers {
   onTurn: (event: TurnEvent) => void
 }
 
-/** 在会话里问一轮：边跑边回调每一步，最后回调存下的这一轮；出错或没收到结果时抛 ApiError。model 不传用默认模型 */
-export async function streamTurn(conversationId: string, question: string, model: string | undefined,
+/**
+ * 在会话里问一轮：边跑边回调每一步，最后回调存下的这一轮；出错或没收到结果时抛 ApiError。
+ * model 不传用默认模型；execute 为 false 时只生成 SQL，不查结果
+ */
+export async function streamTurn(conversationId: string, question: string, model: string | undefined, execute: boolean,
                                  handlers: TurnHandlers): Promise<void> {
   const response = await send(`/conversations/${encodeURIComponent(conversationId)}/turns`, {
     method: 'POST',
-    body: JSON.stringify({ question, model }),
+    body: JSON.stringify({ question, model, execute }),
     headers: { Accept: 'text/event-stream' },
   })
   let finished = false

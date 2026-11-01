@@ -48,6 +48,7 @@ class QueryRequest(BaseModel):
     prev_tables: list[str] = Field(default_factory=list)      # 上一轮 SQL 用到的表；追问时直接放进候选
     today: date | None = None                 # None 时用系统日期
     model: str | None = None                  # 本轮用的模型名（config.MODEL_CHOICES 之一）；None 时用流水线的默认模型
+    execute: bool = True                      # 查询结果并生成看板；False 时只生成 SQL，配了执行层也不执行
     use_lineage: bool = True                  # 对照开关：A 组 False/False，B 组 True/False，C 组 True/True
     use_examples: bool = True
 
@@ -366,6 +367,7 @@ class QueryResult(BaseModel):
     candidate_tables: list[str] = Field(default_factory=list) # 最后一次证据里的全部表（含上溯、样例、关联补进来的）
     recall_notes: list[str] = Field(default_factory=list)
     exec_result: ExecSummary | None = None
+    display: str = ""                         # 问题里写明的展示形式（见 output.detect_display）；没写时为空，界面反问
     trace: list[TraceStep] = Field(default_factory=list)
     calls: list[CallRecord] = Field(default_factory=list)
     elapsed_ms: int = 0

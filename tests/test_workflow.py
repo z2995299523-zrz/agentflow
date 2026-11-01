@@ -185,6 +185,24 @@ def test_duckdb_executor_runs_the_sql_and_the_summary_has_no_data(make, mock_db)
     assert str(result.exec_result.rows[0][0]) not in summary                        # 轨迹里只有元数据，没有数据
 
 
+def test_switching_the_query_off_only_generates_sql(make, mock_db):
+    pipeline, llm, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)], executor=DuckDBExecutor(mock_db))
+
+    result = pipeline.run(request(execute=False))
+
+    assert result.status == "ok" and result.sql and result.exec_result is None and llm.remaining == 0
+    assert result.trace[-1].summary == "状态 ok；仅生成，未执行"
+
+
+@pytest.mark.parametrize("question, display", [
+    (QUESTION, ""), ("用柱状图看各分行贷款余额", "column"), ("各分行贷款余额，画横向柱状图", "bar"),
+    ("贷款余额的月度趋势图", "line"), ("存款结构用饼图展示", "pie"), ("贷款余额做成指标卡", "metric"), ("用表格列出来", "table")])
+def test_the_display_form_comes_from_the_words_of_the_question(make, question, display):
+    pipeline, _, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)])
+
+    assert pipeline.run(QueryRequest(question=question, today=TODAY)).display == display
+
+
 class FixedExecutor:
     """不管什么 SQL 都返回同一个结果"""
 

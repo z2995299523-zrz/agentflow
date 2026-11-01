@@ -11,6 +11,16 @@ from nl2sql.retriever import RecallQuery
 from nl2sql.schemas import ExecSummary, QueryPlan, ValidationSummary
 from nl2sql.validator import SqlValidator, ValidationIssue, ValidationReport
 
+# 展示形式和问题里的说法。「横向柱状图」是条形图，要排在「柱状图」前面
+DISPLAY_WORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("bar", ("条形图", "横向柱状图", "横向柱形图")),
+    ("column", ("柱状图", "柱形图", "直方图")),
+    ("line", ("折线图", "趋势图", "曲线图")),
+    ("pie", ("饼图", "饼状图", "环形图")),
+    ("metric", ("指标卡", "数字卡片")),
+    ("table", ("表格", "列表展示")),
+)
+
 
 def format_sql(sql: str, validator: SqlValidator | None = None) -> str:
     """用 sqlglot 按 postgres 美化 SQL
@@ -52,6 +62,18 @@ def summarize_validation(report: ValidationReport) -> ValidationSummary:
     return ValidationSummary(ok=report.ok, errors=[_issue_text(issue) for issue in report.errors],
                              warnings=[_issue_text(issue) for issue in report.warnings],
                              tables=list(report.tables), columns=list(report.columns))
+
+
+def detect_display(question: str) -> str:
+    """问题里写明的展示形式，只认明确的图表说法；没写时为空，界面再反问。不调模型，不增加费用
+
+    Args:
+        question: 本轮输入
+
+    Returns:
+        table、metric、bar、column、line、pie 之一，或空串
+    """
+    return next((kind for kind, words in DISPLAY_WORDS if any(word in question for word in words)), "")
 
 
 def summarize_exec(result: ExecResult) -> ExecSummary:

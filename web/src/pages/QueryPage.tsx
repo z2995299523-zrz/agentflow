@@ -132,6 +132,9 @@ export default function QueryPage() {
           disabled={serviceDown && !!health}
           context={chat.pending ? null : chat.detail?.context ?? null}
           inputRef={inputRef}
+          canExecute={!!health && health.executor !== 'none'}
+          execute={chat.execute}
+          onExecute={chat.setExecute}
         />
       </section>
     </div>

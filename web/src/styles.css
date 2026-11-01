@@ -121,7 +121,7 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
 .result-tabs .ant-tabs-nav { margin-bottom: 10px; }
 .caliber .ant-descriptions-item-label { width: 96px; white-space: nowrap; }
 .exec-meta { margin-bottom: 8px; }
-.exec-note { margin-bottom: 12px; }
+.exec-note, .exec-picker, .exec-kinds { margin-bottom: 12px; }
 .exec-chart, .exec-metrics { margin-bottom: 16px; }
 .exec-chart-head { margin-bottom: 8px; }
 .exec-chart-canvas { width: 100%; }
@@ -160,7 +160,9 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
 .composer-box { display: flex; align-items: flex-end; gap: 10px; border: 1px solid #cbd5e1; border-radius: 10px; padding: 6px 8px 6px 4px; background: #fff; transition: border-color 0.15s, box-shadow 0.15s; }
 .composer-box:focus-within { border-color: var(--c-primary); box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.1); }
 .composer-box textarea { resize: none; }
-.composer-hint { font-size: 12px; color: #9ca3af; margin-top: 6px; }
+.composer-foot { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; }
+.composer-hint { font-size: 12px; color: #9ca3af; }
+.composer-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--c-muted); cursor: pointer; white-space: nowrap; }
 
 /* ── 元数据页 ───────────────────────────────── */
 .meta-page { height: 100%; display: flex; }

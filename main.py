@@ -191,6 +191,7 @@ class QuestionBody(BaseModel):
     question: str = Field(description="本轮输入", min_length=1, max_length=2000)
     model: str | None = Field(None, description="本轮用的模型（GET /nl2sql/models 里的 name）；不写用默认模型",
                               max_length=100)
+    execute: bool = Field(True, description="查询结果并生成看板；false 时只生成 SQL，配了执行层也不执行")
 
     @field_validator("question")
     @classmethod
@@ -226,7 +227,7 @@ class QueryBody(QuestionBody):
         """转成流水线的请求；今天按系统日期，请求体里不收"""
         return QueryRequest(question=self.question, prev_requirement=self.prev_requirement,
                             prev_clarify=self.prev_clarify, prev_sql=self.prev_sql, prev_tables=self.prev_tables,
-                            model=self.model)
+                            model=self.model, execute=self.execute)
 
 
 class ModelInfo(BaseModel):
@@ -371,7 +372,7 @@ def ask_in_conversation(conversation_id: str, body: QuestionBody, pipeline: Pipe
         raise HTTPException(404, str(error)) from error
     request = QueryRequest(question=body.question, prev_requirement=context.prev_requirement,
                            prev_clarify=context.prev_clarify, prev_sql=context.prev_sql, prev_tables=context.prev_tables,
-                           model=body.model)
+                           model=body.model, execute=body.execute)
 
     def finish(result: QueryResult) -> tuple[str, Any]:
         turn = history.add_turn(conversation_id, body.question, result)
