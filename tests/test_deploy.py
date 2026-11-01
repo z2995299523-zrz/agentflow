@@ -158,6 +158,7 @@ def test_external_profile_cannot_execute_in_mock_database(tmp_path: Path) -> Non
         make_profile(str(tmp_path), "duckdb", tmp_path)
     profile = make_profile(str(tmp_path), "none", tmp_path)
     assert profile["counts"]["表"] == 1 and profile["external"]
+    assert make_profile(str(tmp_path), "sqlite", tmp_path)["executor"] == "sqlite"     # 按元数据生成的测试数据可以
 
 
 def test_metadata_contract_rejects_incomplete_vectors(tmp_path: Path) -> None:

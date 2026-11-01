@@ -5,7 +5,7 @@ paths:
 
 # 前端（web/）
 
-- React 19 + TypeScript 5.9 + Vite 8 + Ant Design 6；血缘图 React Flow 12，SQL 高亮 highlight.js，路由 react-router 7；Node ≥ 20.19
+- React 19 + TypeScript 5.9 + Vite 8 + Ant Design 6；血缘图 React Flow 12，SQL 高亮 highlight.js，结果图表 ECharts 5（按需引入，懒加载），路由 react-router 7；Node ≥ 20.19
 - 版本写死在 `web/package.json`。新加或升级依赖，选发布满两周的版本；国内装依赖加 `--registry=https://registry.npmmirror.com`
 - 改完跑 `npm run build`（类型检查加构建），只查类型用 `npm run typecheck`
 - `src/state/chat.tsx`：会话状态放在路由外层，切到元数据页再回来，正在跑的一轮还在

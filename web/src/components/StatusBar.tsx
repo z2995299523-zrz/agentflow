@@ -4,7 +4,9 @@ import { Alert, Spin, Tag, Tooltip } from 'antd'
 
 import { useHealth } from '../state/health'
 
-const EXECUTOR_LABELS: Record<string, string> = { duckdb: '执行：DuckDB 模拟库', none: '只生成不执行' }
+const EXECUTOR_LABELS: Record<string, string> = {
+  duckdb: '执行：DuckDB 模拟库', sqlite: '执行：SQLite 测试数据', none: '只生成不执行',
+}
 
 export default function StatusBar() {
   const { health, error } = useHealth()

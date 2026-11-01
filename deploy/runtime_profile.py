@@ -10,6 +10,8 @@ from pathlib import Path
 ENV_PATH = Path("/etc/agentflow/app.env")
 COUNT_TABLES = {"表": "meta_table", "字段": "meta_column", "血缘": "meta_lineage",
                 "关联关系": "meta_relation", "加工语句": "meta_script", "样例": "meta_example"}
+# 真实资料只能不执行，或者在按元数据生成的测试数据（TEST_DATA_DB）上执行，不能连模拟库
+EXTERNAL_EXECUTORS = ("none", "sqlite")
 
 
 def read_environment(path: Path = ENV_PATH) -> dict[str, str]:
@@ -42,11 +44,11 @@ def metadata_contract(path: Path) -> dict:
 
 def make_profile(mart_dir: str, executor: str, release: Path) -> dict:
     """绑定资料、执行层和稳定会话路径，阻止真实资料误连模拟执行库。"""
-    if executor not in ("none", "duckdb") or "\n" in mart_dir or "\r" in mart_dir:
+    if executor not in ("none", "duckdb", "sqlite") or "\n" in mart_dir or "\r" in mart_dir:
         raise ValueError("资料目录或执行层无效")
     mock = mart_dir in ("./data/mock_mart", "data/mock_mart")
-    if not mock and (not Path(mart_dir).is_absolute() or executor != "none"):
-        raise ValueError("外部资料必须使用绝对目录，且 EXECUTOR=none")
+    if not mock and (not Path(mart_dir).is_absolute() or executor not in EXTERNAL_EXECUTORS):
+        raise ValueError("外部资料必须使用绝对目录，且 EXECUTOR=none 或 sqlite")
     root = (release / mart_dir if mock else Path(mart_dir)).resolve()
     contract = metadata_contract(root / "build/metadata.db")
     return {"mart_dir": mart_dir, "executor": executor, "external": not mock,

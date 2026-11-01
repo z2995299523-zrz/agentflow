@@ -2,6 +2,7 @@
 
 用假模型（ScriptedLLM）和模拟专题库的元数据：回复的条数就是模型被调用的次数，调多了、调少了测试都会发现。
 """
+import json
 from datetime import date
 from pathlib import Path
 from unittest.mock import Mock
@@ -182,6 +183,37 @@ def test_duckdb_executor_runs_the_sql_and_the_summary_has_no_data(make, mock_db)
     summary = result.trace[-1].summary
     assert f"已执行，返回 {result.exec_result.row_count} 行" in summary
     assert str(result.exec_result.rows[0][0]) not in summary                        # 轨迹里只有元数据，没有数据
+
+
+class FixedExecutor:
+    """不管什么 SQL 都返回同一个结果"""
+
+    name = "sqlite"
+
+    def __init__(self, result: ExecResult) -> None:
+        self.result = result
+
+    def execute(self, sql: str, max_rows: int | None = None, timeout_s: float | None = None) -> ExecResult:
+        return self.result
+
+
+SECRET = "机密取值987654321"
+
+
+@pytest.mark.parametrize("outcome", [ExecResult(executed=True, columns=["value"], rows=[(SECRET,)], row_count=1),
+                                     ExecResult(executed=False, error=f"类型不对：{SECRET}")])
+def test_query_results_and_execution_errors_never_reach_the_model(make, outcome):
+    """硬约束：查询结果不能发给大模型。结果和执行报错只给界面，追问的下一轮也带不过去"""
+    pipeline, llm, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL),
+                             parsed_json(follows_up=True), plan_json(), sql_reply(GOOD_SQL)], executor=FixedExecutor(outcome))
+
+    first = pipeline.run(request())
+    second = pipeline.run(QueryRequest(question="再按机构分一下", today=TODAY, **first.next_context()))
+
+    assert SECRET in first.exec_result.model_dump_json() and SECRET in second.exec_result.model_dump_json()
+    assert len(llm.calls) == 6
+    assert SECRET not in json.dumps([call["messages"] for call in llm.calls], ensure_ascii=False)
+    assert SECRET not in json.dumps([step.model_dump() for step in first.trace + second.trace], ensure_ascii=False)
 
 
 # ── 反问、上溯、做不到 ─────────────────────────────

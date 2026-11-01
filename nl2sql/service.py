@@ -22,6 +22,7 @@ from metadata.importer import default_db_path
 from metadata.index import BGE_NAME, BgeEmbedder, Embedder, HashEmbedder
 from metadata.models import LAYERS, ColumnMeta, TableMeta
 from metadata.store import MetadataStore
+from metadata.testdata import default_path as default_test_data_path
 from nl2sql.evidence import JOIN_PREFIXES
 from nl2sql.executor import Executor, get_executor
 from nl2sql.history import HISTORY_FILE_NAME, ConversationStore
@@ -89,8 +90,8 @@ def _load_metadata(mart_dir: Path) -> tuple[MetadataStore, LineageGraph]:
     return store, LineageGraph(store)
 
 
-def _make_executor(kind: str) -> Executor:
-    """按配置建执行层；duckdb 用模拟专题库，不存在或过期时先重新生成
+def _make_executor(kind: str, mart_dir: Path) -> Executor:
+    """按配置建执行层；duckdb 用模拟专题库，不存在或过期时先重新生成；sqlite 用 TEST_DATA_DB，没配时用资料目录里的测试数据
 
     Raises:
         ValueError: 执行层的名字不支持
@@ -99,6 +100,9 @@ def _make_executor(kind: str) -> Executor:
         from data.mock_mart.build_mock import DEFAULT_DB_PATH, ensure_built
         ensure_built()
         return get_executor(kind, DEFAULT_DB_PATH, config.SQL_DIALECT)
+    if kind == "sqlite":
+        return get_executor(kind, Path(config.TEST_DATA_DB) if config.TEST_DATA_DB else default_test_data_path(mart_dir),
+                            config.SQL_DIALECT)
     return get_executor(kind, None, config.SQL_DIALECT)
 
 
@@ -122,7 +126,7 @@ def _assemble(store: MetadataStore, graph: LineageGraph, mart_dir: Path, llm: LL
     """用已经读好的元数据装配流水线。容易失败的先做（没配 Key、执行层名字不对），建召回索引放在最后"""
     if llm is None:
         llm = ChatModelClient(timeout=config.LLM_TIMEOUT, model=model)
-    executor = _make_executor(executor_kind or config.EXECUTOR)
+    executor = _make_executor(executor_kind or config.EXECUTOR, mart_dir)
     retriever = Retriever(store, graph, embedder_for(store))
     validator = SqlValidator(store, dialect=config.SQL_DIALECT)
     return Pipeline(PipelineDeps(store=store, graph=graph, retriever=retriever, validator=validator, llm=llm,

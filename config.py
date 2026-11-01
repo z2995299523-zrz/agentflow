@@ -62,8 +62,10 @@ MODEL_CHOICES: tuple[ModelChoice, ...] = (
 MART_DIR = os.getenv("MART_DIR", "./data/mock_mart")
 # 生成 SQL 的方言：postgres（GaussDB 与 PostgreSQL 共有的语法）
 SQL_DIALECT = os.getenv("SQL_DIALECT", "postgres")
-# 执行层：none 只生成不执行；duckdb 在模拟专题库上只读执行
+# 执行层：none 只生成不执行；duckdb 在模拟专题库上只读执行；sqlite 在按元数据生成的测试数据上只读执行
 EXECUTOR = os.getenv("EXECUTOR", "none")
+# sqlite 执行层的测试数据文件，空着时用资料目录里的 build/test_data.db（python -m metadata.testdata 生成）
+TEST_DATA_DB = os.getenv("TEST_DATA_DB", "")
 # 查询流水线单次模型调用的超时，秒
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "120"))
 

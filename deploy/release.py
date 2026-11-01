@@ -12,9 +12,9 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 
 if __package__:
-    from .runtime_profile import ENV_PATH, make_profile, read_environment, write_profile
+    from .runtime_profile import ENV_PATH, EXTERNAL_EXECUTORS, make_profile, read_environment, write_profile
 else:
-    from runtime_profile import ENV_PATH, make_profile, read_environment, write_profile
+    from runtime_profile import ENV_PATH, EXTERNAL_EXECUTORS, make_profile, read_environment, write_profile
 
 BASE = Path("/opt/agentflow")
 REPO = BASE / "repo.git"
@@ -151,7 +151,7 @@ def prepare(commit: str, frontend: Path, mart_dir: str | None = None, executor: 
     selected_executor = executor or settings.get("EXECUTOR", "duckdb")
     if selected_mart not in ("./data/mock_mart", "data/mock_mart"):
         root = Path(selected_mart).resolve()
-        if not root.is_relative_to(DATA / "datasets") or selected_executor != "none":
+        if not root.is_relative_to(DATA / "datasets") or selected_executor not in EXTERNAL_EXECUTORS:
             raise ValueError("真实资料只能使用 datasets 下的独立快照，且不连接模拟执行库")
         access = ACCESS_CONF
         if not access.is_file() or "auth_basic_user_file" not in access.read_text():
@@ -409,7 +409,7 @@ def main() -> None:
     parser.add_argument("stage", choices=("prepare", "activate", "verify", "rollback", "switch-data", "rollback-data"))
     parser.add_argument("--frontend", type=Path)
     parser.add_argument("--mart-dir", help="准备阶段选用的资料目录；默认沿用服务器现有配置")
-    parser.add_argument("--executor", choices=("none", "duckdb"))
+    parser.add_argument("--executor", choices=("none", "duckdb", "sqlite"))
     args = parser.parse_args()
     if os.geteuid() != 0 or not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("必须以 root 执行并提供完整的 40 位 Git 提交")

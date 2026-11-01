@@ -14,6 +14,7 @@ python -m metadata.importer 目录 --no-index   # 不算向量；--reindex 向�
 python -m metadata.versions list          # 列出版本；promote <版本> [--accept]、rollback 切换和回退，diff <基线> <版本> 看差异，prune 清理（加 --yes 才删）
 python -m metadata.template 模板.xlsx      # 生成空白的元数据 Excel 模板（已存在时不覆盖，要覆盖加 --force）
 python -m data.mock_mart.build_mock       # 重新生成模拟专题库（固态盘约 15 秒，机械盘约 1.5 分钟）
+python -m metadata.testdata 资料目录       # 按元数据造测试数据写进 SQLite（资料目录/build/test_data.db，真实库约 15 秒），配 EXECUTOR=sqlite 查数和看图
 python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
 
 python run_eval.py                        # 模拟库三组对照评估（调 DeepSeek，43 题约 3 分钟；--model 换模型），流程见 /run-eval
@@ -67,7 +68,9 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 - `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（加工链路里重复的跳和条件只写一次，第 5 张以后召回的表只列关键字段，上溯、样例带入的表照旧全列；超过 4 万字按九级收缩；④ 按层级从上往下选表：专题层、汇总层、标准层、贴源层）
 - `retriever.py` 候选召回（关键字、字段向量两路找字段，加上表向量（表中文名、说明、字段中文名）和整句按表排名，三层范围；表清单「标准表」填「否」的表单独排名，最多补 3 张，不占标准表的名额，再和标准表合在一起按得分排先后，得分高的进前 4 张、证据里全列字段；完整需求本身也算一个检索词，只参与排名、不标命中字段）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
 - `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；请求带 `model` 时由 `PipelineDeps.llm_for`（`service.model_client`）取那个模型，另编一张图按模型名缓存，结果记下 `model`；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
-- `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB
+- `executor.py`：执行层（none、duckdb 或 sqlite，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB、SQLite（SQLite 没有日期类型，`to_sqlite` 改写语法树，ROLLUP、百分位函数跑不了）
+- 查询结果不能发给大模型：执行在第 ⑦ 步，三次模型调用都在它之前，结果和执行报错只给界面，追问的上下文也不带，`test_query_results_and_execution_errors_never_reach_the_model` 守着。别加把数据发给模型的功能（结果解读、取样本值、把数据库报错原文喂回模型）
+- sqlite 执行层用的是 `metadata/testdata.py` 按元数据造的假数据（结果的 note 和界面写明不是业务数据），`TEST_DATA_DB` 指文件，空着用资料目录里的
 - 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`，上一轮校验通过时还有 `prev_sql`、`prev_tables`，规则见 `QueryResult.next_context`）。① 判断本轮是在上一轮上追问（`follows_up`）时，② 把上一轮的表放进候选，④ ⑤ 以上一轮的 SQL 为底增量修改，不多调模型。以它为底之前先用当前元数据校验，元数据换过版本、表或字段没了就不以它为底，按完整需求重新生成，原因写进结果的假设；每一轮结果记下元数据版本号（`metadata_version`）
 - 对照实验开关 `use_lineage`、`use_examples`：A 组 False/False（全部层级召回、只给表结构推得出的关联、不上溯），B 组 True/False，C 组 True/True
 
@@ -80,7 +83,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
   - 元数据库文件变了（导入、promote、rollback）：`service.get_metadata` 在后台读好再换，期间照常返回旧版本，读失败继续用旧的、同一个文件不重试；`/health` 报 `metadata_reloading`、`reload_error`。服务器切资料是改 `MART_DIR` 再重启，不走这条
   - 启动时在后台线程预热（`service.warm_up`：装配流水线、加载 BGE）
 - `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问；那一轮校验通过时还有它的 SQL 和用到的表
-- `web/`：查数页（右上角选模型、七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
+- `web/`：查数页（右上角选模型、七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果图表（按字段选图，`utils/chartPlan.ts`）和分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
 - `eval/`：43 题题库（11 题登记了其它正确答案；「反问之后」3 题测上一轮停在反问上的下一轮，第一轮没反问按答错计）、结果比对、三组对照评估与错题归因、真实库静态评估、召回重放命令（`recall_replay.py`，结果存在 `build/replay/`，只测得了第 ② 步，改了 ① 的提示词要重跑评估）；报告在 `eval/reports/`
 
 ## 约定

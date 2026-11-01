@@ -121,6 +121,10 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
 .result-tabs .ant-tabs-nav { margin-bottom: 10px; }
 .caliber .ant-descriptions-item-label { width: 96px; white-space: nowrap; }
 .exec-meta { margin-bottom: 8px; }
+.exec-note { margin-bottom: 12px; }
+.exec-chart, .exec-metrics { margin-bottom: 16px; }
+.exec-chart-head { margin-bottom: 8px; }
+.exec-chart-canvas { width: 100%; }
 .cell-null { color: #9ca3af; font-style: italic; }
 .plan-tables h5 { margin: 4px 0 8px !important; font-size: 13.5px !important; }
 .plan-tables .ant-table-wrapper + h5 { margin-top: 16px !important; }

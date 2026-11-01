@@ -209,8 +209,8 @@ def test_missing_database_tells_how_to_create_it(tmp_path):
 
 def test_get_executor(small_db):
     assert get_executor("none").name == "none"
-    assert get_executor("duckdb", small_db).name == "duckdb"
-    with pytest.raises(ValueError, match="需要提供模拟专题库路径"):
+    assert get_executor("duckdb", small_db).name == "duckdb"  # 其它执行层见 test_sqlite_executor.py
+    with pytest.raises(ValueError, match="需要提供库文件路径"):
         get_executor("duckdb")
     with pytest.raises(ValueError, match="不支持的执行层"):
         get_executor("oracle")

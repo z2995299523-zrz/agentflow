@@ -218,5 +218,6 @@ export default function ResultTabs({ result }: { result: QueryResult }) {
   }
   items.push({ key: 'trace', label: '运行过程',
                children: result.trace.length ? <TraceTimeline result={result} /> : <Empty /> })
-  return <Tabs className="result-tabs" size="small" items={items} defaultActiveKey={items[0].key} />
+  return <Tabs className="result-tabs" size="small" items={items}
+               defaultActiveKey={result.exec_result?.executed ? 'exec' : items[0].key} />
 }
