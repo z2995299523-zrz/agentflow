@@ -27,6 +27,11 @@
     （表向量加进来之前导入的）时不走这两路，其余照旧。
     这两路补的是字段两路看不到的东西：表名、字段名里没有检索词，说明和整张表的字段构成却正是在讲这件事的表。
     在真实库 215 道题上离线比过，标准用表进候选 184→193 题，模拟库 37 题不变。
+    完整需求本身也算一个检索词（权重同指标），字段两路和表向量路都走：拆词丢掉的信息由它兜底，用的是 ① 复述的那句话，
+    追问、回答反问时也带着上下文。它只参与排名，不标命中字段：证据里的〔命中〕写一整句话没有意义，多出来的命中字段还会把证据撑长。
+    在 619 道题上离线比过（模拟库 37、真实库 215、场景题 367），标准用表进前 4 名 477→509、前 8 名 532→556、
+    候选 548→569，141 题变好、21 题变差；用户原话当检索词（503、549、567）和权重 0.7、0.5（502、494）都差一些。
+    端到端跑过真实库 200 题：用对表 168→176、给出 SQL 184→189；模拟库 C 组执行 35/37 不变。
 通用字段（表的数据日期、行编号一类的通用键名、同一层里半数以上的表都有的样板字段）只在检索词本身提到它们的名字时才计分：
 真实库上检索词恰好是表名的一部分时，表名会给这张表的每个字段都加分，它们就会占满命中字段的前几位。
 加工脚本里恒为空、取加工时间的字段不参与召回。
@@ -150,6 +155,7 @@ class _Term:
     weight: float                        # 角色权重
     squashed: str
     features: frozenset[str]
+    whole: bool = False                  # 是完整需求本身：只参与排名，不标命中字段
 
 
 @dataclass(frozen=True)
@@ -188,7 +194,7 @@ def _features(text: str) -> frozenset[str]:
 
 
 def _prepare_terms(query: RecallQuery) -> list[_Term]:
-    """把三类要素摊平成检索词，空的和同一角色下重复的丢掉，顺序为指标、维度、过滤"""
+    """把三类要素摊平成检索词，空的和同一角色下重复的丢掉，顺序为指标、维度、过滤，最后是完整需求本身"""
     terms: list[_Term] = []
     seen: set[tuple[str, str]] = set()
     for role, texts in (("metric", query.metrics), ("dimension", query.dimensions), ("filter", query.filters)):
@@ -197,6 +203,9 @@ def _prepare_terms(query: RecallQuery) -> list[_Term]:
             if squashed and (role, squashed) not in seen:
                 seen.add((role, squashed))
                 terms.append(_Term(text.strip(), ROLE_WEIGHTS[role], squashed, _features(text)))
+    squashed = _squash(query.requirement)
+    if squashed and squashed not in {squash for _, squash in seen}:
+        terms.append(_Term(query.requirement.strip(), ROLE_WEIGHTS["metric"], squashed, _features(query.requirement), whole=True))
     return terms
 
 
@@ -409,8 +418,8 @@ class Retriever:
         # 非标准表在自己的范围里单独找命中字段，不和标准表争字段名次和候选名额
         extra_scored, extra_matched = ({}, set()) if all_layers else self._score_tables(
             terms, vectors, self._extra_pool, requirement_vector, table_paths=True)
-        notes += [f"检索词「{term.text}」没有命中任何字段"
-                  for position, term in enumerate(terms) if position not in matched | upstream_matched | extra_matched]
+        notes += [f"检索词「{term.text}」没有命中任何字段" for position, term in enumerate(terms)
+                  if position not in matched | upstream_matched | extra_matched and not term.whole]
 
         ranked = sorted((table_id for table_id, item in scored.items() if item.score > 0),
                         key=lambda table_id: self._order_key(table_id, scored.get(table_id)))
@@ -552,6 +561,8 @@ class Retriever:
                 weighted = term.weight * score
                 row = best.setdefault(item.table_id, [0.0] * len(terms))
                 row[position] = max(row[position], weighted)
+                if term.whole:
+                    continue
                 known = hits.get(index)
                 if known is None or weighted > known[0]:
                     via = tuple(name for name, flag in ((VIA_VECTOR, by_vector), (VIA_KEYWORD, by_keyword)) if flag)

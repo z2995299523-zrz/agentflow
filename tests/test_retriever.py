@@ -233,7 +233,7 @@ def test_summary_layer_tables_sit_in_level_zero_with_the_mart_tables():
 def test_non_standard_tables_rank_on_their_own_and_take_no_slot():
     mart = extra_mart()
     retriever = make_retriever(mart)
-    query = RecallQuery("存款金额汇总统计", ["存款金额"])
+    query = RecallQuery("存款金额", ["存款金额"])
 
     result = retriever.recall(query)
 
@@ -411,7 +411,7 @@ def test_two_routes_are_merged_with_rrf_and_role_weights(mock_parts):
     both, keyword_only = Retriever(store, graph, HashEmbedder()), Retriever(store, graph, None)
     for retriever, routes, expected in ((both, ("vector", "keyword"), 2 / 61), (keyword_only, ("keyword",), 1 / 61)):
         for role, weight in (("metrics", 1.0), ("dimensions", 0.7), ("filters", 0.5)):
-            query = RecallQuery("x", **{"metrics": [], role: ["不良贷款余额"]})
+            query = RecallQuery("", **{"metrics": [], role: ["不良贷款余额"]})
             top = retriever.recall(query).tables[0].hits[0]
             assert (top.column_name, top.via) == ("npl_bal_rmb", routes)    # 两路都排第一：1/61 + 1/61
             assert top.score == pytest.approx(weight * expected)
@@ -526,9 +526,21 @@ def test_repeated_calls_give_the_same_result(mock_retriever):
 
 def test_notes_explain_empty_queries_and_terms_without_hits(mock_parts):
     store, graph = mock_parts
-    assert "没有检索词" in " ".join(Retriever(store, graph, HashEmbedder()).recall(RecallQuery("x", [])).notes)
+    assert "没有检索词" in " ".join(Retriever(store, graph, HashEmbedder()).recall(RecallQuery("", [])).notes)
     result = Retriever(store, graph, None).recall(RecallQuery("x", ["zzqq"]))
     assert result.tables == [] and "检索词「zzqq」没有命中任何字段" in result.notes
+    assert len([note for note in result.notes if "没有命中" in note]) == 1     # 完整需求「x」也没命中，但不单独说
+
+
+def test_the_requirement_is_a_term_that_only_ranks_and_marks_no_hits():
+    # ① 没拆出「账簿编码」，只有完整需求里有：带这个字段的表靠它进候选，但这个字段不标命中
+    mart = make_mart([("ads.a_dep", "余额表", [("dep_amt", "存款金额")]), ("ads.b_book", "台账表", [("book_code", "账簿编码")])])
+    retriever = make_retriever(mart, with_embedder=False)
+    result = retriever.recall(RecallQuery("按账簿编码统计", ["存款金额"]))
+    assert {item.table_id: bool(item.hits) for item in result.tables} == {"ads.a_dep": True, "ads.b_book": False}
+    # 完整需求和某个检索词一样时不重复计分：没有向量路，每张表只得关键字路第一名的分
+    same = retriever.recall(RecallQuery("账簿编码", ["账簿编码", "存款金额"]))
+    assert [item.score for item in same.tables] == pytest.approx([1 / 61, 1 / 61])
 
 
 # ── 模拟题的召回率 ──────────────────────────────────────
@@ -623,7 +635,7 @@ def test_the_table_whose_description_matches_ranks_first_through_the_table_vecto
     bundle = build_vectors(mart, HashEmbedder())[0]
     old = VectorBundle(embedder=bundle.embedder, dim=bundle.dim,
                        sets={kind: vector_set for kind, vector_set in bundle.sets.items() if kind != "table"})
-    query = RecallQuery("查询对公贷款余额", ["对公贷款余额"])
+    query = RecallQuery("对公贷款余额", ["对公贷款余额"])
 
     def order(vectors: VectorBundle) -> tuple[list[str], list[str]]:
         store = MetadataStore.from_mart(mart, vectors)

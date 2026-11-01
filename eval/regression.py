@@ -8,7 +8,7 @@
 题库有两种格式：模拟库的 eval/nl2sql_questions.yaml，真实库静态评估的题目文件（带 gold_table_sets）
 """
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,7 +80,8 @@ def read_questions(path: Path) -> list[Question]:
     return load_questions(path)
 
 
-def _groups(question: Question) -> list[list[str]]:
+def gold_groups(question: Question) -> list[list[str]]:
+    """一道题的标准用表，任一组算对；期望反问的题没有。"""
     if isinstance(question, StaticQuestion):
         return question.gold_table_sets
     return [question.gold_tables] if question.expect != "clarify" and question.gold_tables else []
@@ -91,7 +92,7 @@ def static_check(store: MetadataStore, questions: Sequence[Question]) -> dict[st
     validator = SqlValidator(store, dialect=config.SQL_DIALECT)
     results = {}
     for question in questions:
-        groups = _groups(question)
+        groups = gold_groups(question)
         if isinstance(question, StaticQuestion):
             if any(all(store.table(t) is not None for t in group) for group in groups):
                 results[question.id] = []
@@ -112,27 +113,39 @@ def static_check(store: MetadataStore, questions: Sequence[Question]) -> dict[st
     return results
 
 
-def replay_recall(store: MetadataStore, records: Path, questions: Sequence[Question]) -> dict[str, ReplayOutcome]:
-    """重放记录里最后一次成功解析，直接调用第零层召回，不调用任何大模型。"""
-    known = {q.id: q for q in questions if _groups(q)}
+def last_parsed(record: dict) -> ParsedRequest | None:
+    """一条逐题记录里最后一次成功的解析，后面的空解析不覆盖它；一次也没成功时为 None。"""
+    parsed = next((r["parsed"] for r in reversed(record.get("results", [])) if r.get("parsed") is not None), None)
+    return None if parsed is None else ParsedRequest.model_validate(parsed)
+
+
+def replay_parsed(store: MetadataStore, parsed: Mapping[str, ParsedRequest],
+                  questions: Sequence[Question]) -> dict[str, ReplayOutcome]:
+    """拿每道题 ① 的结果直接调用第零层召回，不调用任何大模型；没有标准用表、没有解析结果的题跳过。"""
     retriever = Retriever(store, LineageGraph(store), embedder_for(store))
     outcomes = {}
+    for question in questions:
+        groups = gold_groups(question)
+        if groups and question.id in parsed:
+            candidates = [t.table_id for t in retriever.recall(to_recall_query(parsed[question.id]), 0).tables]
+            rank = best_group_rank(groups, candidates)
+            outcomes[question.id] = ReplayOutcome(candidates, rank is not None, rank)
+    return outcomes
+
+
+def replay_recall(store: MetadataStore, records: Path, questions: Sequence[Question]) -> dict[str, ReplayOutcome]:
+    """重放一份逐题记录里各题最后一次成功解析。"""
+    known = {q.id for q in questions}
+    parsed = {}
     with Path(records).open(encoding="utf-8-sig") as file:
         for line in file:
             if not line.strip():
                 continue
             record = json.loads(line)
-            question = known.get(record["question_id"])
-            if question is None:
-                continue
-            parsed = next((r["parsed"] for r in reversed(record["results"]) if r.get("parsed") is not None), None)
-            if parsed is None:
-                continue
-            query = to_recall_query(ParsedRequest.model_validate(parsed))
-            candidates = [t.table_id for t in retriever.recall(query, 0).tables]
-            rank = best_group_rank(_groups(question), candidates)
-            outcomes[question.id] = ReplayOutcome(candidates, rank is not None, rank)
-    return outcomes
+            found = last_parsed(record) if record["question_id"] in known else None
+            if found is not None:
+                parsed[record["question_id"]] = found
+    return replay_parsed(store, parsed, questions)
 
 
 def session_impact(history_db: Path, removed_tables: set[str]) -> int:

@@ -17,6 +17,7 @@ python -m data.mock_mart.build_mock       # 重新生成模拟专题库（固态
 python data/real_mart/convert.py          # 把真实资料转成标准格式（需要本机的 data/real_mart/）
 
 python run_eval.py                        # 模拟库三组对照评估（调 DeepSeek，43 题约 3 分钟；--model 换模型），流程见 /run-eval
+python -m eval.recall_replay 题库.yaml     # 召回重放：不调模型，复用 ① 的记录看标准用表进前 4、前 8 的题数，和上一次比；--parse-missing 给没有记录的题调一次 ①
 uvicorn main:app --port 8000              # 接口 → http://localhost:8000/docs，启动后在后台预热流水线
 cd web && npm install && npm run dev      # 界面开发 → http://localhost:5173，/api 转给 8000
 cd web && npm run build                   # 前端类型检查加构建；只查类型用 npm run typecheck
@@ -64,7 +65,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 
 - `schemas.py`：各步骤的输入输出，是模块之间的契约；`llm.py`：模型调用（`ChatModelClient`、测试用的 `ScriptedLLM`、带重试的 `structured_call`）
 - `parser.py`、`planner.py`、`generator.py`：三个模型步骤；`prompts/nl2sql.py`：提示词、方言规则、证据渲染（加工链路里重复的跳和条件只写一次，第 5 张以后召回的表只列关键字段，上溯、样例带入的表照旧全列；超过 4 万字按九级收缩；④ 按层级从上往下选表：专题层、汇总层、标准层、贴源层）
-- `retriever.py` 候选召回（关键字、字段向量两路找字段，加上表向量（表中文名、说明、字段中文名）和整句按表排名，三层范围；表清单「标准表」填「否」的表单独排名，最多补 3 张，不占标准表的名额，再和标准表合在一起按得分排先后，得分高的进前 4 张、证据里全列字段）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
+- `retriever.py` 候选召回（关键字、字段向量两路找字段，加上表向量（表中文名、说明、字段中文名）和整句按表排名，三层范围；表清单「标准表」填「否」的表单独排名，最多补 3 张，不占标准表的名额，再和标准表合在一起按得分排先后，得分高的进前 4 张、证据里全列字段；完整需求本身也算一个检索词，只参与排名、不标命中字段）；`evidence.py` 证据组装；`validator.py` 静态校验 R1–R9；`output.py` 第 ⑦ 步的工具
 - `workflow.py`：LangGraph 编排，`Pipeline.run` 和 `stream` 不向外抛异常；请求带 `model` 时由 `PipelineDeps.llm_for`（`service.model_client`）取那个模型，另编一张图按模型名缓存，结果记下 `model`；`service.py`：按 `MART_DIR` 装配，界面、接口、评估共用
 - `executor.py`：执行层（none 或 duckdb，只读、超时、限量读取）；`dialect.py`：PostgreSQL → DuckDB
 - 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`，上一轮校验通过时还有 `prev_sql`、`prev_tables`，规则见 `QueryResult.next_context`）。① 判断本轮是在上一轮上追问（`follows_up`）时，② 把上一轮的表放进候选，④ ⑤ 以上一轮的 SQL 为底增量修改，不多调模型。以它为底之前先用当前元数据校验，元数据换过版本、表或字段没了就不以它为底，按完整需求重新生成，原因写进结果的假设；每一轮结果记下元数据版本号（`metadata_version`）
@@ -80,7 +81,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
   - 启动时在后台线程预热（`service.warm_up`：装配流水线、加载 BGE）
 - `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问；那一轮校验通过时还有它的 SQL 和用到的表
 - `web/`：查数页（右上角选模型、七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
-- `eval/`：43 题题库（11 题登记了其它正确答案；「反问之后」3 题测上一轮停在反问上的下一轮，第一轮没反问按答错计）、结果比对、三组对照评估与错题归因、真实库静态评估；报告在 `eval/reports/`
+- `eval/`：43 题题库（11 题登记了其它正确答案；「反问之后」3 题测上一轮停在反问上的下一轮，第一轮没反问按答错计）、结果比对、三组对照评估与错题归因、真实库静态评估、召回重放命令（`recall_replay.py`，结果存在 `build/replay/`，只测得了第 ② 步，改了 ① 的提示词要重跑评估）；报告在 `eval/reports/`
 
 ## 约定
 

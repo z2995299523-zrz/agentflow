@@ -8,6 +8,8 @@ argument-hint: "[--configs C] [--ids B01,K02]"
 
 模拟库三组对照评估会调 DeepSeek：43 题，三组全跑约 3 分钟。花的是 DeepSeek 的钱（便宜），不是 Claude 的额度。
 
+只改了召回或元数据、没动提示词时，先跑 `python -m eval.recall_replay 题库`：不调模型，几分钟出标准用表进前 4、前 8 的变化。它只测得了第 ② 步，要看 SQL 对不对还是跑下面的评估。
+
 1. 先跑 `python run_tests.py`，没全部通过就不评估
 2. 在后台跑 `python run_eval.py $ARGUMENTS`。不带参数是三组全跑；只验证几道题用 `--configs C --ids B01,K02`，更省时间；中断了可以用 `--resume 上次的逐题记录目录` 接着跑
 3. 新报告写在 `eval/reports/YYYY-MM-DD_nl2sql_eval.md`（同一天第二次带 `_2`），逐题记录在 `eval/reports/runs/`（不入库）。拿新报告和上一份对比这几项：
