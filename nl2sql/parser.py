@@ -1,5 +1,6 @@
 """
 ① 需求解析
+用户在问上一轮的结果时（explains_previous）不是查数需求，① 只认出来，由 explain 回答。
 把本轮输入（连同上一轮的完整需求、上一轮的反问）解析成结构化的需求：是不是查数需求、完整需求复述、
 指标（计数类带被计数的实体）、维度、过滤、排序与条数、时间（相对日期按「今天」换算）、口径线索、子问题、假设。
 是查数需求、但缺了没法默认的要素（要看的单个对象没说是哪个、没说看哪些指标）时，① 自己反问一次。
@@ -56,6 +57,8 @@ def parse_request(llm: LLMClient, request: QueryRequest, today: date) -> tuple[P
         parsed = parsed.model_copy(update={"answers_clarify": False})
     if parsed.follows_up and not previous:
         parsed = parsed.model_copy(update={"follows_up": False})
+    parsed = parsed.model_copy(update={"explains_previous": parsed.explains_previous and not parsed.is_query,
+                                       "named_tables": _dedupe(parsed.named_tables)})
     return parsed, calls
 
 
@@ -116,7 +119,7 @@ def check_parsed(parsed: ParsedRequest, *, pending_clarify: bool = False, has_pr
     是查数需求时：完整需求非空，日期合法、个数与时间类型相符，有对比时对比日期非空；上一轮停在反问上时
     answers_clarify 要写明，有上一轮的完整需求、又没有反问在等回答时 follows_up 要写明；没有反问时至少一个指标，
     有反问时要能反问（不是在回答上一轮的反问）、有问题、至少两个带 label 的选项（指标可以还没说清）。
-    不是查数需求时：回复非空。
+    不是查数需求时：回复非空；在问上一轮的结果时由代码解释，回复可以为空。
 
     Args:
         parsed: ① 的结果
@@ -124,7 +127,7 @@ def check_parsed(parsed: ParsedRequest, *, pending_clarify: bool = False, has_pr
         has_previous: 请求里有没有上一轮的完整需求（prev_requirement）
     """
     if not parsed.is_query:
-        if parsed.reply.strip():
+        if parsed.explains_previous or parsed.reply.strip():
             return []
         return ["is_query 是 false 时必须在 reply 里写给用户的回复，说明这个工具能做什么、请用户怎么提问"]
     problems = []

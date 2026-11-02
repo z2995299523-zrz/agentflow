@@ -1025,3 +1025,12 @@ def test_mock_script_selects_have_no_errors(validator, script, sql):
 
     assert report.errors == []
     assert not [issue for issue in report.issues if "检查时出错" in issue.message]
+
+
+def test_required_tables_are_errors_and_case_insensitive(mock_validator) -> None:
+    """用户点名的表缺失是 R8 错误，使用后通过且忽略大小写"""
+    sql = "SELECT SUM(loan_bal_rmb) FROM ads.corp_cust_loan_bal_d WHERE data_dt = DATE '2026-09-30'"
+    missing = mock_validator.validate(sql, required_tables=["ADS.ORG_CORP_DEP_BAL_D"])
+    assert any(issue.rule == "R8" and "用户点名要用 ads.org_corp_dep_bal_d" in issue.message for issue in missing.errors)
+    present = mock_validator.validate(sql, required_tables=[" ADS.CORP_CUST_LOAN_BAL_D "])
+    assert present.ok and not any(issue.rule == "R8" for issue in present.errors)

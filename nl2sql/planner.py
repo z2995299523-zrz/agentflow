@@ -2,7 +2,7 @@
 ④ 选表定口径
 模型按证据给出四种结论之一：ok（查询方案）、need_clarify（反问）、need_upstream（缺什么，要上溯）、
 cannot_answer（元数据里做不到）。代码核对方案里的表、字段、关联都在证据里之后才往下走。
-结论是 ok 的方案再由 prune_plan 去掉用不到的表（孤立表、只用来关联而去掉不改变结果的维表）；
+用户点名的表必须入选并保留；结论是 ok 的方案再由 prune_plan 去掉其它用不到的表（孤立表、只用来关联而去掉不改变结果的维表）；
 能反问时，需求只说「日均」而方案挑了一种统计区间，由 clarify_daily_average 改成反问。
 """
 import difflib
@@ -82,10 +82,14 @@ def _unknown_column(table: str, column: str, names: set[str], where: str) -> str
 
 
 def _check_ok(plan: QueryPlan, evidence: Evidence) -> list[str]:
-    """结论是 ok 时：表、字段、关联都要在证据里，样例编号要真实存在"""
+    """结论是 ok 时：表、字段、关联都在证据里，用户点名的表要出指标或维度，样例编号真实存在"""
     problems = []
     available = evidence.table_ids()
     plan_tables = [item.table for item in plan.tables]
+    for table in evidence.named_tables():
+        if not any(item.table == table and item.usage in ("metric", "dimension") for item in plan.fields):
+            problems.append(f"用户点名要用 {table}，方案要从它取指标或维度，只把它关联进来或用来过滤不算用上；"
+                            "它给不了需求要的东西时用 cannot_answer，在 reason 里写明它缺什么")
     if not plan.tables:
         problems.append("decision 是 ok 时 tables 不能为空，请列出要用的表（只能用证据里的表）")
     if not plan.fields:
@@ -133,7 +137,7 @@ def check_plan(plan: QueryPlan, evidence: Evidence, *, allow_clarify: bool, allo
     """核对查询方案，返回能直接告诉模型怎么改的问题；合格时返回空列表
 
     - ok：至少一张表、一个字段；表都在证据里；字段所属的表在方案的表里、字段在这张表里；
-      关联两侧的表在方案的表里、字段存在、两侧个数相同且至少一个；examples_used 都在证据的样例里
+      用户点名的表要出指标或维度；关联两侧的表在方案的表里、字段存在、两侧个数相同且至少一个；examples_used 都在证据的样例里
     - need_clarify：allow_clarify 为真；clarify 有问题；至少两个带 label 的选项
     - need_upstream：allow_upstream 为真；missing 非空
     - cannot_answer：reason 非空
@@ -221,7 +225,7 @@ def _redundant_join_table(plan: QueryPlan, evidence: Evidence, table: str) -> Pl
 
 
 def prune_plan(plan: QueryPlan, evidence: Evidence) -> tuple[QueryPlan, list[str]]:
-    """去掉方案里用不到的表
+    """去掉方案里用不到的表，用户点名的表始终保留
 
     - 孤立表：没有字段、不在任何关联里、过滤条件里也没写到
     - 只用来关联的表：只出现在一条关联里（不是中间表），过滤条件里没写到它，并且是下面两种之一。
@@ -249,6 +253,8 @@ def prune_plan(plan: QueryPlan, evidence: Evidence) -> tuple[QueryPlan, list[str
         changed = False
         for item in current.tables:
             table = item.table
+            if table in evidence.named_tables():
+                continue
             in_joins = any(table in (join.left_table, join.right_table) for join in current.joins)
             has_fields = any(field.table == table for field in current.fields)
             if not in_joins and not has_fields:

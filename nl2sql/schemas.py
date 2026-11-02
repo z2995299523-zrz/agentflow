@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-Status = Literal["ok", "need_clarify", "unvalidated", "failed"]
+Status = Literal["ok", "need_clarify", "unvalidated", "failed", "explained"]
 Decision = Literal["ok", "need_clarify", "need_upstream", "cannot_answer"]
 STEPS: tuple[str, ...] = ("parse", "recall", "evidence", "plan", "generate", "validate", "output")
 STEP_LABELS: dict[str, str] = {
@@ -36,21 +36,6 @@ class Clarify(BaseModel):
 
     question: str
     options: list[ClarifyOption] = Field(default_factory=list)
-
-
-class QueryRequest(BaseModel):
-    """一轮查询请求"""
-
-    question: str                             # 本轮输入
-    prev_requirement: str = ""                # 上一轮的完整需求
-    prev_clarify: Clarify | None = None       # 上一轮提出、还没回答的反问；本轮是在回答它还是问了新问题，由 ① 判断
-    prev_sql: str = ""                        # 上一轮校验通过的 SQL；① 判断本轮是在上一轮上追问时，④ ⑤ 以它为底增量修改
-    prev_tables: list[str] = Field(default_factory=list)      # 上一轮 SQL 用到的表；追问时直接放进候选
-    today: date | None = None                 # None 时用系统日期
-    model: str | None = None                  # 本轮用的模型名（config.MODEL_CHOICES 之一）；None 时用流水线的默认模型
-    execute: bool = True                      # 查询结果并生成看板；False 时只生成 SQL，配了执行层也不执行
-    use_lineage: bool = True                  # 对照开关：A 组 False/False，B 组 True/False，C 组 True/True
-    use_examples: bool = True
 
 
 # ── ① 需求解析 ────────────────────────────────
@@ -88,6 +73,8 @@ class ParsedRequest(BaseModel):
                                               # 没理会反问、问了新问题时照常能反问。没有上一轮的反问时一律为 False
     follows_up: bool = False                  # 本轮是不是在上一轮的完整需求上追问（增加、修改）；是的话 ② ④ ⑤
                                               # 带上上一轮的 SQL 和表增量修改。没有上一轮的需求时一律为 False
+    explains_previous: bool = False           # 本轮在问上一轮的结果，is_query 为假
+    named_tables: list[str] = Field(default_factory=list)     # 原文照抄；解释时是被问的表，查数时是要用的表
     requirement: str = ""                     # 完整需求复述，一句自包含的话
     metrics: list[Metric] = Field(default_factory=list)
     dimensions: list[str] = Field(default_factory=list)
@@ -130,7 +117,8 @@ class EvidenceTable(BaseModel):
     description: str = ""
     # join：关联路径经过、证据组装时补进来的中间表；previous：追问时上一轮 SQL 用到的表；
     # missing：④ 说缺东西时，拿缺的每一样单独在第 0 层召回到的表；extra：非标准表单独排名后补进来的表
-    reason: Literal["recall", "upstream", "example", "join", "previous", "missing", "extra"]
+    # named：用户点名要用的表
+    reason: Literal["named", "recall", "upstream", "example", "join", "previous", "missing", "extra"]
     score: float = 0.0
     columns: list[EvidenceColumn] = Field(default_factory=list)
 
@@ -242,6 +230,10 @@ class Evidence(BaseModel):
         """证据里全部表的标识，按证据里的顺序"""
         return [table.table_id for table in self.tables]
 
+    def named_tables(self) -> list[str]:
+        """入选原因是用户点名的表，按证据里的顺序"""
+        return [table.table_id for table in self.tables if table.reason == "named"]
+
     def column_names(self, table_id: str) -> set[str]:
         """一张表在证据里的字段名；不在证据里的表返回空集合"""
         table = self.table(table_id)
@@ -298,6 +290,81 @@ class QueryPlan(BaseModel):
 
 
 # ── 记录与结果 ────────────────────────────────
+
+class RoundBasis(BaseModel):
+    """上一轮的依据，解释上一轮时用：只有需求、方案和候选表，没有查询结果"""
+
+    question: str = ""
+    requirement: str = ""
+    status: str = ""
+    failed_step: str = ""
+    message: str = ""
+    metadata_version: str | None = None
+    parsed: ParsedRequest | None = None
+    plan: QueryPlan | None = None
+    sql_tables: list[str] = Field(default_factory=list)        # SQL 实际用到的表（validation.tables）
+    candidate_tables: list[str] = Field(default_factory=list)
+    scope_level: int = 0
+
+
+class FieldMatch(BaseModel):
+    """需求里的一个说法，在一张表里有没有名字相近的字段"""
+
+    term: str
+    role: Literal["metric", "dimension", "filter"]
+    column: str = ""                          # 对上的字段名，对不上时为空
+    column_cn: str = ""
+    weak: bool = False                        # 字段名本身对不上，加上表名才对得上，只算可能
+
+
+class TableDiagnosis(BaseModel):
+    """用户问到的一张表：它是什么表，上一轮走到哪一步，需求要的东西它有没有"""
+
+    name: str
+    table_id: str = ""                        # 对上的表，对不上时为空
+    table_cn: str = ""
+    layer: str = ""
+    table_type: str = ""
+    standard: bool = True
+    grain_columns: list[str] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)             # 缺少的表说明、血缘、关联关系、加工脚本、样例
+    stage: Literal["unknown", "ambiguous", "no_previous", "used", "pruned", "not_chosen", "not_recalled", "outside"]
+    conclusion: str = ""
+    reasons: list[str] = Field(default_factory=list)          # 每条依据都来自记录和元数据
+    matches: list[FieldMatch] = Field(default_factory=list)
+    similar: list[str] = Field(default_factory=list)
+    switchable: bool = False                  # 界面上能不能改用这张表
+
+
+class Explanation(BaseModel):
+    """对上一轮的解释，全部由代码按记录和元数据写出，不调模型"""
+
+    summary: str = ""                         # 一句话，也放进 QueryResult.message
+    requirement: str = ""
+    tables: list[PlanTable] = Field(default_factory=list)
+    table_basis: str = ""
+    caliber: str = ""
+    dropped_tables: list[str] = Field(default_factory=list)
+    candidate_tables: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    named: list[TableDiagnosis] = Field(default_factory=list)
+
+
+class QueryRequest(BaseModel):
+    """一轮查询请求"""
+
+    question: str                             # 本轮输入
+    prev_requirement: str = ""                # 上一轮的完整需求
+    prev_clarify: Clarify | None = None       # 上一轮提出、还没回答的反问；本轮是在回答它还是问了新问题，由 ① 判断
+    prev_sql: str = ""                        # 上一轮校验通过的 SQL；① 判断本轮是在上一轮上追问时，④ ⑤ 以它为底增量修改
+    prev_tables: list[str] = Field(default_factory=list)      # 上一轮 SQL 用到的表；追问时直接放进候选
+    prev_basis: RoundBasis | None = None      # 上一轮的依据，本轮在问上一轮时用；不发给模型
+    today: date | None = None                 # None 时用系统日期
+    model: str | None = None                  # 本轮用的模型名（config.MODEL_CHOICES 之一）；None 时用流水线的默认模型
+    execute: bool = True                      # 查询结果并生成看板；False 时只生成 SQL，配了执行层也不执行
+    use_lineage: bool = True                  # 对照开关：A 组 False/False，B 组 True/False，C 组 True/True
+    use_examples: bool = True
+
 
 class CallRecord(BaseModel):
     """一次模型调用的记录"""
@@ -357,7 +424,8 @@ class QueryResult(BaseModel):
     sql: str = ""                             # 排版后的 SQL；need_clarify、failed 时为空
     plan: QueryPlan | None = None
     clarify: Clarify | None = None
-    message: str = ""                         # failed 的原因，或者不是查数需求时的回复
+    explanation: Explanation | None = None
+    message: str = ""                         # failed 的原因、不是查数需求时的回复或解释的一句话
     failed_step: str = ""                     # STEPS 之一或 INTERNAL_STEP
     assumptions: list[str] = Field(default_factory=list)      # ① 与 ④ 合并去重
     validation: ValidationSummary | None = None
@@ -388,6 +456,14 @@ class QueryResult(BaseModel):
             call.pop("messages", None)
             call.pop("reply", None)
         return data
+
+    def basis(self) -> RoundBasis:
+        """本轮的需求、方案和候选表依据，不含查询结果"""
+        return RoundBasis(question=self.question, requirement=self.requirement, status=self.status,
+                          failed_step=self.failed_step, message=self.message, metadata_version=self.metadata_version,
+                          parsed=self.parsed, plan=self.plan,
+                          sql_tables=list(self.validation.tables) if self.validation else [],
+                          candidate_tables=list(self.candidate_tables), scope_level=self.scope_level)
 
     def next_context(self) -> dict[str, Any]:
         """下一轮要带给 QueryRequest 的上下文：完整需求；停在反问上时带反问；校验通过时带 SQL 和它用到的表

@@ -3,7 +3,7 @@
  * 只写了界面用到的字段；后端加字段不影响这里
  */
 
-export type Status = 'ok' | 'need_clarify' | 'unvalidated' | 'failed'
+export type Status = 'ok' | 'need_clarify' | 'unvalidated' | 'failed' | 'explained'
 
 /** 流水线的七步，和 nl2sql/schemas.py 的 STEPS、STEP_LABELS 一一对应 */
 export const STEPS = ['parse', 'recall', 'evidence', 'plan', 'generate', 'validate', 'output'] as const
@@ -38,6 +38,7 @@ export interface Clarify {
 
 export interface ParsedRequest {
   is_query: boolean
+  explains_previous?: boolean
   reply: string
   answers_clarify?: boolean           // 这一轮是不是在回答上一轮的反问；早先存下的轮次没有这一项
   requirement: string
@@ -82,6 +83,43 @@ export interface QueryPlan {
   dropped_tables: string[]
 }
 
+export interface FieldMatch {
+  term: string
+  role: 'metric' | 'dimension' | 'filter'
+  column: string
+  column_cn: string
+  weak?: boolean                      // 字段名本身对不上，加上表名才对得上，只算可能
+}
+
+export interface TableDiagnosis {
+  name: string
+  table_id: string
+  table_cn: string
+  layer: string
+  table_type: string
+  standard: boolean
+  grain_columns: string[]
+  gaps: string[]
+  stage: 'unknown' | 'ambiguous' | 'no_previous' | 'used' | 'pruned' | 'not_chosen' | 'not_recalled' | 'outside'
+  conclusion: string
+  reasons: string[]
+  matches: FieldMatch[]
+  similar: string[]
+  switchable: boolean
+}
+
+export interface Explanation {
+  summary: string
+  requirement: string
+  tables: PlanTable[]
+  table_basis: string
+  caliber: string
+  dropped_tables: string[]
+  candidate_tables: string[]
+  notes: string[]
+  named: TableDiagnosis[]
+}
+
 export interface ValidationSummary {
   ok: boolean
   errors: string[]
@@ -122,6 +160,7 @@ export interface QueryResult {
   sql: string
   plan: QueryPlan | null
   clarify: Clarify | null
+  explanation?: Explanation | null   // 早先存下的轮次没有这一项
   message: string
   failed_step: string
   assumptions: string[]

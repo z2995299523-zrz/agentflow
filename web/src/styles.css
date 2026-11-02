@@ -253,3 +253,22 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
   .model-picker { width: 150px; }
   .chat-inner, .composer { padding-left: 16px; padding-right: 16px; }
 }
+
+/* 解释上一轮：字段对照与长表名在窄屏内换行 */
+.explain-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; overflow-wrap: anywhere; }
+.explain-basis { min-width: 0; }
+.explain-basis .ant-table { table-layout: fixed; }
+.explain-basis .ant-table-cell { overflow-wrap: anywhere; word-break: break-word; }
+.explain-basis p { margin: 10px 0 0; white-space: pre-wrap; }
+.explain-candidates { margin: 0; }
+.explain-candidates .ant-tag { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.explain-table { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; padding: 12px; border: 1px solid var(--c-border); border-radius: 6px; }
+.explain-table-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; }
+.explain-table-head a { min-width: 0; }
+.explain-table .ant-btn { max-width: 100%; height: auto; min-height: 32px; white-space: normal; overflow-wrap: anywhere; }
+.explain-matches { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; max-width: 100%; }
+.explain-matches .ant-tag { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.explain-match-note { flex-basis: 100%; font-size: 12px; }
+.explain-similar { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+.explain-similar-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.explain-similar-row .ant-btn { padding-inline: 0; text-align: left; }

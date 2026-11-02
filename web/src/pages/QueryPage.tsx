@@ -36,6 +36,11 @@ function clarifySkipped(turns: Turn[], index: number): boolean {
   return next?.result.parsed?.answers_clarify === false
 }
 
+/** 解释之后还没有新的完整需求时，才能用解释卡片继续改表 */
+function explainActive(turns: Turn[], index: number): boolean {
+  return turns.slice(index + 1).every((turn) => !turn.result.requirement)
+}
+
 export default function QueryPage() {
   const { conversationId: routeId } = useParams()
   const navigate = useNavigate()
@@ -107,6 +112,7 @@ export default function QueryPage() {
                 <Question text={turn.question} time={turn.created_at} />
                 <AnswerCard
                   result={turn.result}
+                  explainActive={explainActive(turns, index)}
                   clarifyActive={turn.id === chat.detail?.context.clarify_turn_id}
                   clarifySkipped={turn.result.status === 'need_clarify' && clarifySkipped(turns, index)}
                   busy={chat.busy}

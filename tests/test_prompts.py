@@ -106,13 +106,13 @@ def evidence_for(plan: QueryPlan) -> Evidence:
 
 # ── 系统提示词是固定的，带 JSON 格式示例 ────────
 
-@pytest.mark.parametrize("system", [PARSER_SYSTEM, PLANNER_SYSTEM, GENERATOR_SYSTEM])
+@pytest.mark.parametrize("system", [PARSER_SYSTEM, PLANNER_SYSTEM, GENERATOR_SYSTEM], ids=["parser", "planner", "generator"])
 def test_system_prompts_introduce_a_laboratory_mart_and_never_say_bank(system):
     assert system.startswith("你是实验室数据仓库专题库的") and "银行" not in system
     assert not re.search("贷款|存款|保证金|客户经理|分行", system)        # 示例也是实验室领域的，不让回复里冒出银行用语
 
 
-@pytest.mark.parametrize("system", [PARSER_SYSTEM, PLANNER_SYSTEM])
+@pytest.mark.parametrize("system", [PARSER_SYSTEM, PLANNER_SYSTEM], ids=["parser", "planner"])
 def test_json_steps_ask_for_json_only_and_show_the_format(system):
     assert "只输出 JSON" in system and "json" in system.lower()
     assert json_blocks(system)                                  # DeepSeek 的 JSON 模式要求提示词里有格式示例
@@ -1178,3 +1178,34 @@ def test_render_tables_is_never_shrunk(mock_store, monkeypatch):
 
 def test_render_tables_of_nothing_is_empty(evidence):
     assert render_tables(evidence, []) == "" and render_tables(evidence, ["x.y"]) == ""
+
+
+def test_named_table_and_explanation_rules() -> None:
+    """① 区分解释与换表；④ 的规则只在点名时才放进用户消息，系统提示词里没有，普通问题的选表不受影响"""
+    assert "explains_previous" in PARSER_SYSTEM and "named_tables" in PARSER_SYSTEM
+    assert "换用表" in PARSER_SYSTEM and "业务上的原因" in PARSER_SYSTEM
+    assert "用户点名" not in PLANNER_SYSTEM and "优先于规则 4" in prompts.NAMED_TABLE_RULE
+    assert prompts._REASON_NAMES["named"] == "用户点名" and "named" not in prompts.COMPACT_REASONS
+    examples = [json.loads(block) for block in json_blocks(PARSER_SYSTEM)]
+    switch = next(item for item in examples if item.get("named_tables") and item.get("is_query"))
+    assert switch["follows_up"] and not switch["explains_previous"]
+    assert "demo_fund_history" not in switch["requirement"]
+
+
+def test_named_limits_only_appear_when_needed(mock_store) -> None:
+    """④ 限制只在有点名表时多出一行"""
+    evidence = make_evidence(mock_store)
+    assert "用户点名要用的表：" not in prompts._planner_limits(evidence, True, True)
+    evidence.tables[0].reason = "named"
+    assert f"用户点名要用的表：{ORG_BAL}。{prompts.NAMED_TABLE_RULE}" in prompts._planner_limits(evidence, True, True)
+
+
+def test_named_tables_show_all_fields_even_after_fifth_position(mock_store) -> None:
+    """点名表排在第 5 张以后仍全列字段"""
+    fillers = [EvidenceTable(table_id=f"ads.demo_filler_{index}", table_cn="演示", layer="专题层", table_type="流水表", reason="recall")
+               for index in range(5)]
+    table = evidence_table(mock_store, ORG_BAL, reason="named")
+    evidence = Evidence(use_lineage=False, use_examples=False, tables=[*fillers, table])
+    block = table_block(render_evidence(evidence), ORG_BAL)
+    assert "用户点名" in block
+    assert all(column.name in block for column in table.columns)

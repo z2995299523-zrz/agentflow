@@ -62,6 +62,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
   ① 缺对象或指标时反问，直接去 ⑦；④ need_upstream：上溯一层回到 ②（最多 2 层），② 还拿 ④ 说缺的东西逐条单独补召回第 0 层的表；need_clarify、cannot_answer 直接去 ⑦
   ④ ok：只说「日均」没说统计区间时 clarify_daily_average 改成反问；prune_plan 去掉用不到的表（孤立表、LEFT JOIN 右边字段不进结果的表、只用关联键关联专题层的维表，记进 dropped_tables，⑤ 再用就是 R8 错误）再去 ⑤
   ⑥ 有错误：带着错误回到 ⑤（最多修正 2 次）
+  ① 在问上一轮的结果（explains_previous）：explain.py 按记录和元数据解释，状态 explained，直接去 ⑦；点名的表对不上时停在 ①
 ```
 
 - `schemas.py`：各步骤的输入输出，是模块之间的契约；`llm.py`：模型调用（`ChatModelClient`、测试用的 `ScriptedLLM`、带重试的 `structured_call`）
@@ -73,6 +74,8 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
 - sqlite 执行层用的是 `metadata/testdata.py` 按元数据造的假数据（结果的 note 和界面写明不是业务数据），`TEST_DATA_DB` 指文件，空着用资料目录里的
 - 看板：输入框下面的开关默认打开，请求带 `execute`，关掉只生成 SQL。问题里写明形式时 `output.detect_display` 认出来放进结果的 `display`；没写时界面反问，列出 `web/src/utils/chartPlan.ts` 算出的这份结果能用的形式（指标卡、折线图、条形图、柱状图、饼图、表格），点一下用 ECharts 在浏览器里画，不再查询，也不调模型
 - 流水线无状态：追问、反问的上下文由调用方放进 `QueryRequest`（`prev_requirement`、`prev_clarify`，上一轮校验通过时还有 `prev_sql`、`prev_tables`，规则见 `QueryResult.next_context`）。① 判断本轮是在上一轮上追问（`follows_up`）时，② 把上一轮的表放进候选，④ ⑤ 以上一轮的 SQL 为底增量修改，不多调模型。以它为底之前先用当前元数据校验，元数据换过版本、表或字段没了就不以它为底，按完整需求重新生成，原因写进结果的假设；每一轮结果记下元数据版本号（`metadata_version`）
+- 解释上一轮：① 判断本轮在问上一轮的用表、口径（`explains_previous`）时不往下走，`explain.py` 读上一轮的依据（`RoundBasis`，由 `ConversationStore.basis` 取，里面没有查询结果）和元数据写解释：用了哪些表、为什么用，用户问到的表卡在哪一步（对不上、没进候选的名次、④ 看过没选、被精简去掉、不在第 0 层），需求要的东西有没有名字相近的字段。不多调模型，不动会话上下文；理由全由代码写，不让模型事后编
+- 点名用表：① 把用户点名的表写进 `named_tables`，需求里不写表名。英文名对不上、追问里要改用的中文叫法对不上时停在 ①，给相近的表，不换表继续；顺带提到的中文泛称不拦，写进假设；同名的表取标准表里层级最高的，写进假设。对上的表 ② 排最前（入选原因 named，全列字段，不占名额），改用上一轮没用的表时不以上一轮的 SQL 为底；④ 要从它取指标或维度（`check_plan`，只关联进来不算），用不了写 cannot_answer 说缺什么；`prune_plan` 不去掉它；⑥ SQL 没用到是 R8 错误。回答反问这一轮从 `RoundBasis` 带上上一轮点名的表
 - 对照实验开关 `use_lineage`、`use_examples`：A 组 False/False（全部层级召回、只给表结构推得出的关联、不上溯），B 组 True/False，C 组 True/True
 
 ### 接口、界面与评估
@@ -84,7 +87,7 @@ QueryRequest → ① parse(模型) → ② recall → ③ evidence → ④ plan(
   - 元数据库文件变了（导入、promote、rollback）：`service.get_metadata` 在后台读好再换，期间照常返回旧版本，读失败继续用旧的、同一个文件不重试；`/health` 报 `metadata_reloading`、`reload_error`。服务器切资料是改 `MART_DIR` 再重启，不走这条
   - 启动时在后台线程预热（`service.warm_up`：装配流水线、加载 BGE）
 - `nl2sql/history.py`：会话历史（`资料目录/build/history.db`）。追问、反问的上下文由服务端从会话里算：最近一个有完整需求的轮次的需求，以及它还没回答的反问；那一轮校验通过时还有它的 SQL 和用到的表
-- `web/`：查数页（右上角选模型、七步进度、反问点选、追问、会话列表、SQL 高亮复制、结果看板和分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
+- `web/`：查数页（右上角选模型、七步进度、反问点选、追问、解释上一轮的卡片和改用按钮、会话列表、SQL 高亮复制、结果看板和分页导出）、元数据页（按层级浏览、搜索、字段清单、React Flow 血缘图）。前端约定在 `.claude/rules/web.md`
 - `eval/`：43 题题库（11 题登记了其它正确答案；「反问之后」3 题测上一轮停在反问上的下一轮，第一轮没反问按答错计）、结果比对、三组对照评估与错题归因、真实库静态评估、召回重放命令（`recall_replay.py`，结果存在 `build/replay/`，只测得了第 ② 步，改了 ① 的提示词要重跑评估）；报告在 `eval/reports/`
 
 ## 约定

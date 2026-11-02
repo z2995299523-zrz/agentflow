@@ -148,3 +148,19 @@ def test_context_carries_no_sql_from_a_turn_that_did_not_pass_validation(store):
 
     context = store.context(conversation.id)
     assert context.prev_requirement == REQUIREMENT and context.prev_sql == "" and context.prev_tables == []
+
+
+def test_basis_tracks_context_round_and_explanations_do_not_replace_it(store) -> None:
+    """解释轮没有完整需求，最近的依据和反问上下文都保留"""
+    conversation = store.create()
+    assert store.basis(conversation.id) is None
+    first = clarify_result()
+    store.add_turn(conversation.id, first.question, first)
+    context = store.context(conversation.id)
+    store.add_turn(conversation.id, "为什么这样选", QueryResult(status="explained", question="为什么这样选"))
+    assert store.basis(conversation.id) == first.basis()
+    assert store.context(conversation.id) == context
+    second = ok_result("查询新的演示需求")
+    store.add_turn(conversation.id, second.question, second)
+    assert store.basis(conversation.id) == second.basis()
+    assert store.context(conversation.id).prev_requirement == second.requirement

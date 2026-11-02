@@ -80,9 +80,11 @@ export interface StatusView {
   tone: 'success' | 'warning' | 'info' | 'error'
 }
 
-/** 一轮结果的结论：成功、需人工检查、待确认、不是查数需求、没有生成 SQL */
+/** 一轮结果的结论：成功、需人工检查、待确认、解释上一轮、不是查数需求、没有生成 SQL */
 export function describeStatus(result: QueryResult): StatusView {
   switch (result.status) {
+    case 'explained':
+      return { color: 'blue', text: '解释上一轮', tone: 'info' }
     case 'ok':
       return { color: 'success', text: '已生成 SQL', tone: 'success' }
     case 'unvalidated':

@@ -8,7 +8,7 @@
     R5 快照表在所在查询层带具体的数据日期条件    错误（只取最早、最晚、去重日期的除外）
     R6 表之间的等值关联属于已知关联关系          警告
     R7 汇总查询里被关联的表按粒度字段全部约束    警告
-    R8 实际使用的表和字段与查询方案一致          警告（用到了方案明确去掉的表是错误）
+    R8 实际使用的表和字段与查询方案一致          警告（用到了方案明确去掉的表是错误；没有用到用户点名的表也是错误）
     R9 代码字段不和中文名称比较                  错误（能确定是代码字段时才报，见 metadata.codes）
 
 做法：R1 解析；R2 看语法树的根节点和全部节点；R3 遍历实体表节点；R4 按元数据限定字段后逐个查询层检查每个字段；
@@ -508,7 +508,7 @@ class SqlValidator:
 
     def validate(self, sql: str, expected_tables: Collection[str] | None = None,
                  expected_columns: Collection[str] | None = None,
-                 excluded_tables: Collection[str] = ()) -> ValidationReport:
+                 excluded_tables: Collection[str] = (), *, required_tables: Collection[str] = ()) -> ValidationReport:
         """校验一条 SQL
 
         R1、R2 不通过时直接返回；R3 不通过时不报 R4；作用域解析失败时报一条 R4 并跳过 R5–R7、R9。
@@ -518,6 +518,7 @@ class SqlValidator:
             sql: 待校验的 SQL
             expected_tables: 查询方案里的表，传入时检查 R8
             expected_columns: 查询方案里的字段（模式.表.字段），传入时检查 R8
+            required_tables: 用户点名要用的表，SQL 没用到时报 R8 错误
             excluded_tables: 查询方案明确去掉的表（QueryPlan.dropped_tables），SQL 用到了报 R8 错误
 
         Returns:
@@ -536,7 +537,7 @@ class SqlValidator:
             self._guarded("R6", run, lambda: self._check_relations(root, resolver, run))
             self._guarded("R7", run, lambda: self._check_fan_out(root, resolver, run))
             self._guarded("R9", run, lambda: self._check_code_literals(root, resolver, run))
-        self._check_plan(run, expected_tables, expected_columns, excluded_tables)
+        self._check_plan(run, expected_tables, expected_columns, excluded_tables, required_tables)
         return run.report()
 
     @staticmethod
@@ -970,8 +971,11 @@ class SqlValidator:
 
     @staticmethod
     def _check_plan(run: _Run, expected_tables: Collection[str] | None,
-                    expected_columns: Collection[str] | None, excluded_tables: Collection[str] = ()) -> None:
-        """R8：与查询方案对比。表看两边的差集；字段只看方案里有、SQL 没用到的；用到了方案明确去掉的表是错误"""
+                    expected_columns: Collection[str] | None, excluded_tables: Collection[str] = (),
+                    required_tables: Collection[str] = ()) -> None:
+        """R8：与查询方案对比。表看两边的差集；字段只看方案里有、SQL 没用到的；用到精简掉的表或没用到点名表是错误"""
+        for table in sorted({name.strip().lower() for name in required_tables if name.strip()} - set(run.tables)):
+            run.error("R8", f"用户点名要用 {table}，SQL 里没有用到它，请改用这张表")
         excluded = {name.strip().lower() for name in excluded_tables if name.strip()}
         if back := sorted(excluded & set(run.tables)):
             run.error("R8", f"查询方案已经去掉了 {_join(back)}（只用来关联、没有取字段，去掉不影响结果），"

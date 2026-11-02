@@ -644,3 +644,87 @@ def test_the_table_whose_description_matches_ranks_first_through_the_table_vecto
 
     assert order(bundle) == (["ads.b_bal", "ads.a_bal"], [])
     assert order(old) == (["ads.a_bal", "ads.b_bal"], [])          # 没有表向量：字段两路上 a 的字段编号小，排在前面
+
+
+def test_named_tables_come_first_without_taking_slots_and_never_repeat() -> None:
+    """点名表在最前，标准表仍取满名额，上一轮和缺项等来源不重复带入"""
+    rows = [(f"ads.demo_t{index}", "经费支出", [(f"amount_{index}", "经费支出金额")]) for index in range(12)]
+    rows.append(("dwd.demo_detail", "经费支出明细", [("amount", "经费支出金额")]))
+    retriever = make_retriever(make_mart(rows), with_embedder=False)
+    query = RecallQuery("查询经费支出", ["经费支出"])
+    result = retriever.recall(query, named_tables=["ads.demo_t0", "dwd.demo_detail", "ads.demo_t0", "ads.demo_absent"],
+                              carry_tables=["ads.demo_t0", "dwd.demo_detail"], missing_terms=["经费支出"])
+    assert [(item.table_id, item.reason) for item in result.tables[:2]] == [("ads.demo_t0", "named"), ("dwd.demo_detail", "named")]
+    assert sum(item.reason == "recall" for item in result.tables) == MAX_TABLES
+    ids = [item.table_id for item in result.tables]
+    assert len(ids) == len(set(ids)) and "ads.demo_absent" not in ids
+    assert result.tables[0].hits and result.tables[0].score > 0
+
+
+def test_missing_named_tables_are_skipped(mock_retriever) -> None:
+    """找不到的点名表不污染召回"""
+    query = RecallQuery("查询对公存款余额", ["对公存款余额"])
+    assert mock_retriever.recall(query, named_tables=["ads.demo_absent"]) == mock_retriever.recall(query)
+
+
+def test_locate_standard_extra_outside_and_no_hit() -> None:
+    """重放分别按标准和非标准池排名，范围外和未命中都没有名次"""
+    mart = make_mart([("ads.demo_standard", "经费支出", [("amount", "经费支出")]),
+                      ("ads.demo_extra", "经费支出", [("extra_amount", "经费支出")]),
+                      ("dwd.demo_detail", "经费明细", [("amount", "经费支出")])])
+    mart.tables[1].standard = False
+    retriever = make_retriever(mart, with_embedder=False)
+    query = RecallQuery("经费支出", ["经费支出"])
+    standard = retriever.locate(query, "ads.demo_standard")
+    extra = retriever.locate(query, "ads.demo_extra")
+    outside = retriever.locate(query, "dwd.demo_detail")
+    assert (standard.pool, standard.rank, standard.ranked, standard.slots) == ("standard", 1, 1, MAX_TABLES)
+    assert (extra.pool, extra.rank, extra.ranked, extra.slots) == ("extra", 1, 1, MAX_EXTRA_TABLES)
+    assert (outside.pool, outside.rank, outside.ranked, outside.slots) == ("outside", None, 0, 0)
+    assert retriever.locate(RecallQuery("完全无关", ["完全无关"]), "ads.demo_standard").rank is None
+
+
+def test_match_fields_uses_names_only_and_deduplicates_roles() -> None:
+    """字段名匹配按覆盖率取最好一个，匹配不上留空，同角色重复说法只列一次"""
+    mart = make_mart([("ads.demo_fund", "演示表", [("amount", "经费支出"), ("total_amount", "全口径经费支出"),
+                                                ("month", "月份"), ("dept_name", "部门名称")])])
+    retriever = make_retriever(mart)
+    query = RecallQuery("演示需求", ["经费支出", " 经费支出 ", "不存在指标"], ["月份"], ["部门名称", "不存在条件"])
+    matches = retriever.match_fields(query, "ads.demo_fund")
+    assert matches == [("经费支出", "metric", "amount", "经费支出", False), ("不存在指标", "metric", "", "", False),
+                       ("月份", "dimension", "month", "月份", False), ("部门名称", "filter", "dept_name", "部门名称", False),
+                       ("不存在条件", "filter", "", "", False)]
+    assert retriever.match_fields(RecallQuery("", ["经费支出"], ["经费支出"]), "ads.demo_fund") == [
+        ("经费支出", "metric", "amount", "经费支出", False), ("经费支出", "dimension", "amount", "经费支出", False)]
+
+
+def test_match_fields_prefers_the_closest_name_on_a_tie() -> None:
+    """覆盖率相同时取和说法最相近的字段，不良贷款余额不能代替贷款余额"""
+    mart = make_mart([("ads.demo_loan", "演示表", [("bad_bal", "不良贷款余额"), ("loan_bal", "贷款余额")])])
+    matches = make_retriever(mart).match_fields(RecallQuery("", ["对公贷款余额"]), "ads.demo_loan")
+    assert matches == [("对公贷款余额", "metric", "loan_bal", "贷款余额", False)]
+
+
+def test_match_fields_counts_the_table_name_only_as_possible() -> None:
+    """业务词写在表名上、字段名只沾一部分时算可能；字段名一点不沾的不算"""
+    mart = make_mart([("ads.demo_loan", "对公贷款借据", [("bal_rmb", "折人民币余额"), ("org_no", "放款机构")])])
+    retriever = make_retriever(mart)
+    matches = retriever.match_fields(RecallQuery("", ["对公贷款余额"]), "ads.demo_loan")
+    assert matches == [("对公贷款余额", "metric", "bal_rmb", "折人民币余额", True)]
+    assert retriever.match_fields(RecallQuery("", ["对公贷款笔数"]), "ads.demo_loan") == [
+        ("对公贷款笔数", "metric", "", "", False)]
+
+
+def test_named_table_hits_count_and_do_not_repeat_when_upstream_or_example() -> None:
+    """只有点名表能给的指标也算命中，上溯或样例再次提到它时保留点名原因"""
+    mart = make_mart([("ads.demo_total", "经费汇总", [("amount", "经费总额")]),
+                      ("dwd.demo_detail", "预算明细", [("budget", "独有预算指标")])],
+                     edges=[LineageEdge(target_table="ads.demo_total", target_column="amount", source_table="dwd.demo_detail", source_column="budget")],
+                     examples=[Example(example_id="demo#1", requirement="独有预算指标", sql_text="SELECT budget FROM dwd.demo_detail",
+                                       tables=["dwd.demo_detail"], source_file="demo.sql", line_no=1)])
+    retriever = make_retriever(mart, with_embedder=False)
+    query = RecallQuery("独有预算指标", ["独有预算指标"])
+    result = retriever.recall(query, 1, ["ads.demo_total"], named_tables=["dwd.demo_detail"], carry_tables=["dwd.demo_detail"])
+    assert result.tables[0].table_id == "dwd.demo_detail" and result.tables[0].reason == "named"
+    assert sum(item.table_id == "dwd.demo_detail" for item in result.tables) == 1
+    assert not any("独有预算指标」没有命中" in note for note in result.notes)

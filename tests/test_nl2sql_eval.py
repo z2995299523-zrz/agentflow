@@ -1397,3 +1397,9 @@ def test_mock_mode_with_a_mart_needs_an_out_directory(tmp_path, capsys):
     code = main(["--configs", "C", "--mart", str(tmp_path)])
 
     assert code == 2 and "--out" in capsys.readouterr().err
+
+
+def test_query_misclassified_as_explanation_has_parser_attribution(mock_store) -> None:
+    """查数题被解释分支接走，错题归因到第 ① 步"""
+    outcome, _ = score(sql_question(), make_result(status="explained", sql=""), store=mock_store)
+    assert outcome.attribution == "① 把查数需求当成了在问上一轮"

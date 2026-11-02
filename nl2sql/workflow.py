@@ -1,5 +1,6 @@
 """
 查询流水线的 LangGraph 编排
+① 在问上一轮的结果时只调解析模型，然后由代码解释并去输出；用户点名的表直接入候选，方案和 SQL 必须用它。
 七个节点：parse → recall → evidence → plan → generate → validate → output，三条回路：
 - ④ 说缺东西（need_upstream）时上溯一层，带着缺的东西回到 ②，最多上溯 MAX_SCOPE_LEVEL 层；
   ② 除了沿血缘往下层找，还拿缺的东西逐条单独在第 0 层补召回（专题层里横向的表，沿血缘找不到）
@@ -38,6 +39,7 @@ from lineage.graph import LineageGraph
 from metadata.store import MetadataStore
 from nl2sql.evidence import build_evidence, drop_examples, structure_store
 from nl2sql.executor import Executor, NullExecutor
+from nl2sql.explain import diagnose_unresolved, explain_previous, is_table_name, resolve_table, same_name_note
 from nl2sql.generator import generate_sql
 from nl2sql.llm import LLMClient, StepError
 from nl2sql.output import (
@@ -58,6 +60,7 @@ from nl2sql.schemas import (
     CallRecord,
     Evidence,
     ExecSummary,
+    Explanation,
     ParsedRequest,
     QueryPlan,
     QueryRequest,
@@ -76,6 +79,7 @@ SUMMARY_TABLES = 8                        # 轨迹摘要里最多列几张表
 SUMMARY_ERROR_CHARS = 40                  # 轨迹摘要里每条校验错误最多留几个字
 
 STATUS_OK, STATUS_UNVALIDATED, STATUS_CLARIFY, STATUS_FAILED = "ok", "unvalidated", "need_clarify", "failed"
+STATUS_EXPLAINED = "explained"
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +107,10 @@ class PipelineState(TypedDict, total=False):
     request: QueryRequest
     today: date
     parsed: ParsedRequest
+    explanation: Explanation
+    named_tables: list[str]                    # 已解析成元数据里的表
+    named_notes: list[str]                     # 点名的表怎么处理的，写进结果的假设
+    named_switch: bool                        # 点名了上一轮没用的表
     base_sql_rejected: list[str]              # 底稿在当前元数据上校验不过的前两条错误
     scope_level: int
     base_tables: list[str]
@@ -143,10 +151,17 @@ def _base_sql_of(request: QueryRequest, parsed: ParsedRequest | None) -> str:
 
 
 def _base_sql(state: PipelineState) -> str:
-    """取本轮可用的追问底稿；① 在当前元数据上校验不过时返回空串"""
-    if state.get("base_sql_rejected"):
+    """取本轮可用的追问底稿；改用新表或底稿在当前元数据上校验不过时返回空串"""
+    if state.get("base_sql_rejected") or state.get("named_switch"):
         return ""
     return _base_sql_of(state["request"], state.get("parsed"))
+
+
+def _named_in_force(request: QueryRequest, parsed: ParsedRequest) -> list[str]:
+    """本轮要用的点名表：回答反问时带上上一轮点名的表。需求里不写表名，反问之后 ① 看不到它们"""
+    earlier = request.prev_basis.parsed if request.prev_basis is not None else None
+    carried = earlier.named_tables if parsed.answers_clarify and earlier is not None else []
+    return _unique([*carried, *parsed.named_tables])
 
 
 def _short(text: str, limit: int) -> str:
@@ -246,13 +261,44 @@ class _Steps:
     # ① 需求解析
     def parse(self, state: PipelineState) -> tuple[dict[str, Any], str]:
         """调模型解析需求；不是查数需求时流程结束，把模型给用户的回复作为原因；缺了没法默认的要素时反问。
+        在问上一轮的结果时由代码解释；点名表先解析，改用新表时不用底稿。
         上一轮停在反问上时，摘要开头写明本轮是在回答它，还是按新问题处理"""
         parsed, calls = parse_request(self._llm, state["request"], state["today"])
         updates: dict[str, Any] = {"parsed": parsed, "calls": calls}
+        request = state["request"]
+        if parsed.explains_previous:
+            explanation = explain_previous(self._deps.store, self._deps.retriever, request.prev_basis, parsed.named_tables)
+            updates.update(status=STATUS_EXPLAINED, explanation=explanation, message=explanation.summary)
+            return updates, f"在问上一轮的结果：{explanation.summary}"
         if not parsed.is_query:
             updates.update(status=STATUS_FAILED, failed_step="parse", message=parsed.reply)
             return updates, "不是查数需求"
-        base_sql = _base_sql_of(state["request"], parsed)
+        named, ignored, unresolved, messages, notes = [], [], [], [], []
+        for name in _named_in_force(request, parsed):
+            match = resolve_table(self._deps.store, name, loose=parsed.follows_up)
+            if match.table_id:
+                if match.table_id not in named:
+                    named.append(match.table_id)
+                    notes.append(same_name_note(name, match))
+            elif is_table_name(name) or match.ambiguous or parsed.follows_up:
+                unresolved.append(diagnose_unresolved(name, match))
+                similar = "、".join(match.similar)
+                if match.ambiguous:
+                    messages.append(f"表名 {name} 对上了 {similar}，要写带模式名的全名。")
+                else:
+                    messages.append(f"元数据里没有表 {name}，最接近的：{similar or '（没有）'}。")
+            else:
+                ignored.append(name)
+        notes += [f"「{name}」不是元数据里的表名，没有当作指定的表" for name in ignored]
+        base_sql = _base_sql_of(request, parsed)
+        switched = bool(base_sql) and any(table not in request.prev_tables for table in named)
+        updates.update(named_tables=named, named_notes=_unique(notes), named_switch=switched)
+        if unresolved:
+            message = "".join(messages) + "这一轮没有生成 SQL，也没有换成别的表。"
+            explanation = Explanation(named=unresolved, summary=message)
+            updates.update(status=STATUS_FAILED, failed_step="parse", message=message, explanation=explanation)
+            return updates, message
+        base_sql = "" if switched else base_sql
         rejected = []
         if base_sql:
             for error in self._deps.validator.validate(base_sql).errors[:2]:
@@ -260,7 +306,9 @@ class _Steps:
                 rejected.append(reason if len(reason) <= 80 else reason[:79] + "…")
         updates["base_sql_rejected"] = rejected
         lead = ""
-        if rejected:
+        if switched:
+            lead = f"改用点名的表 {'、'.join(named)}，不以上一轮的 SQL 为底；"
+        elif rejected:
             lead = ("在上一轮的基础上追问，但上一轮的 SQL 在当前元数据上校验不过"
                     f"（{'；'.join(rejected)}），这一轮不以它为底；")
         elif state["request"].prev_clarify is not None:
@@ -277,13 +325,14 @@ class _Steps:
     # ② 候选召回
     def recall(self, state: PipelineState) -> tuple[dict[str, Any], str]:
         """召回候选表；A 组在全部层级里排名；不用样例时先去掉样例；一张候选也没有时流程结束。
-        追问时带上上一轮 SQL 用到的表；上溯时把 ④ 说缺的东西逐条单独补召回"""
+        点名表排最前；追问时带上上一轮 SQL 用到的表；上溯时把 ④ 说缺的东西逐条单独补召回"""
         request = state["request"]
         query = to_recall_query(state["parsed"], state["extra_terms"])
         all_layers = not request.use_lineage
         carry = request.prev_tables if _base_sql(state) else []
         recall = self._deps.retriever.recall(query, state["scope_level"], state["base_tables"], all_layers=all_layers,
-                                             carry_tables=carry, missing_terms=state.get("missing_terms", []))
+                                             carry_tables=carry, missing_terms=state.get("missing_terms", []),
+                                             named_tables=state.get("named_tables", []))
         if not request.use_examples:
             recall = drop_examples(recall)
         updates: dict[str, Any] = {"recall": recall}
@@ -364,7 +413,8 @@ class _Steps:
         expected_columns = [f"{item.table}.{item.column}" for item in plan.fields
                             if item.usage in ("metric", "dimension")]
         summary = summarize_validation(self._deps.validator.validate(state["sql"], expected_tables, expected_columns,
-                                                                     excluded_tables=plan.dropped_tables))
+                                                                     excluded_tables=plan.dropped_tables,
+                                                                     required_tables=state["evidence"].named_tables()))
         updates: dict[str, Any] = {"validation": summary}
         if "first_pass_ok" not in state:
             updates["first_pass_ok"] = summary.ok
@@ -423,6 +473,8 @@ class _Steps:
         elif status == STATUS_UNVALIDATED:
             errors = len(state["validation"].errors) if "validation" in state else 0
             summary = f"状态 unvalidated；修正 {state.get('repair_rounds', 0)} 次后仍有 {errors} 条校验错误"
+        elif status == STATUS_EXPLAINED:
+            summary = "状态 explained；按上一轮的记录解释，没有生成 SQL"
         elif status == STATUS_CLARIFY:
             summary = "状态 need_clarify；等待用户回答反问"
         else:
@@ -471,14 +523,15 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
         clarify = plan.clarify if plan is not None else parsed.clarify if parsed is not None else None
     assumptions = merge_assumptions(parsed.assumptions if parsed is not None else [],
                                     plan.assumptions if plan is not None else [])
+    assumptions.extend(state.get("named_notes", []))
     if state.get("base_sql_rejected"):
         assumptions.append("元数据已更新，上一轮的 SQL 在当前版本上校验不过"
                            f"（{'；'.join(state['base_sql_rejected'])}），这一轮没有以它为底，按完整需求重新生成")
     return QueryResult(
         status=values["status"], question=request.question, metadata_version=metadata_version, model=model,
         requirement=parsed.requirement.strip() if parsed is not None and parsed.is_query else "",
-        parsed=parsed, sql=sql, plan=plan, clarify=clarify,
-        message=values["message"] if values["status"] == STATUS_FAILED else "",
+        parsed=parsed, sql=sql, plan=plan, clarify=clarify, explanation=state.get("explanation"),
+        message=values["message"] if values["status"] in (STATUS_FAILED, STATUS_EXPLAINED) else "",
         failed_step=values["failed_step"] if values["status"] == STATUS_FAILED else "",
         assumptions=assumptions,
         validation=state.get("validation"), first_pass_ok=state.get("first_pass_ok"),
@@ -492,11 +545,11 @@ def _build_result(state: PipelineState, *, sql: str, exec_result: ExecSummary | 
 # ── 图 ──────────────────────────────────────
 
 def _go_unless_failed(next_step: str) -> Callable[[PipelineState], str]:
-    """路由：状态是 failed（或者 ① 要反问，need_clarify）就去输出，否则去下一步"""
+    """路由：failed、① 反问或解释上一轮（explained）去输出，否则去下一步"""
     target, output = _node_name(next_step), _node_name("output")
 
     def route(state: PipelineState) -> str:
-        return output if state.get("status") in (STATUS_FAILED, STATUS_CLARIFY) else target
+        return output if state.get("status") in (STATUS_FAILED, STATUS_CLARIFY, STATUS_EXPLAINED) else target
 
     return route
 

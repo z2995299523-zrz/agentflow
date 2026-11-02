@@ -386,3 +386,20 @@ def test_without_a_pending_clarify_nothing_counts_as_an_answer():
     parsed, _ = parse_request(llm, REQUEST, TODAY)
 
     assert parsed.answers_clarify is False
+
+
+def test_explanation_accepts_an_empty_reply() -> None:
+    """在问上一轮时由代码回答，① 不必写回复"""
+    parsed = ParsedRequest(is_query=False, explains_previous=True, named_tables=["demo_fund_history"])
+    assert check_parsed(parsed) == []
+    llm = ScriptedLLM([parsed.model_dump_json()])
+    actual, calls = parse_request(llm, REQUEST, TODAY)
+    assert actual.explains_previous and actual.reply == "" and len(calls) == 1
+
+
+def test_query_clears_explanation_and_deduplicates_named_tables() -> None:
+    """查数优先于解释，点名列表去空白、空串和重复项且保序"""
+    parsed = make_parsed(explains_previous=True, named_tables=[" demo_a ", "", "demo_b", "demo_a", "  "])
+    actual, _ = parse_request(ScriptedLLM([parsed.model_dump_json()]), REQUEST, TODAY)
+    assert actual.is_query and not actual.explains_previous
+    assert actual.named_tables == ["demo_a", "demo_b"]

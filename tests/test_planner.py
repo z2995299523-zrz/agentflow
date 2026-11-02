@@ -490,3 +490,26 @@ def test_a_single_period_in_the_evidence_is_not_a_choice(wide):
     narrow = wide.model_copy(update={"tables": [table for table in wide.tables if table.table_id != CUST_BAL]})
 
     assert clarify_daily_average(avg_parsed(), narrow, avg_plan()).decision == "ok"
+
+
+def test_ok_plan_must_use_named_table_but_cannot_answer_can_refuse(mock_store) -> None:
+    """指定表必须在成功方案里，确实不能满足时允许明确拒绝"""
+    evidence = make_evidence(mock_store)
+    evidence.tables[1].reason = "named"
+    problems = check(make_plan(), evidence)
+    assert any(f"用户点名要用 {CUST_BAL}" in problem and "不算用上" in problem for problem in problems)
+    assert check(QueryPlan(decision="cannot_answer", reason="点名表没有需要的指标"), evidence) == []
+
+
+@pytest.mark.parametrize("join_only", [False, True])
+def test_prune_plan_preserves_named_tables(mock_store, join_only: bool) -> None:
+    """孤立点名表和只用于关联的点名表都保留"""
+    evidence = make_evidence(mock_store)
+    evidence.tables[2].reason = "named"
+    if join_only:
+        plan = make_plan(fields=[PlanField(table=ORG_BAL, column="dep_bal_rmb", usage="metric"),
+                                 PlanField(table=DIM_ORG, column="org_no", usage="join")])
+    else:
+        plan = make_plan(fields=[PlanField(table=ORG_BAL, column="dep_bal_rmb", usage="metric")], joins=[])
+    pruned, removed = prune_plan(plan, evidence)
+    assert DIM_ORG in [item.table for item in pruned.tables] and DIM_ORG not in removed

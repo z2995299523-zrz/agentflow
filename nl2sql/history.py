@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from nl2sql.schemas import Clarify, QueryResult
+from nl2sql.schemas import Clarify, QueryResult, RoundBasis
 
 HISTORY_FILE_NAME = "history.db"
 SCHEMA_VERSION = 1
@@ -223,3 +223,10 @@ class ConversationStore:
                                " WHERE conversation_id = ? AND requirement <> '' ORDER BY id DESC LIMIT 1",
                                (conversation_id,)).fetchone()
         return _context_from(row)
+
+    def basis(self, conversation_id: str) -> RoundBasis | None:
+        """上一轮的依据：最近一个有完整需求的轮次（和 context 是同一轮），解释上一轮时用；没有这样的轮次时返回 None"""
+        with self._connect() as conn:
+            row = conn.execute("SELECT result FROM turns WHERE conversation_id = ? AND requirement <> ''"
+                               " ORDER BY id DESC LIMIT 1", (conversation_id,)).fetchone()
+        return QueryResult.model_validate_json(row["result"]).basis() if row is not None else None

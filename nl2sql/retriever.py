@@ -1,5 +1,6 @@
 """
 候选召回（流水线第 ② 步）
+用户点名的表直接排最前，不占名额；locate 和 match_fields 供代码解释上一轮的召回与字段匹配。
 对每个指标、维度、过滤要素，在当前范围内的表里用向量相似度和中文关键字两路找字段，
 合并后按表归组，保留最多 MAX_TABLES 张候选表；同时找最相似的样例，样例用到的表直接加入候选。
 
@@ -67,6 +68,7 @@ TABLE_VECTOR_WEIGHT = 1.0                    # 表向量路的 RRF 分再乘以�
 REQUIREMENT_WEIGHT = 2.0                     # 整句的 RRF 分乘以它；离线比过 1 和 2，2 稍好
 
 MAX_HITS_PER_TABLE = 5                       # 每张候选表最多列出的命中字段
+MATCH_COVERAGE = 0.5                         # 解释时比字段：说法的特征至少这么多对得上才算
 COLUMN_WEIGHT = 0.7                          # 关键字路：字段中文名覆盖率的权重
 TABLE_WEIGHT = 0.3                           # 关键字路：表中文名覆盖率的权重
 SUBSTRING_BONUS = 0.2                        # 检索词是字段中文名的子串时的加分
@@ -78,6 +80,7 @@ SCORE_DIGITS = 10                            # 比较得分时保留的小数位
 UPSTREAM_LAYERS = {1: ("标准层",), 2: ("标准层", "贴源层")}    # 上溯层数 → 上游表的层级
 REASON_RECALL, REASON_UPSTREAM, REASON_EXAMPLE = "recall", "upstream", "example"
 REASON_PREVIOUS, REASON_MISSING, REASON_EXTRA = "previous", "missing", "extra"
+REASON_NAMED = "named"
 VIA_VECTOR, VIA_KEYWORD = "vector", "keyword"
 
 
@@ -89,6 +92,16 @@ class RecallQuery:
     metrics: list[str]
     dimensions: list[str] = field(default_factory=list)
     filters: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TableLocation:
+    """一张表在第 0 层召回里的位置"""
+
+    pool: str                            # standard、extra 或 outside
+    rank: int | None                     # 从 1 开始，没有命中时为 None
+    ranked: int                          # 这个池子里有命中的表数
+    slots: int                           # 这个池子取前几张，范围外为 0
 
 
 @dataclass
@@ -108,7 +121,7 @@ class TableCandidate:
     """一张候选表"""
 
     table_id: str
-    reason: str                          # recall、previous、missing、upstream、extra 或 example
+    reason: str                          # named、recall、previous、missing、upstream、extra 或 example
     score: float
     hits: list[FieldHit]
 
@@ -367,11 +380,11 @@ class Retriever:
 
     def recall(self, query: RecallQuery, scope_level: int = 0, base_tables: Sequence[str] = (), *,
                all_layers: bool = False, carry_tables: Sequence[str] = (),
-               missing_terms: Sequence[str] = ()) -> RecallResult:
+               missing_terms: Sequence[str] = (), named_tables: Sequence[str] = ()) -> RecallResult:
         """召回候选表和相似样例
 
-        候选表分六类：recall 和 extra 合在一起按得分排在最前（同分时标准表在前），后面依次是 previous、missing、
-        upstream、example。
+        候选表分七类：named 是用户点名的表，排在最前、不占名额；recall 和 extra 再合在一起按得分排
+        （同分时标准表在前），后面依次是 previous、missing、upstream、example。
         recall 是范围内（第 0 层，只有标准表）得分最高的前 MAX_TABLES 张；
         previous 是追问时上一轮 SQL 用到的表（carry_tables），原样带进来；
         missing 是 ④ 最近一次说缺的东西（missing_terms）逐条单独在第 0 层排名，轮流各取一张，每条最多
@@ -391,6 +404,7 @@ class Retriever:
             all_layers: 全部表一起排名，不上溯
             carry_tables: 追问时上一轮 SQL 用到的表；元数据里没有的跳过
             missing_terms: ④ 说缺的东西（上溯时才有）
+            named_tables: 用户点名的表，直接排最前、不占名额，元数据里没有的跳过
 
         Returns:
             召回结果，说明里记着走了哪几路
@@ -407,31 +421,36 @@ class Retriever:
         terms = _prepare_terms(query)
         notes = [self._vector_note] if self._vector_note else []
         if not terms:
-            notes.append("没有检索词，候选表只来自上溯和相似样例")
+            notes.append("没有检索词，候选表只来自点名、上溯和相似样例" if named_tables else "没有检索词，候选表只来自上溯和相似样例")
 
         vectors, requirement_vector = self._embed(terms, query.requirement)
+        named = list(dict.fromkeys(table for table in named_tables if table in self._tables))
+        have = set(named)
+        named_scored, named_matched = self._score_tables(terms, vectors, named)
+        upstream = [table for table in upstream if table not in have]
         upstream_scored, upstream_matched = self._score_tables(terms, vectors, upstream)
         kept = self._keep_upstream(upstream, upstream_scored)
         taken = set(kept)       # 上游表单独排名；没留下的维表仍在第 0 层里，回到池子里和专题层的表一起排
-        pool = [table_id for table_id in (scope if all_layers else self._level0) if table_id not in taken]
+        pool = [table_id for table_id in (scope if all_layers else self._level0) if table_id not in taken | have]
         scored, matched = self._score_tables(terms, vectors, pool, requirement_vector, table_paths=True)
         # 非标准表在自己的范围里单独找命中字段，不和标准表争字段名次和候选名额
         extra_scored, extra_matched = ({}, set()) if all_layers else self._score_tables(
-            terms, vectors, self._extra_pool, requirement_vector, table_paths=True)
+            terms, vectors, [table for table in self._extra_pool if table not in have], requirement_vector, table_paths=True)
         notes += [f"检索词「{term.text}」没有命中任何字段" for position, term in enumerate(terms)
-                  if position not in matched | upstream_matched | extra_matched and not term.whole]
+                  if position not in matched | upstream_matched | extra_matched | named_matched and not term.whole]
 
         ranked = sorted((table_id for table_id, item in scored.items() if item.score > 0),
                         key=lambda table_id: self._order_key(table_id, scored.get(table_id)))
-        blocked = taken | set(carry_tables)     # 上溯留下的、上一轮用过的表照原来的入选原因排在后面
+        blocked = taken | set(carry_tables) | have     # 上溯留下的、上一轮用过的表照原来的入选原因排在后面
         extras = sorted((table_id for table_id, item in extra_scored.items() if item.score > 0 and table_id not in blocked),
                         key=lambda table_id: self._order_key(table_id, extra_scored[table_id]))[:MAX_EXTRA_TABLES]
         # 标准表、非标准表各自按名额取够，再合在一起按得分排；sorted 是稳定排序，两类各自的先后不变，同分时标准表在前
         tables = sorted([self._candidate(table_id, REASON_RECALL, scored) for table_id in ranked[:MAX_TABLES]]
                         + [self._candidate(table_id, REASON_EXTRA, extra_scored) for table_id in extras],
                         key=lambda candidate: (-_round(candidate.score), candidate.reason == REASON_EXTRA))
-        have = {candidate.table_id for candidate in tables}
-        all_scored = {**upstream_scored, **extra_scored, **scored}
+        tables = [self._candidate(table, REASON_NAMED, named_scored) for table in named] + tables
+        have.update(candidate.table_id for candidate in tables)
+        all_scored = {**upstream_scored, **extra_scored, **scored, **named_scored}
         for table_id in carry_tables:
             if table_id in self._tables and table_id not in have:
                 have.add(table_id)
@@ -451,6 +470,56 @@ class Retriever:
                     tables.append(self._candidate(table_id, REASON_EXAMPLE, all_scored))
         return RecallResult(scope_level=scope_level, scope_size=len(scope), tables=tables, examples=examples,
                             notes=notes)
+
+    def locate(self, query: RecallQuery, table_id: str) -> TableLocation:
+        """按第 0 层重放：这张表在它所在的池子里排第几"""
+        if table_id in self._level0:
+            kind, pool, slots = "standard", self._level0, MAX_TABLES
+        elif table_id in self._extra_pool:
+            kind, pool, slots = "extra", self._extra_pool, MAX_EXTRA_TABLES
+        else:
+            return TableLocation("outside", None, 0, 0)
+        terms = _prepare_terms(query)
+        vectors, requirement_vector = self._embed(terms, query.requirement)
+        scored, _ = self._score_tables(terms, vectors, pool, requirement_vector, table_paths=True)
+        ranked = sorted((table for table, item in scored.items() if item.score > 0),
+                        key=lambda table: self._order_key(table, scored[table]))
+        rank = ranked.index(table_id) + 1 if table_id in ranked else None
+        return TableLocation(kind, rank, len(ranked), slots)
+
+    def match_fields(self, query: RecallQuery, table_id: str) -> list[tuple[str, str, str, str, bool]]:
+        """只按名字比较指标、维度、过滤，返回（说法、角色、字段名、字段中文名、是否只是可能）；对不上时字段名为空
+
+        说法是字段中文名的子串，或者至少一半的特征在字段名里，算对上。字段名只沾一部分、加上表中文名才够一半的，
+        算可能：贷款借据表里的「折人民币余额」对「对公贷款余额」。业务词常常只写在表名上，字段名里没有。
+        """
+        matches: list[tuple[str, str, str, str, bool]] = []
+        seen: set[tuple[str, str]] = set()
+        table = self._tables.get(table_id)
+        context = _features(table.table_cn) if table is not None else frozenset()
+        for role, texts in (("metric", query.metrics), ("dimension", query.dimensions), ("filter", query.filters)):
+            for text in texts:
+                term = _squash(text)
+                if not term or (term, role) in seen:
+                    continue
+                seen.add((term, role))
+                features = _features(text)
+                candidates, possible = [], []
+                for index in self._table_fields.get(table_id, ()):
+                    item = self._fields[index]
+                    overlap = features & _features(item.column_cn + " " + item.column_name)
+                    coverage = len(overlap) / len(features) if features else 0
+                    named = _features(item.column_cn)
+                    closeness = len(features & named) / len(features | named) if features | named else 0
+                    row = (-coverage, -closeness, item.ref, item)    # 覆盖率相同时取和说法最相近的字段
+                    if term in item.squashed_cn or coverage >= MATCH_COVERAGE:
+                        candidates.append(row)
+                    elif overlap and len(features & (overlap | context)) / len(features) >= MATCH_COVERAGE:
+                        possible.append(row)
+                best = min(candidates or possible, key=lambda row: row[:3])[3] if candidates or possible else None
+                matches.append((text.strip(), role, best.column_name if best else "", best.column_cn if best else "",
+                                best is not None and not candidates))
+        return matches
 
     def _missing_candidates(self, missing_terms: Sequence[str], have: set[str]) -> list[TableCandidate]:
         """④ 说缺的东西逐条单独在第 0 层排名，每条最多补 MISSING_TABLES_PER_TERM 张还不在候选里的表

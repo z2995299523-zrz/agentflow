@@ -3,6 +3,7 @@
 用假模型（ScriptedLLM）和模拟专题库的元数据：回复的条数就是模型被调用的次数，调多了、调少了测试都会发现。
 """
 import json
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 from unittest.mock import Mock
@@ -16,7 +17,7 @@ from metadata.store import MetadataStore, write_store
 from nl2sql import workflow
 from nl2sql.executor import DuckDBExecutor, ExecResult
 from nl2sql.llm import ScriptedLLM
-from nl2sql.retriever import Retriever
+from nl2sql.retriever import RecallQuery, RecallResult, Retriever, TableLocation
 from nl2sql.schemas import (
     STEPS,
     Clarify,
@@ -90,12 +91,23 @@ class SpyRetriever:
         self._inner = inner
         self.calls: list[dict] = []
 
-    def recall(self, query, scope_level=0, base_tables=(), *, all_layers=False, carry_tables=(), missing_terms=()):
+    def locate(self, query: RecallQuery, table_id: str) -> TableLocation:
+        """转交解释所需的召回重放"""
+        return self._inner.locate(query, table_id)
+
+    def match_fields(self, query: RecallQuery, table_id: str) -> list[tuple[str, str, str, str, bool]]:
+        """转交解释所需的字段对照"""
+        return self._inner.match_fields(query, table_id)
+
+    def recall(self, query: RecallQuery, scope_level: int = 0, base_tables: Sequence[str] = (), *,
+               all_layers: bool = False, carry_tables: Sequence[str] = (), missing_terms: Sequence[str] = (),
+               named_tables: Sequence[str] = ()) -> RecallResult:
+        """转交召回，记录点名、上溯和追问的参数"""
         result = self._inner.recall(query, scope_level, base_tables, all_layers=all_layers, carry_tables=carry_tables,
-                                    missing_terms=missing_terms)
+                                    missing_terms=missing_terms, named_tables=named_tables)
         self.calls.append({"query": query, "scope_level": scope_level, "base_tables": list(base_tables),
                            "all_layers": all_layers, "carry_tables": list(carry_tables),
-                           "missing_terms": list(missing_terms), "result": result})
+                           "missing_terms": list(missing_terms), "named_tables": list(named_tables), "result": result})
         return result
 
 
@@ -804,3 +816,147 @@ def test_stream_gives_each_step_as_it_finishes_then_the_result(make):
     result = rest[-1]
     assert isinstance(result, QueryResult) and result.status == "ok"
     assert result.trace == [first, *rest[:-1]]
+
+
+def test_explanation_only_parses_then_outputs_and_does_not_change_requirement(make) -> None:
+    """解释一轮只调用 ①，不生成新需求或 SQL"""
+    from nl2sql.schemas import RoundBasis
+    basis = RoundBasis(requirement=REQUIREMENT, parsed=ParsedRequest.model_validate_json(parsed_json()),
+                       plan=QueryPlan.model_validate_json(plan_json()), sql_tables=[LOAN], candidate_tables=[LOAN])
+    reply = ParsedRequest(is_query=False, explains_previous=True, named_tables=[LOAN]).model_dump_json()
+    pipeline, llm, spy = make([reply])
+    result = pipeline.run(request(prev_requirement=REQUIREMENT, prev_basis=basis))
+    assert result.status == "explained" and result.requirement == "" and not result.sql
+    assert [step.step for step in result.trace] == ["parse", "output"]
+    assert len(llm.calls) == 1 and len(result.calls) == 1 and not spy.calls
+    assert result.explanation.named[0].stage == "used"
+    assert result.message == result.explanation.summary
+    assert "没有生成 SQL" in result.trace[-1].summary
+
+
+def test_previous_basis_and_query_rows_never_enter_any_prompt(make) -> None:
+    """上一轮依据只给代码，不序列化进任何模型消息，查询数据始终不在依据里"""
+    from nl2sql.schemas import ExecSummary
+    previous = QueryResult(status="ok", question="旧问题", requirement=REQUIREMENT,
+                           plan=QueryPlan(decision="ok", table_basis="仅代码可读依据标记"),
+                           exec_result=ExecSummary(executed=True, rows=[["查询结果私有标记"]]))
+    pipeline, llm, _ = make([parsed_json(), plan_json(), sql_reply(GOOD_SQL)])
+    result = pipeline.run(request(prev_basis=previous.basis()))
+    assert result.status == "ok"
+    prompts = json.dumps(llm.calls, ensure_ascii=False)
+    assert "仅代码可读依据标记" not in prompts and "查询结果私有标记" not in prompts
+    pipeline, llm, _ = make([ParsedRequest(is_query=False, explains_previous=True).model_dump_json()])
+    result = pipeline.run(request(prev_basis=previous.basis()))
+    assert result.status == "explained" and "仅代码可读依据标记" in result.explanation.table_basis
+    assert "仅代码可读依据标记" not in json.dumps(llm.calls, ensure_ascii=False)
+
+
+def test_unknown_named_table_stops_at_parse_without_later_calls(make) -> None:
+    """点名英文表对不上就停下，展示相近表，不悄悄换表"""
+    pipeline, llm, spy = make([parsed_json(named_tables=["demo_absent"])])
+    result = pipeline.run(request())
+    assert result.status == "failed" and result.failed_step == "parse" and not result.sql
+    assert len(llm.calls) == 1 and not spy.calls
+    assert [step.step for step in result.trace] == ["parse", "output"]
+    assert "元数据里没有表 demo_absent，最接近的：" in result.message
+    assert "这一轮没有生成 SQL，也没有换成别的表。" in result.message
+    assert result.requirement == REQUIREMENT and result.explanation.requirement == ""
+    assert result.explanation.named[0].stage == "unknown" and not result.explanation.named[0].switchable
+
+
+def test_generic_chinese_named_terms_do_not_block_and_become_assumptions(make) -> None:
+    """业务泛称不当作指定的表，照常查询并写进假设"""
+    pipeline, _, _ = make([parsed_json(named_tables=["经费看板"]), plan_json(), sql_reply(GOOD_SQL)])
+    result = pipeline.run(request())
+    assert result.status == "ok"
+    assert "「经费看板」不是元数据里的表名，没有当作指定的表" in result.assumptions
+
+
+def test_unresolved_chinese_name_stops_when_the_user_asked_to_switch(make) -> None:
+    """追问里说要改用的中文叫法对不上时不能悄悄忽略，要停下来给相近的表"""
+    pipeline, llm, spy = make([parsed_json(follows_up=True, named_tables=["不存在的看板"])])
+    result = pipeline.run(request(prev_requirement=REQUIREMENT, prev_sql=GOOD_SQL, prev_tables=[LOAN]))
+    assert result.status == "failed" and result.failed_step == "parse" and not spy.calls
+    assert result.explanation.named[0].stage == "unknown" and result.explanation.named[0].similar
+
+
+def test_named_table_survives_answering_a_clarify(make) -> None:
+    """需求里不写表名，回答反问这一轮要从上一轮的记录里带上点名的表"""
+    from nl2sql.schemas import RoundBasis
+    earlier = ParsedRequest.model_validate_json(parsed_json(named_tables=[LOAN]))
+    pipeline, _, spy = make([parsed_json(answers_clarify=True), plan_json(), sql_reply(GOOD_SQL)])
+    result = pipeline.run(request(prev_requirement=REQUIREMENT, prev_clarify=SAVINGS_CLARIFY,
+                                  prev_basis=RoundBasis(requirement=REQUIREMENT, parsed=earlier)))
+    assert result.status == "ok" and spy.calls[0]["named_tables"] == [LOAN]
+
+
+def test_named_table_in_the_first_round_is_not_described_as_a_switch(make) -> None:
+    """第一轮点名没有上一轮的 SQL 可换，摘要不说改用"""
+    pipeline, _, _ = make([parsed_json(named_tables=[LOAN]), plan_json(), sql_reply(GOOD_SQL)])
+    result = pipeline.run(request())
+    assert result.status == "ok" and "改用点名的表" not in result.trace[0].summary
+
+
+@pytest.mark.parametrize("same_table", [False, True])
+def test_named_switch_uses_base_sql_only_when_already_used(make, same_table: bool) -> None:
+    """改用新表丢弃底稿，点名旧表则保留原有追问方式"""
+    old_table = LOAN if same_table else "ads.corp_cust_dep_bal_d"
+    old_sql = GOOD_SQL if same_table else "SELECT SUM(dep_bal_rmb) FROM ads.corp_cust_dep_bal_d WHERE data_dt = DATE '2026-09-30'"
+    pipeline, llm, spy = make([parsed_json(follows_up=True, named_tables=[LOAN]), plan_json(), sql_reply(GOOD_SQL)])
+    validator = Mock(wraps=pipeline.deps.validator)
+    pipeline.deps.validator = validator
+    result = pipeline.run(request(prev_requirement=REQUIREMENT, prev_sql=old_sql, prev_tables=[old_table]))
+    assert result.status == "ok"
+    planning = json.dumps(llm.calls[1]["messages"][1:], ensure_ascii=False)
+    generating = json.dumps(llm.calls[2]["messages"][1:], ensure_ascii=False)
+    assert ("上一轮的 SQL" in planning) is same_table
+    assert ("上一轮的 SQL" in generating) is same_table
+    if not same_table:
+        assert not any(call.args[0] == old_sql for call in validator.validate.call_args_list)
+        assert result.trace[0].summary.startswith(f"改用点名的表 {LOAN}，不以上一轮的 SQL 为底；")
+    assert spy.calls[0]["named_tables"] == [LOAN]
+    assert spy.calls[0]["result"].tables[0].table_id == LOAN
+    assert spy.calls[0]["result"].tables[0].reason == "named"
+
+
+def test_sql_missing_named_table_returns_r8_to_generator(make) -> None:
+    """方案指定了表而 SQL 没用到时，用 R8 错误退回 ⑤ 修正"""
+    wrong_sql = "SELECT SUM(dep_bal_rmb) FROM ads.corp_cust_dep_bal_d WHERE data_dt = DATE '2026-09-30'"
+    pipeline, llm, _ = make([parsed_json(named_tables=[LOAN]), plan_json(), sql_reply(wrong_sql), sql_reply(GOOD_SQL)])
+    result = pipeline.run(request())
+    assert result.status == "ok" and result.repair_rounds == 1 and result.first_pass_ok is False
+    assert len(llm.calls) == 4
+    repair = json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
+    assert f"用户点名要用 {LOAN}，SQL 里没有用到它，请改用这张表" in repair
+    assert [step.step for step in result.trace].count("validate") == 2
+
+
+def test_named_table_only_joined_in_does_not_count_as_used(make) -> None:
+    """方案把点名的表写进 tables、指标却取别的表，不算用上，要重试"""
+    other = "ads.corp_cust_dep_bal_d"
+    padded = plan_json(tables=[PlanTable(table=LOAN), PlanTable(table=other, reason="用户点名")],
+                       fields=[PlanField(table=LOAN, column="loan_bal_rmb", usage="metric"),
+                               PlanField(table=other, column="data_dt", usage="filter")])
+    refusal = QueryPlan(decision="cannot_answer", reason=f"{other} 缺贷款余额").model_dump_json()
+    pipeline, llm, _ = make([parsed_json(named_tables=[other]), padded, refusal])
+    result = pipeline.run(request())
+    assert result.status == "failed" and result.failed_step == "plan" and len(llm.calls) == 3
+    assert "不算用上" in json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
+
+
+def test_named_table_cannot_be_silently_replaced_by_planner(make) -> None:
+    """④ 漏掉点名表会重试，明确缺项后以不能满足结束"""
+    other = "ads.corp_cust_dep_bal_d"
+    refusal = QueryPlan(decision="cannot_answer", reason=f"{other} 缺贷款余额，需求要对公贷款余额").model_dump_json()
+    pipeline, llm, _ = make([parsed_json(named_tables=[other]), plan_json(), refusal])
+    result = pipeline.run(request())
+    assert result.status == "failed" and result.failed_step == "plan" and not result.sql
+    assert other in result.message and len(llm.calls) == 3
+    assert "不算用上" in json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
+
+
+def test_complete_chinese_table_name_resolves_to_the_metadata_id(make, mock_store) -> None:
+    """完整中文表名对上元数据时按指定表使用"""
+    pipeline, _, spy = make([parsed_json(named_tables=[mock_store.table(LOAN).table_cn]), plan_json(), sql_reply(GOOD_SQL)])
+    result = pipeline.run(request())
+    assert result.status == "ok" and spy.calls[0]["named_tables"] == [LOAN]

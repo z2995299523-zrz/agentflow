@@ -8,6 +8,7 @@ import type { PendingTurn } from '../state/chat'
 import { useModel } from '../state/model'
 import { describeStatus, formatMs } from '../utils/format'
 import ClarifyPanel from './ClarifyPanel'
+import ExplainPanel from './ExplainPanel'
 import ResultTabs from './ResultTabs'
 import SqlBlock from './SqlBlock'
 import StepProgress from './StepProgress'
@@ -68,6 +69,7 @@ function ValidationAlerts({ result }: { result: QueryResult }) {
 
 interface AnswerProps {
   result: QueryResult
+  explainActive: boolean
   clarifyActive: boolean
   clarifySkipped: boolean             // 这一轮的反问没人回答：后面问了新问题
   busy: boolean
@@ -75,7 +77,7 @@ interface AnswerProps {
   onPick: (label: string) => void
 }
 
-export function AnswerCard({ result, clarifyActive, clarifySkipped, busy, dialect, onPick }: AnswerProps) {
+export function AnswerCard({ result, explainActive, clarifyActive, clarifySkipped, busy, dialect, onPick }: AnswerProps) {
   const status = describeStatus(result)
   const { labelOf } = useModel()
   return (
@@ -89,6 +91,7 @@ export function AnswerCard({ result, clarifyActive, clarifySkipped, busy, dialec
         <div className="requirement"><span className="requirement-label">完整需求</span>{result.requirement}</div>
       )}
       <StatusAlert result={result} />
+      {result.explanation && <ExplainPanel explanation={result.explanation} active={explainActive} disabled={busy} onPick={onPick} />}
       {result.status === 'need_clarify' && result.clarify && (
         <ClarifyPanel clarify={result.clarify} active={clarifyActive} skipped={clarifySkipped} disabled={busy}
                       onPick={onPick} />
@@ -97,7 +100,7 @@ export function AnswerCard({ result, clarifyActive, clarifySkipped, busy, dialec
         <SqlBlock sql={result.sql} dialect={dialect} validated={result.validation ? result.validation.ok : null} />
       )}
       <ValidationAlerts result={result} />
-      <ResultTabs result={result} />
+      {result.status !== 'explained' && <ResultTabs result={result} />}
     </div>
   )
 }

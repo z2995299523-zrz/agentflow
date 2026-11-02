@@ -266,7 +266,7 @@ def list_models() -> ModelList:
 def query(body: QueryBody, pipeline: Pipeline = Depends(get_pipeline_dep)) -> dict[str, Any]:
     """跑一轮查询，返回 QueryResult（不含提示词和模型原始回复）
 
-    status 是 ok、unvalidated（SQL 有校验错误，需人工检查）、need_clarify（要回答 clarify 里的问题）或 failed。
+    status 是 ok、unvalidated（SQL 有校验错误，需人工检查）、need_clarify（要回答 clarify 里的问题）、explained（在问上一轮的结果，看 explanation）或 failed。
     今天按系统日期，请求体里不收。model 不在能选的模型里时回 400。
     """
     _check_model(body.model)
@@ -372,6 +372,7 @@ def ask_in_conversation(conversation_id: str, body: QuestionBody, pipeline: Pipe
         raise HTTPException(404, str(error)) from error
     request = QueryRequest(question=body.question, prev_requirement=context.prev_requirement,
                            prev_clarify=context.prev_clarify, prev_sql=context.prev_sql, prev_tables=context.prev_tables,
+                           prev_basis=history.basis(conversation_id),
                            model=body.model, execute=body.execute)
 
     def finish(result: QueryResult) -> tuple[str, Any]:

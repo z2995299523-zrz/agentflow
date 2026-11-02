@@ -293,6 +293,8 @@ def _attribute(question: EvalQuestion, results: Sequence[QueryResult], premise_o
     if final.status == "failed":
         message = " ".join(final.message.split())[:60]
         return f"停在 {final.failed_step or '未知步骤'}：{message}"
+    if final.status == "explained":
+        return "① 把查数需求当成了在问上一轮"
     answered = _judged_as_answer(question, final)
     if question.expect == "sql" and final.status == "need_clarify":
         if answered is False:

@@ -499,3 +499,15 @@ def test_endpoints_answer_503_with_the_reason_when_the_service_is_unavailable(mo
     assert conversations.status_code == 503 and conversations.json()["detail"] == "会话历史库写不了"
     health = client.get("/health").json()
     assert health["status"] == "no_metadata" and "python -m metadata.importer" in health["hint"]
+
+
+def test_conversation_request_carries_previous_basis(api, history) -> None:
+    """会话查询把最近有需求的一轮依据传给流水线，不含执行数据"""
+    client, pipeline = api
+    conversation = history.create()
+    previous = sample_result()
+    history.add_turn(conversation.id, previous.question, previous)
+    response = client.post(f"/conversations/{conversation.id}/turns", json={"question": "为什么这样选表"})
+    assert response.status_code == 200
+    assert pipeline.requests[-1].prev_basis == previous.basis()
+    assert "exec_result" not in pipeline.requests[-1].prev_basis.model_dump()
