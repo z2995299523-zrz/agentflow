@@ -21,17 +21,17 @@ const TIPS = [
   '一轮问完可以接着追问，比如「换成上个月末」「只看前十名」',
 ]
 
-export default function Welcome({ onPick, domain }: { onPick: (text: string) => void; domain?: string }) {
+export default function Welcome({ onPick }: { onPick: (text: string) => void }) {
   const [examples, setExamples] = useState<ExampleInfo[]>([])
 
   useEffect(() => {
     let cancelled = false
     setExamples([])
-    api.examples(6, domain)
+    api.examples(6)
       .then((items) => { if (!cancelled) setExamples(items) })
       .catch(() => { if (!cancelled) setExamples([]) })
     return () => { cancelled = true }
-  }, [domain])
+  }, [])
 
   return (
     <div className="welcome">

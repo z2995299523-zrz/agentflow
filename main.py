@@ -165,7 +165,7 @@ def get_pipeline_dep(request: Request) -> Pipeline:
         user = access_api.principal(request)
         if user is None:
             return service.get_pipeline()
-        scope = _access_scope(request, _active_store(), narrow=True)
+        scope = _access_scope(request, _active_store())
         if not scope.tables:
             raise AccessDenied()
         base = service.get_pipeline().deps
@@ -501,9 +501,9 @@ def _resolved_model(model: str | None) -> str | None:
     """将会话选择解析为本轮实际服务商与型号。"""
     items = model_settings.query_models()
     if config.ACCESS_CONTROL_ENABLED:
-        item = next((item for item in items if item["id"] == model), None) if model else model_settings.default_choice(items)
+        item = model_settings.default_choice(items)
         if item is None or not (route := model_settings.model_route(item)):
-            raise HTTPException(400, "请选择已批准用于查数的模型")
+            raise HTTPException(400, "没有可用的默认模型，请联系管理员配置")
         return route
     if model is None:
         item = model_settings.default_choice(items)
@@ -660,6 +660,9 @@ def get_conversation_model(request: Request, conversation_id: str,
     """读取会话保存的模型入口。"""
     if history.get(conversation_id, **_history_scope(request)) is None:
         raise _conversation_missing(conversation_id)
+    if config.ACCESS_CONTROL_ENABLED:
+        item = model_settings.default_choice(model_settings.query_models())
+        return ConversationModel(model=item["id"] if item else None)
     return ConversationModel(model=model_settings.get_conversation_model(conversation_id))
 
 
@@ -669,6 +672,8 @@ def set_conversation_model(request: Request, conversation_id: str, body: Convers
     """保存会话模型入口，下一次提问生效。"""
     if history.get(conversation_id, **_history_scope(request)) is None:
         raise _conversation_missing(conversation_id)
+    if config.ACCESS_CONTROL_ENABLED:
+        raise HTTPException(403, "查数模型由管理员统一配置")
     if not body.model:
         raise HTTPException(400, "请选择模型")
     _check_model(body.model)

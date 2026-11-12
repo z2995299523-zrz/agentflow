@@ -114,11 +114,11 @@ def test_scoped_query_runs_real_sqlite_and_rejects_out_of_domain(
     denied = user.post("/nl2sql/query", json={"question": denied_question}).json()
     assert denied["message"] == DENIED and not denied["sql"] and denied["exec_result"] is None
     assert user.post("/nl2sql/query", json={"question": question, "prev_sql": f"SELECT * FROM {other}"}).status_code == 400
-    assert user.post("/nl2sql/query", params={"domain": "none"}, json={"question": question}).status_code == 403
+    assert user.post("/nl2sql/query", params={"domain": "none"}, json={"question": question}).json()["status"] == "ok"
 
 
-def test_admin_defaults_to_all_tables_and_can_narrow_query(pilot):
-    """管理员未分配业务域时仍能查询全部表，也可按已登记域缩小范围。"""
+def test_admin_always_uses_all_tables_even_with_legacy_domain_parameter(pilot):
+    """管理员使用全部表，旧版域参数不再缩小查数范围。"""
     admin = client("pilot-admin")
     assert {item["code"] for item in admin.get("/auth/me").json()["user"]["domains"]} == {"research", "finance"}
     assert {item["table_id"] for item in admin.get("/metadata/tables").json()} == {PROJECT, FUND, UNCLASSIFIED}
@@ -127,7 +127,7 @@ def test_admin_defaults_to_all_tables_and_can_narrow_query(pilot):
     assert result["status"] == "ok" and result["exec_result"]["rows"] == [[189]]
     narrowed = admin.post("/nl2sql/query", params={"domain": "finance"}, json={"question": "统计经费支出合计"}).json()
     assert narrowed["status"] == "ok" and narrowed["exec_result"]["rows"] == [[30]]
-    assert admin.post("/nl2sql/query", params={"domain": "none"}, json={"question": "统计项目立项数量"}).status_code == 403
+    assert admin.post("/nl2sql/query", params={"domain": "finance"}, json={"question": "统计项目立项数量"}).json()["status"] == "ok"
 
 
 def test_example_suggestions_follow_selected_domain_and_multiple_grants(pilot):
@@ -293,6 +293,43 @@ def test_default_model_requires_admin_and_approved_connection(pilot, monkeypatch
     assert admin.put(path).status_code == 204
     configs = admin.get("/nl2sql/model-configs").json()
     assert configs["default"] == "deepseek-flash" and configs["selectable"] == ["deepseek-flash"]
+
+
+def test_query_uses_current_admin_default_and_all_granted_domains(pilot, monkeypatch):
+    """旧模型选择及业务域参数不影响新旧会话的模型和授权范围。"""
+    from nl2sql import model_settings
+
+    _, model, _ = pilot
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setattr(config, "ACCESS_MODEL_IDS", frozenset({"deepseek-flash", "qwen"}))
+    access = access_store()
+    actor = next(u["id"] for u in access.users() if u["username"] == "pilot-admin")
+    access.save_user(actor=actor, username="multi-user", name="多域用户", active=True, admin=False,
+                     grants=[Grant("research"), Grant("finance")], password=PASSWORD)
+    calls = []
+    pipeline = service.get_pipeline()
+    pipeline.deps.llm_for = lambda route: calls.append(route) or model
+    admin = client("pilot-admin")
+    user = client("multi-user")
+    ident = user.post("/conversations", json={}).json()["id"]
+    model_settings.set_conversation_model(ident, "deepseek-flash")
+    assert admin.put("/nl2sql/model-configs/qwen/default").status_code == 204
+    assert user.get(f"/conversations/{ident}/model").json()["model"] == "qwen"
+    assert user.put(f"/conversations/{ident}/model", json={"model": "deepseek-flash"}).status_code == 403
+    for endpoint in ("/nl2sql/query", "/nl2sql/stream", f"/conversations/{ident}/turns"):
+        response = user.post(endpoint, params={"domain": "finance"},
+                             json={"question": "统计项目立项数量", "model": "deepseek-flash"})
+        assert response.status_code == 200
+        result = response.json() if endpoint.endswith("query") else sse_events(response.text)[-1][1]
+        if endpoint.endswith("turns"):
+            result = result["turn"]["result"]
+        assert result["status"] == "ok" and result["exec_result"]["rows"] == [[8]]
+    assert len(calls) == 3 and all(route.startswith("@dashscope:") for route in calls)
+    calls.clear()
+    assert admin.put("/nl2sql/model-configs/deepseek-flash/default").status_code == 204
+    response = user.post(f"/conversations/{ident}/turns", json={"question": "统计项目立项数量", "model": "qwen"})
+    assert sse_events(response.text)[-1][1]["turn"]["result"]["status"] == "ok"
+    assert len(calls) == 1 and calls[0].startswith("@deepseek:")
 
 
 def test_revoking_domain_during_generation_stops_stream_and_history(pilot, monkeypatch):

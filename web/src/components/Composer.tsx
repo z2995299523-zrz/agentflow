@@ -12,7 +12,6 @@ import { useNavigate } from 'react-router'
 
 import type { ConversationContext } from '../api/types'
 import { todayText } from '../utils/format'
-import ModelPicker from './ModelPicker'
 
 const PLACEHOLDER = '用自然语言描述查数需求：查什么指标、什么时间、按什么维度、口径上有什么限定'
 
@@ -70,7 +69,6 @@ export default function Composer({ value, onChange, onSend, busy, disabled, cont
           {busy ? '处理中' : '发送'}
         </Button>
       </div>
-      <ModelPicker />
       <div className="composer-foot">
         <div className="composer-hint">
           Enter 发送，Shift+Enter 换行 · 「现在」「今年」「9 月末」这类说法按今天 {todayText()} 换算 · SQL 请审核后再使用

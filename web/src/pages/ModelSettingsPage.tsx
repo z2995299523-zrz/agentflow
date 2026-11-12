@@ -88,7 +88,7 @@ export default function ModelSettingsPage() {
     try {
       await api.setDefaultModel(item.id)
       await reloadModels()
-      void message.success(`新会话默认使用「${item.label}」`)
+      void message.success(`后续查数默认使用「${item.label}」`)
     } catch (reason: unknown) { void message.error(errorText(reason)) }
     finally { setSettingDefault(null) }
   }
@@ -96,7 +96,7 @@ export default function ModelSettingsPage() {
   const remove = (item: ModelConfig) => {
     modal.confirm({
       title: `删除「${item.label}」？`,
-      content: '已选择此模型的会话需要重新选择模型，历史消息会保留。',
+      content: '删除后将使用其他可用的默认模型；历史消息会保留。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -115,7 +115,7 @@ export default function ModelSettingsPage() {
     <main className="model-settings-page">
       <div className="model-settings-heading">
         <div><Typography.Title level={3}>模型配置</Typography.Title>
-          <Typography.Paragraph type="secondary">新会话使用默认模型，已有会话保留各自选用的模型。</Typography.Paragraph></div>
+          <Typography.Paragraph type="secondary">所有用户的后续查数均使用默认模型，正在进行的查数不受影响。</Typography.Paragraph></div>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => edit()}>新增模型</Button>
       </div>
       <Alert type="info" showIcon title="服务商连接" description="自定义接口使用你填写的 Base URL 和 API Key。预设服务商使用服务器已有的连接。" />
@@ -162,7 +162,7 @@ export default function ModelSettingsPage() {
             </Form.Item>
           )}
           <Form.Item name="model" label="模型名称（Model ID）" extra={provider === 'dashscope'
-            ? '填写百炼控制台的模型代码，例如 qwen3.8-27b 或 deepseek-v4-pro-0813。修改会影响已选择此入口的会话。'
+            ? '填写百炼控制台的模型代码，例如 qwen3.8-27b 或 deepseek-v4-pro-0813。修改默认入口后会影响后续查数。'
             : '填写服务商控制台提供的模型代码。'}
             rules={[{ required: true, whitespace: true, message: '请输入模型代码' }, { pattern: /^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,99}$/, message: '请检查模型代码格式' }]}>
             <Input placeholder="例如 qwen3.8-27b" maxLength={100} />
@@ -176,7 +176,7 @@ export default function ModelSettingsPage() {
           <Form.Item name="label" label="显示名称" extra="留空时使用模型名称。" rules={[{ max: 60 }]}>
             <Input placeholder="例如：百炼 Kimi" maxLength={60} />
           </Form.Item>
-          <Form.Item name="enabled" label="在会话中可选" valuePropName="checked" extra="停用后，已有会话需选择其他模型。">
+          <Form.Item name="enabled" label="启用模型" valuePropName="checked" extra="停用默认模型后，系统会使用其他可用模型。">
             <Switch />
           </Form.Item>
         </Form>
