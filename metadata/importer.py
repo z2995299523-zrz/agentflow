@@ -128,6 +128,7 @@ def build_mart(raw: RawMart) -> Mart:
             date_column=row.values["date_column"] or None,
             description=row.values["description"],
             standard=row.values["standard"] != NOT_STANDARD,
+            domain_code=row.values.get("domain_code", ""),
         )
         for row in raw.rows["tables"]
     ]

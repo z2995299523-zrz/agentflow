@@ -714,6 +714,22 @@ def test_a_request_can_switch_the_model_and_the_result_records_it(switchable):
     assert pipeline.deps.llm.remaining == 0 and pipeline.deps.llm.calls == []    # 默认模型没被调用
 
 
+def test_configured_provider_model_records_actual_code_and_separates_cache(mock_store, mock_graph, mock_retriever, mock_validator):
+    """同名模型经不同服务商时客户端分开，结果记录实际模型代码。"""
+    asked = []
+    def llm_for(name: str) -> ScriptedLLM:
+        asked.append(name)
+        return ScriptedLLM([parsed_json(), plan_json(), sql_reply(GOOD_SQL)], name=name.split(':', 1)[1])
+    deps = PipelineDeps(store=mock_store, graph=mock_graph, retriever=mock_retriever, validator=mock_validator,
+                        llm=ScriptedLLM([], name='deepseek-flash'), llm_for=llm_for)
+    pipeline = Pipeline(deps)
+    first = pipeline.run(request(model='@dashscope:deepseek-v4.1-flash'))
+    second = pipeline.run(request(model='@deepseek:deepseek-v4.1-flash'))
+    assert first.status == second.status == 'ok'
+    assert first.model == second.model == 'deepseek-v4.1-flash'
+    assert asked == ['@dashscope:deepseek-v4.1-flash', '@deepseek:deepseek-v4.1-flash']
+
+
 def test_naming_the_default_model_does_not_ask_for_another_one(switchable):
     pipeline, asked = switchable
 

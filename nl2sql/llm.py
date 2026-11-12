@@ -72,6 +72,13 @@ class ChatModelClient:
         from langchain_openai import ChatOpenAI
 
         kwargs = config.get_llm_kwargs(temperature, model)
+        self._custom = bool(model and model.startswith("@custom:"))
+        if self._custom:
+            import httpx
+            from nl2sql.model_connection import PublicModelTransport
+
+            kwargs["http_client"] = httpx.Client(transport=PublicModelTransport(kwargs["base_url"]),
+                                                  trust_env=False, follow_redirects=False)
         self.name: str = kwargs["model"]
         self._model = ChatOpenAI(**kwargs, timeout=timeout if timeout is not None else config.LLM_TIMEOUT,
                                  max_retries=max_retries)
@@ -95,6 +102,10 @@ class ChatModelClient:
         try:
             message = model.invoke([dict(item) for item in messages])
         except Exception as error:  # noqa: BLE001 接口客户端的异常种类很多，一律包成 LLMError
+            if self._custom:
+                status = getattr(error, "status_code", None)
+                detail = f"（HTTP {status}）" if isinstance(status, int) else ""
+                raise LLMError(f"自定义模型调用失败{detail}，请检查接口地址、模型名称和 API Key") from None
             raise LLMError(f"{type(error).__name__}: {error}") from error
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         content = message.content

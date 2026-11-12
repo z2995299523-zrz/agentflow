@@ -16,6 +16,7 @@ import { ServiceAlert } from '../components/StatusBar'
 import Welcome from '../components/Welcome'
 import { useChat } from '../state/chat'
 import { useHealth } from '../state/health'
+import { useModel } from '../state/model'
 import { formatTime } from '../utils/format'
 
 function Question({ text, time }: { text: string; time?: string }) {
@@ -46,6 +47,7 @@ export default function QueryPage() {
   const navigate = useNavigate()
   const chat = useChat()
   const { health } = useHealth()
+  const { models } = useModel()
   const [draft, setDraft] = useState('')
   const [drawerOpen, setDrawerOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -106,7 +108,7 @@ export default function QueryPage() {
                        <Button size="small" icon={<ReloadOutlined />} onClick={() => navigate('/')}>新会话</Button>
                      )} />
             )}
-            {showWelcome && <Welcome onPick={(text) => { setDraft(text); inputRef.current?.focus() }} />}
+            {showWelcome && <Welcome domain={chat.domain} onPick={(text) => { setDraft(text); inputRef.current?.focus() }} />}
             {turns.map((turn, index) => (
               <div className="turn" key={turn.id}>
                 <Question text={turn.question} time={turn.created_at} />
@@ -135,7 +137,7 @@ export default function QueryPage() {
           onChange={setDraft}
           onSend={() => send(draft)}
           busy={chat.busy}
-          disabled={serviceDown && !!health}
+          disabled={(serviceDown && !!health) || chat.loading || chat.modelSaving || !chat.model || !models?.some((item) => item.name === chat.model)}
           context={chat.pending ? null : chat.detail?.context ?? null}
           inputRef={inputRef}
           canExecute={!!health && health.executor !== 'none'}

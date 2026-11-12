@@ -1,76 +1,48 @@
 /**
- * 查数用哪个模型：能选的模型来自 /nl2sql/models（只列配了 Key 的），选择记在本机浏览器里
- * 记下的模型不在列表里了（服务端撤了 Key）就退回默认模型；列表还没取到时不指定，服务端用默认模型。
+ * 模型目录和默认模型来自 /nl2sql/models；每个会话的选择由会话状态管理。
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { api, errorText } from '../api/client'
 import type { ModelInfo } from '../api/types'
 
-const STORAGE_KEY = 'agentflow.model'
-
 interface ModelState {
   models: ModelInfo[] | null          // null：还没取到
-  model: string | undefined           // 查数时带上的模型；undefined 时服务端用默认模型
+  defaultModel: string | undefined
   error: string
-  setModel: (name: string) => void
+  refresh: () => Promise<string | undefined>
   labelOf: (name: string | null | undefined) => string
 }
 
 const ModelContext = createContext<ModelState | null>(null)
 
-/** 读、写本机记下的模型：无痕窗口、禁用存储时会抛错，当作没记 */
-function readStored(): string {
-  try {
-    return window.localStorage.getItem(STORAGE_KEY) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function writeStored(name: string): void {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, name)
-  } catch {
-    // 存不下就只在这次打开的页面里生效
-  }
-}
-
 export function ModelProvider({ children }: { children: ReactNode }) {
   const [models, setModels] = useState<ModelInfo[] | null>(null)
-  const [fallback, setFallback] = useState('')
-  const [chosen, setChosen] = useState(readStored)
+  const [defaultModel, setDefaultModel] = useState<string>()
   const [error, setError] = useState('')
 
-  useEffect(() => {
-    api.models()
-      .then((value) => {
-        setModels(value.models)
-        setFallback(value.default)
-        setError('')
-      })
-      .catch((reason: unknown) => setError(errorText(reason)))
+  const refresh = useCallback(async () => {
+    try {
+      const value = await api.models()
+      const selected = value.models.find((item) => item.name === value.default)?.name ?? value.models[0]?.name
+      setModels(value.models)
+      setDefaultModel(selected)
+      setError('')
+      return selected
+    } catch (reason: unknown) {
+      setError(errorText(reason))
+      return undefined
+    }
   }, [])
-
-  const model = useMemo(() => {
-    if (!models) return undefined
-    const names = models.map((item) => item.name)
-    if (names.includes(chosen)) return chosen
-    return names.includes(fallback) ? fallback : names[0]
-  }, [models, chosen, fallback])
-
-  const setModel = useCallback((name: string) => {
-    setChosen(name)
-    writeStored(name)
-  }, [])
+  useEffect(() => { void refresh() }, [refresh])
 
   const labelOf = useCallback((name: string | null | undefined) => {
     if (!name) return ''
     return models?.find((item) => item.name === name)?.label ?? name
   }, [models])
 
-  const value = useMemo<ModelState>(() => ({ models, model, error, setModel, labelOf }),
-                                    [models, model, error, setModel, labelOf])
+  const value = useMemo<ModelState>(() => ({ models, defaultModel, error, labelOf, refresh }),
+                                    [models, defaultModel, error, labelOf, refresh])
   return <ModelContext.Provider value={value}>{children}</ModelContext.Provider>
 }
 

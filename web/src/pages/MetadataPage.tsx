@@ -12,11 +12,13 @@ import ColumnTable from '../components/ColumnTable'
 import LineagePanel from '../components/LineagePanel'
 import { ServiceAlert } from '../components/StatusBar'
 import TableBrowser from '../components/TableBrowser'
+import { useAuth } from '../state/auth'
 import { layerStyle } from '../utils/format'
 
 type TabKey = 'columns' | 'lineage'
 
 export default function MetadataPage() {
+  const { user } = useAuth()
   const [params, setParams] = useSearchParams()
   const tableId = params.get('table')
   const column = params.get('column')
@@ -87,6 +89,7 @@ export default function MetadataPage() {
                 <Typography.Title level={4}>{table?.table_cn || tableId}</Typography.Title>
                 {table && <Tag color={layerStyle(table.layer).color}>{table.layer}</Tag>}
                 {table?.table_type && <Tag>{table.table_type}</Tag>}
+                {table?.domain_code && <Tag color="blue">{user?.domains.find((domain) => domain.code === table.domain_code)?.name ?? table.domain_code}</Tag>}
               </div>
               <Typography.Text code copyable className="table-head-id">{tableId}</Typography.Text>
               {table?.description && <Typography.Paragraph type="secondary" className="table-desc">{table.description}</Typography.Paragraph>}

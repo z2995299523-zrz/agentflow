@@ -214,6 +214,7 @@ export interface TurnEvent {
 // ── 元数据 ────────────────────────────────────────
 
 export interface TableInfo {
+  domain_code: string
   table_id: string
   table_cn: string
   layer: string
@@ -299,6 +300,70 @@ export interface ModelInfo {
 export interface ModelList {
   default: string
   models: ModelInfo[]
+}
+
+export interface ModelConfig {
+  id: string
+  label: string
+  provider: string
+  model: string
+  enabled: boolean
+  builtin: boolean
+  base_url?: string | null
+  key_configured?: boolean
+}
+
+export type ModelConfigInput = Pick<ModelConfig, 'label' | 'provider' | 'model' | 'enabled' | 'base_url'> & {
+  api_key?: string
+}
+
+export interface ModelConfigs {
+  models: ModelConfig[]
+  providers: { name: string; configured: boolean }[]
+  default: string | null
+  selectable: string[]
+}
+
+export interface ModelConnectionTest {
+  ok: boolean
+  status_code: number | null
+  elapsed_ms: number
+  message: string
+}
+
+export interface DomainGrant {
+  code: string
+  starts_at: number
+  expires_at: number | null
+}
+
+export interface UserProfile {
+  id: string
+  username: string
+  name: string
+  admin: boolean
+  domains: { code: string; name: string }[]
+}
+
+export interface LoginState {
+  required: boolean
+  user: UserProfile | null
+}
+
+export interface ManagedUser {
+  id: string
+  username: string
+  name: string
+  admin: boolean
+  active: boolean
+  grants: DomainGrant[]
+}
+
+export interface UserAdministration {
+  users: ManagedUser[]
+  domains: { code: string; name: string; user_count: number; table_count: number }[]
+  unclassified: number
+  audit: { id: number; occurred_at: number; actor: string | null; action: string; target: string }[]
 }
 
 export interface Health {

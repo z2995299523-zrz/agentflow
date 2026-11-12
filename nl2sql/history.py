@@ -47,6 +47,20 @@ _SUMMARY = ("SELECT c.id, c.title, c.created_at, c.updated_at, COUNT(t.id) AS tu
             " FROM conversations AS c LEFT JOIN turns AS t ON t.conversation_id = c.id {where}"
             " GROUP BY c.id, c.title, c.created_at, c.updated_at")
 
+_VISIBLE = """c.owner_id IS ? AND NOT EXISTS (
+    SELECT 1 FROM turns restricted WHERE restricted.conversation_id=c.id
+      AND (restricted.access_tables IS NULL OR EXISTS (
+        SELECT 1 FROM json_each(restricted.access_tables) source
+        WHERE source.value NOT IN (SELECT value FROM json_each(?))
+      ))
+)"""
+
+
+def _visibility(owner_id: str | None, allowed: frozenset[str]) -> tuple[str, tuple]:
+    if owner_id is None:
+        return "c.owner_id IS NULL", ()
+    return _VISIBLE, (owner_id, json.dumps(sorted(allowed)))
+
 
 class ConversationSummary(BaseModel):
     """会话列表里的一项"""
@@ -125,6 +139,12 @@ class ConversationStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            conn.execute("BEGIN IMMEDIATE")
+            if "owner_id" not in {row[1] for row in conn.execute("PRAGMA table_info(conversations)")}:
+                conn.execute("ALTER TABLE conversations ADD COLUMN owner_id TEXT")
+            if "access_tables" not in {row[1] for row in conn.execute("PRAGMA table_info(turns)")}:
+                conn.execute("ALTER TABLE turns ADD COLUMN access_tables TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_owner ON conversations(owner_id, updated_at)")
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @property
@@ -144,27 +164,30 @@ class ConversationStore:
         finally:
             conn.close()
 
-    def create(self, title: str = "") -> ConversationSummary:
+    def create(self, title: str = "", *, owner_id: str | None = None) -> ConversationSummary:
         """新建一个空会话；标题不写时，第一轮提问时用提问的前几个字"""
         now = _now()
         summary = ConversationSummary(id=uuid.uuid4().hex, title=title.strip(), created_at=now, updated_at=now)
         with self._connect() as conn:
-            conn.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                         (summary.id, summary.title, now, now))
+            conn.execute("INSERT INTO conversations (id, title, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, ?)",
+                         (summary.id, summary.title, now, now, owner_id))
         return summary
 
-    def list_recent(self, limit: int = 50) -> list[ConversationSummary]:
+    def list_recent(self, limit: int = 50, *, owner_id: str | None = None,
+                    allowed: frozenset[str] = frozenset()) -> list[ConversationSummary]:
         """最近的会话，按最后一轮的时间从新到旧"""
         with self._connect() as conn:
-            rows = conn.execute(_SUMMARY.format(where="") + " ORDER BY c.updated_at DESC, c.created_at DESC LIMIT ?",
-                                (limit,)).fetchall()
+            visible, params = _visibility(owner_id, allowed)
+            rows = conn.execute(_SUMMARY.format(where=f"WHERE {visible}") +
+                                " ORDER BY c.updated_at DESC, c.created_at DESC LIMIT ?", (*params, limit)).fetchall()
         return [ConversationSummary(**dict(row)) for row in rows]
 
-    def get(self, conversation_id: str) -> ConversationDetail | None:
+    def get(self, conversation_id: str, *, owner_id: str | None = None,
+            allowed: frozenset[str] = frozenset()) -> ConversationDetail | None:
         """一个会话的全部轮次（从早到晚）和当前的上下文；会话不存在时返回 None"""
         with self._connect() as conn:
-            head = conn.execute("SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
-                                (conversation_id,)).fetchone()
+            conn.execute("BEGIN")
+            head = self._head(conn, conversation_id, owner_id, allowed)
             if head is None:
                 return None
             rows = conn.execute("SELECT id, question, status, requirement, clarify, result, created_at FROM turns"
@@ -174,20 +197,36 @@ class ConversationStore:
         latest = next((row for row in reversed(rows) if row["requirement"]), None)
         return ConversationDetail(**dict(head), turn_count=len(turns), turns=turns, context=_context_from(latest))
 
-    def rename(self, conversation_id: str, title: str) -> ConversationSummary | None:
+    @staticmethod
+    def _head(conn: sqlite3.Connection, conversation_id: str, owner_id: str | None,
+              allowed: frozenset[str]) -> sqlite3.Row | None:
+        visible, params = _visibility(owner_id, allowed)
+        return conn.execute(f"SELECT c.id, c.title, c.created_at, c.updated_at FROM conversations c "
+                            f"WHERE c.id=? AND {visible}", (conversation_id, *params)).fetchone()
+
+    def rename(self, conversation_id: str, title: str, *, owner_id: str | None = None,
+               allowed: frozenset[str] = frozenset()) -> ConversationSummary | None:
         """改标题；会话不存在时返回 None"""
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if self._head(conn, conversation_id, owner_id, allowed) is None:
+                return None
             conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (title.strip(), conversation_id))
             row = conn.execute(_SUMMARY.format(where="WHERE c.id = ?"), (conversation_id,)).fetchone()
         return ConversationSummary(**dict(row)) if row is not None else None
 
-    def delete(self, conversation_id: str) -> bool:
+    def delete(self, conversation_id: str, *, owner_id: str | None = None,
+               allowed: frozenset[str] = frozenset()) -> bool:
         """删掉会话和它的全部轮次；会话不存在时返回 False"""
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if self._head(conn, conversation_id, owner_id, allowed) is None:
+                return False
             conn.execute("DELETE FROM turns WHERE conversation_id = ?", (conversation_id,))
             return conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,)).rowcount > 0
 
-    def add_turn(self, conversation_id: str, question: str, result: QueryResult) -> Turn:
+    def add_turn(self, conversation_id: str, question: str, result: QueryResult, *,
+                 owner_id: str | None = None, allowed: frozenset[str] = frozenset()) -> Turn:
         """记下一轮：提问和流水线结果；会话还没有标题时用这一轮的提问
 
         Raises:
@@ -197,14 +236,15 @@ class ConversationStore:
         public = result.public()
         clarify = result.clarify.model_dump_json() if result.status == CLARIFY_STATUS and result.clarify else None
         with self._connect() as conn:
-            head = conn.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+            conn.execute("BEGIN IMMEDIATE")
+            head = self._head(conn, conversation_id, owner_id, allowed)
             if head is None:
                 raise LookupError(f"会话不存在：{conversation_id}")
             cursor = conn.execute(
-                "INSERT INTO turns (conversation_id, question, status, requirement, clarify, result, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO turns (conversation_id, question, status, requirement, clarify, result, created_at, access_tables)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (conversation_id, question, result.status, result.requirement, clarify,
-                 json.dumps(public, ensure_ascii=False), now))
+                 json.dumps(public, ensure_ascii=False), now, json.dumps(sorted(allowed)) if owner_id else None))
             conn.execute("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
                          (head["title"] or _title_of(question), now, conversation_id))
         return Turn(id=cursor.lastrowid, question=question, created_at=now, result=public)
@@ -217,7 +257,7 @@ class ConversationStore:
             LookupError: 会话不存在
         """
         with self._connect() as conn:
-            if conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone() is None:
+            if self._head(conn, conversation_id, None, frozenset()) is None:
                 raise LookupError(f"会话不存在：{conversation_id}")
             row = conn.execute("SELECT id, status, requirement, clarify, result FROM turns"
                                " WHERE conversation_id = ? AND requirement <> '' ORDER BY id DESC LIMIT 1",
@@ -228,5 +268,6 @@ class ConversationStore:
         """上一轮的依据：最近一个有完整需求的轮次（和 context 是同一轮），解释上一轮时用；没有这样的轮次时返回 None"""
         with self._connect() as conn:
             row = conn.execute("SELECT result FROM turns WHERE conversation_id = ? AND requirement <> ''"
+                               " AND EXISTS(SELECT 1 FROM conversations c WHERE c.id=conversation_id AND c.owner_id IS NULL)"
                                " ORDER BY id DESC LIMIT 1", (conversation_id,)).fetchone()
         return QueryResult.model_validate_json(row["result"]).basis() if row is not None else None

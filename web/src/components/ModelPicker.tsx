@@ -1,32 +1,32 @@
-/** 页头右上角的模型下拉框：只列配了 Key 的模型，选择记在本机浏览器里，之后的查数、追问都用它 */
-import { RobotOutlined } from '@ant-design/icons'
-import { Select, Tag, Tooltip } from 'antd'
-
+/** 会话内选择已配置的模型。 */
+import { RobotOutlined, SettingOutlined } from '@ant-design/icons'
+import { Button, Select, Tag, Tooltip, Typography } from 'antd'
+import { Link } from 'react-router'
 import { useModel } from '../state/model'
+import { useChat } from '../state/chat'
+import { useAuth } from '../state/auth'
 
 export default function ModelPicker() {
-  const { models, model, error, setModel } = useModel()
-  if (error) {
-    return <Tooltip title={error}><Tag color="error" icon={<RobotOutlined />}>模型列表取不到</Tag></Tooltip>
-  }
-  if (!models) return null
-  if (!models.length) {
-    return (
-      <Tooltip title="在 .env 里配好模型的 Key 后重启接口服务">
-        <Tag color="warning" icon={<RobotOutlined />}>没有能用的模型</Tag>
-      </Tooltip>
-    )
-  }
+  const { models, error } = useModel()
+  const { model, setModel, modelSaving, modelError, loading, busy, domain, setDomain } = useChat()
+  const { user, canManage } = useAuth()
   return (
-    <Select
-      size="small"
-      className="model-picker"
-      aria-label="查数用的模型"
-      prefix={<RobotOutlined />}
-      value={model}
-      onChange={setModel}
-      popupMatchSelectWidth={false}
-      options={models.map((item) => ({ value: item.name, label: item.label }))}
-    />
+    <div className="composer-model">
+      <Typography.Text type="secondary">本会话模型</Typography.Text>
+      {error ? <Tooltip title={error}><Tag color="error">模型列表取不到</Tag></Tooltip> : models?.length ? (
+        <Select size="small" className="model-picker" aria-label="查数用的模型" prefix={<RobotOutlined />}
+          value={model} onChange={(value) => { void setModel(value) }} disabled={loading || modelSaving || busy}
+          popupMatchSelectWidth={false}
+          options={model && !models.some((item) => item.name === model)
+            ? [{ value: model, label: `${model}（不可用）`, disabled: true }, ...models.map((item) => ({ value: item.name, label: item.label }))]
+            : models.map((item) => ({ value: item.name, label: item.label }))} />
+      ) : <Tag>暂无可用模型</Tag>}
+      {user && (user.admin || user.domains.length > 1) && <Select size="small" aria-label="本轮业务域"
+        value={domain ?? ''} disabled={loading || busy} onChange={(value) => setDomain(value || undefined)}
+        options={[{ value: '', label: user.admin ? '全部数据表' : '全部授权域' }, ...user.domains.map((item) => ({ value: item.code, label: item.name }))]} />}
+      {canManage && <Tooltip title="模型配置"><Link to="/models"><Button size="small" icon={<SettingOutlined />} aria-label="模型配置" /></Link></Tooltip>}
+      {modelError && <Typography.Text type="danger" role="alert">{modelError}</Typography.Text>}
+      {model && models && !models.some((item) => item.name === model) && <Typography.Text type="danger" role="alert">此会话的模型不可用，请重新选择。</Typography.Text>}
+    </div>
   )
 }

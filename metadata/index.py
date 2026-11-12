@@ -48,6 +48,7 @@ BGE_MODEL_ID = "BAAI/bge-small-zh-v1.5"
 BGE_NAME = "bge-small-zh-v1.5"
 BGE_DIM = 512
 BGE_ENCODE_BATCH = 128                 # 模型一次前向计算的文本条数
+BGE_ONNX_DIR_ENV = "AGENTFLOW_BGE_ONNX_DIR"  # 可选的轻量 BGE 推理文件目录
 HF_MIRROR = "https://hf-mirror.com"    # huggingface.co 国内连不上，与 config.py 保持一致
 NO_INDEX_HINT = "导入时加上 --no-index 可以跳过向量（召回将只能走关键字）"
 
@@ -211,6 +212,73 @@ class BgeEmbedder:
             vectors = model.encode(list(texts), batch_size=BGE_ENCODE_BATCH, normalize_embeddings=True,
                                    convert_to_numpy=True, show_progress_bar=False)
         return np.ascontiguousarray(vectors, dtype=np.float32)
+
+
+class OnnxBgeEmbedder:
+    """使用同一 BGE 模型的 ONNX 导出文件，在 CPU 上生成兼容向量。"""
+
+    name = BGE_NAME
+    dim = BGE_DIM
+
+    def __init__(self, model_dir: str) -> None:
+        """记录模型目录；运行组件和模型在首次调用时加载。"""
+        from pathlib import Path
+
+        self.model_dir = Path(model_dir)
+        self._lock = threading.Lock()
+        self._tokenizer: Any = None
+        self._session: Any = None
+
+    def _load(self) -> None:
+        """加载固定模型和分词器；缺文件或依赖时给出明确错误。"""
+        os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
+        model = self.model_dir / 'model.onnx'
+        tokenizer = self.model_dir / 'tokenizer.json'
+        if not model.is_file() or not tokenizer.is_file():
+            raise RuntimeError('轻量 BGE 模型文件不完整，请检查模型目录')
+        try:
+            import onnxruntime as ort
+            from tokenizers import Tokenizer
+        except ImportError as error:
+            raise RuntimeError('缺少轻量 BGE 运行组件，请检查部署环境') from error
+        tokens = Tokenizer.from_file(str(tokenizer))
+        tokens.enable_truncation(max_length=512)
+        tokens.enable_padding(pad_id=0, pad_type_id=0, pad_token='[PAD]')
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        session = ort.InferenceSession(str(model), sess_options=options, providers=['CPUExecutionProvider'])
+        if {item.name for item in session.get_inputs()} != {'input_ids', 'attention_mask', 'token_type_ids'}:
+            raise RuntimeError('轻量 BGE 模型输入不符合预期')
+        if 'embedding' not in {item.name for item in session.get_outputs()}:
+            raise RuntimeError('轻量 BGE 模型输出不符合预期')
+        self._tokenizer, self._session = tokens, session
+
+    def embed(self, texts: Sequence[str]) -> np.ndarray:
+        """按原模型的去空格、小写和截断规则生成归一化向量。"""
+        if not texts:
+            return np.empty((0, self.dim), dtype=np.float32)
+        with self._lock:
+            if self._session is None:
+                self._load()
+            batches = []
+            for start in range(0, len(texts), BGE_ENCODE_BATCH):
+                encoded = self._tokenizer.encode_batch(
+                    [str(text).strip().lower() for text in texts[start:start + BGE_ENCODE_BATCH]])
+                inputs = {key: np.asarray([getattr(row, attr) for row in encoded], dtype=np.int64)
+                          for key, attr in [('input_ids', 'ids'), ('attention_mask', 'attention_mask'),
+                                            ('token_type_ids', 'type_ids')]}
+                result = np.asarray(self._session.run(['embedding'], inputs)[0], dtype=np.float32)
+                if result.shape != (len(encoded), self.dim) or not np.isfinite(result).all():
+                    raise RuntimeError('轻量 BGE 模型返回的向量无效')
+                batches.append(result)
+            return np.ascontiguousarray(np.concatenate(batches), dtype=np.float32)
+
+
+@lru_cache(maxsize=1)
+def onnx_bge_embedder(model_dir: str) -> OnnxBgeEmbedder:
+    """复用进程内的轻量 BGE 运行时。"""
+    return OnnxBgeEmbedder(model_dir)
 
 
 def bge_loaded() -> bool:

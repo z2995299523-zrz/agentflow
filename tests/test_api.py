@@ -1,6 +1,7 @@
 """接口：查数（一次返回、流式）、会话、元数据、健康检查；元数据库没导入、层级不对、字段不存在、上一轮的上下文转交给流水线"""
 import json
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -69,6 +70,13 @@ def sse_events(text: str) -> list[tuple[str, dict]]:
 def history(tmp_path):
     """临时目录里的会话历史库"""
     return ConversationStore(tmp_path / "history.db")
+
+
+@pytest.fixture(autouse=True)
+def isolated_model_settings(tmp_path, monkeypatch):
+    """接口测试的模型选择写入临时目录，不触碰本地会话配置。"""
+    monkeypatch.setattr(config, "MART_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "ACCESS_CONTROL_ENABLED", False)
 
 
 @pytest.fixture
@@ -195,6 +203,8 @@ def three_models(monkeypatch):
                config.ModelChoice("mimo-v2.6-flash", "小米 mimo-v2.6-flash", "mimo")]
     monkeypatch.setattr(config, "available_models", lambda: choices)
     monkeypatch.setattr(config, "default_model", lambda: "deepseek-flash")
+    monkeypatch.setattr(config, "LLM_PROVIDER", "deepseek")
+    monkeypatch.setattr(config, "_api_key", lambda provider: "test-key" if provider in {"deepseek", "dashscope", "mimo"} else "")
 
 
 def test_models_lists_the_models_with_a_key_and_the_default(api, three_models):
@@ -203,8 +213,211 @@ def test_models_lists_the_models_with_a_key_and_the_default(api, three_models):
     body = client.get("/nl2sql/models").json()
 
     assert body["default"] == "deepseek-flash"
-    assert body["models"][1] == {"name": "qwen3.8-flash", "label": "千问 qwen3.8-flash", "provider": "dashscope"}
-    assert [item["name"] for item in body["models"]] == ["deepseek-flash", "qwen3.8-flash", "mimo-v2.6-flash"]
+    assert body["models"][1] == {"name": "qwen", "label": "千问", "provider": "dashscope"}
+    assert [item["name"] for item in body["models"]] == ["deepseek-flash", "qwen", "mimo-v2.6-flash"]
+
+
+def test_default_model_changes_new_queries_and_preserves_conversation_selection(api, three_models):
+    """修改默认模型即时生效，已有会话仍按保存的模型查询。"""
+    client, pipeline = api
+    path = f"/conversations/{client.post('/conversations').json()['id']}"
+    assert client.put(f"{path}/model", json={"model": "deepseek-flash"}).status_code == 200
+    assert client.put("/nl2sql/model-configs/qwen/default").status_code == 204
+    configs = client.get("/nl2sql/model-configs").json()
+    assert configs["default"] == "qwen" and "qwen" in configs["selectable"]
+    listing = client.get("/nl2sql/models").json()
+    assert listing["default"] == listing["models"][0]["name"] == "qwen"
+    assert client.get("/health").json()["model"] == "qwen3.8-flash"
+    assert client.post("/nl2sql/query", json={"question": "查余额"}).status_code == 200
+    assert pipeline.requests[-1].model == "@dashscope:qwen3.8-flash"
+    assert client.post(f"{path}/turns", json={"question": "查余额"}).status_code == 200
+    assert pipeline.requests[-1].model == "deepseek-flash"
+    assert client.get(f"{path}/model").json()["model"] == "deepseek-flash"
+
+
+def test_default_model_requires_available_entry_and_falls_back_if_unavailable(api, three_models):
+    """停用、缺少密钥和删除后的模型不能成为当前默认值。"""
+    client, _ = api
+    config = {"base_url": "https://api.example.com/v1", "model": "demo-model", "api_key": "test-key"}
+    item = client.post("/nl2sql/model-configs", json=config).json()
+    path = f"/nl2sql/model-configs/{item['id']}"
+    assert client.put(f"{path}/default").status_code == 204
+    assert client.get("/nl2sql/models").json()["default"] == item["id"]
+    assert client.put(path, json=config | {"enabled": False}).status_code == 200
+    assert client.get("/nl2sql/models").json()["default"] == "deepseek-flash"
+    assert client.put(f"{path}/default").status_code == 400
+    assert client.put("/nl2sql/model-configs/glm-4.7-flash/default").status_code == 400
+    assert client.put(path, json=config).status_code == 200
+    assert client.get("/nl2sql/models").json()["default"] == item["id"]
+    assert client.delete(path).status_code == 204
+    assert client.put(f"{path}/default").status_code == 400
+    assert client.get("/nl2sql/model-configs").json()["default"] == "deepseek-flash"
+
+
+def test_qwen_entry_requires_dashscope_key(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(config, "available_models", lambda: [config.ModelChoice("qwen3.8-flash", "千问", "dashscope")])
+    main._check_model("qwen")
+    with pytest.raises(HTTPException):
+        main._check_model("qwen bad")
+    monkeypatch.setattr(config, "available_models", lambda: [config.ModelChoice("deepseek-flash", "DeepSeek", "deepseek")])
+    with pytest.raises(HTTPException):
+        main._check_model("qwen")
+
+
+def test_conversation_model_selection_is_independent(api, three_models):
+    client, _ = api
+    first = client.post("/conversations").json()["id"]
+    second = client.post("/conversations").json()["id"]
+    path1 = f"/conversations/{first}/model"
+    path2 = f"/conversations/{second}/model"
+    assert client.get(path1).json()["model"] is None
+    assert client.put(path1, json={"model": "qwen"}).status_code == 200
+    assert client.put(path2, json={"model": "mimo-v2.6-flash"}).status_code == 200
+    assert client.get(path1).json()["model"] == "qwen"
+    assert client.get(path2).json()["model"] == "mimo-v2.6-flash"
+    assert client.put(path1, json={"model": "gpt-9"}).status_code == 400
+    assert client.get(path1).json()["model"] == "qwen"
+    assert client.delete(f"/conversations/{first}").status_code == 204
+    assert client.get(path1).status_code == 404
+
+
+def test_custom_endpoint_credentials_are_write_only_and_bound_to_url(api, monkeypatch):
+    client, pipeline = api
+    monkeypatch.setattr(config, 'LLM_PROVIDER', 'deepseek')
+    monkeypatch.setattr(config, "LLM_API_KEY", "")
+    monkeypatch.delenv(config.PROVIDERS[config.LLM_PROVIDER][0], raising=False)
+    secret = 'test-connection-key'
+    body = {'base_url': 'https://api.example.com/v1/chat/completions', 'model': 'demo-model:free', 'api_key': secret}
+    created = client.post('/nl2sql/model-configs', json=body)
+    assert created.status_code == 201 and secret not in created.text
+    ident = created.json()['id']
+    assert created.json()['base_url'] == 'https://api.example.com/v1'
+    assert created.json()['label'] == 'demo-model:free'
+    listing = client.get('/nl2sql/model-configs')
+    assert secret not in listing.text and next(m for m in listing.json()['models'] if m['id'] == ident)['key_configured']
+    assert client.get('/nl2sql/models').json()['default'] == ident
+    assert client.post('/nl2sql/query', json={'question': '查余额', 'model': ident}).status_code == 200
+    route = pipeline.requests[-1].model
+    kwargs = config.get_llm_kwargs(model=route)
+    assert kwargs['api_key'] == secret and kwargs['model'] == 'demo-model:free'
+    assert secret not in (Path(config.MART_DIR) / 'build' / 'history.db').read_bytes().decode(errors='ignore')
+    path = f'/nl2sql/model-configs/{ident}'
+    assert client.put(path, json=body | {'api_key': '', 'base_url': 'https://other.example.com/v1'}).status_code == 400
+    assert config.get_llm_kwargs(model=route)['base_url'] == 'https://api.example.com/v1'
+    assert client.put(path, json=body | {'api_key': '', 'label': '改名'}).status_code == 200
+    assert config.get_llm_kwargs(model=main._resolved_model(ident))['api_key'] == secret
+    with pytest.raises(ValueError, match='配置已变化'):
+        config.get_llm_kwargs(model=route)
+    invalid = client.post('/nl2sql/model-configs', json=body | {'api_key': {'value': secret}})
+    assert invalid.status_code == 422 and secret not in invalid.text
+
+
+def test_model_configuration_add_edit_disable_and_qwen_compatibility(api, three_models, monkeypatch):
+    client, pipeline = api
+    monkeypatch.setenv('DASHSCOPE_API_KEY', 'test-key')
+    initial = client.get('/nl2sql/model-configs').json()
+    assert next(item for item in initial['models'] if item['id'] == 'qwen')['model'] == 'qwen3.8-flash'
+    body = {'label': '百炼模型', 'provider': 'dashscope', 'model': 'kimi-k3', 'enabled': True}
+    created = client.post('/nl2sql/model-configs', json=body)
+    assert created.status_code == 201
+    ident = created.json()['id']
+    assert any(item['name'] == ident for item in client.get('/nl2sql/models').json()['models'])
+    assert main._resolved_model(ident) == '@dashscope:kimi-k3'
+    assert client.post('/nl2sql/query', json={'question': '查余额', 'model': ident}).status_code == 200
+    assert pipeline.requests[-1].model == '@dashscope:kimi-k3'
+    assert client.put(f'/nl2sql/model-configs/{ident}', json=body | {'model': 'kimi-k3.1-pro'}).status_code == 200
+    assert main._resolved_model(ident) == '@dashscope:kimi-k3.1-pro'
+    assert client.put(f'/nl2sql/model-configs/{ident}', json=body | {'enabled': False}).status_code == 200
+    assert ident not in [item['name'] for item in client.get('/nl2sql/models').json()['models']]
+    assert client.post('/nl2sql/query', json={'question': '查余额', 'model': ident}).status_code == 400
+    assert client.put('/nl2sql/model-configs/qwen', json={'label': '千问', 'provider': 'dashscope', 'model': 'qwen3.8-27b', 'enabled': True}).status_code == 200
+    assert main._resolved_model('qwen') == '@dashscope:qwen3.8-27b'
+    assert client.post('/nl2sql/model-configs', json=body | {'model': 'invalid model'}).status_code == 400
+
+
+def test_probe_uses_unsaved_form_or_saved_key_at_the_same_url(api, monkeypatch):
+    """测试连接不落库，编辑时只在原地址复用密钥。"""
+    client, _ = api
+    calls = []
+
+    def probe(url, model, key, **options):
+        calls.append((url, model, key, options))
+        return {'ok': True, 'status_code': 200, 'elapsed_ms': 12, 'message': '模型调用成功'}
+
+    monkeypatch.setattr(main, 'probe_connection', probe)
+    path = '/nl2sql/model-configs/test'
+    body = {'base_url': 'https://api.example.com/v1/chat/completions', 'model': 'demo-model',
+            'api_key': 'test-connection-key', 'enabled': False}
+    before = client.get('/nl2sql/model-configs').json()
+    result = client.post(path, json=body)
+    assert result.status_code == 200 and result.json()['ok']
+    assert body['api_key'] not in result.text
+    assert client.get('/nl2sql/model-configs').json() == before
+    created = client.post('/nl2sql/model-configs', json=body).json()
+    pending = body | {'id': created['id'], 'api_key': '', 'model': 'other-model'}
+    assert client.post(path, json=pending).json()['ok']
+    assert calls == [('https://api.example.com/v1', 'demo-model', 'test-connection-key', {'custom': True}),
+                     ('https://api.example.com/v1', 'other-model', 'test-connection-key', {'custom': True})]
+    response = client.post(path, json=pending | {'base_url': 'https://other.example.com/v1'})
+    assert response.status_code == 400 and '更换接口地址' in response.json()['detail']
+    assert len(calls) == 2
+
+
+def test_probe_uses_preset_connection_and_actual_model_code(api, three_models, monkeypatch):
+    """百炼预设测试使用同一个服务商连接及当前表单里的实际模型。"""
+    client, _ = api
+
+    def probe(url, model, key, **options):
+        assert url == config.PROVIDERS['dashscope'][1]
+        assert model == 'demo-model' and key == 'test-key'
+        assert options == {'custom': False, 'extra_body': {'enable_thinking': False}}
+        return {'ok': False, 'status_code': 404, 'elapsed_ms': 4, 'message': '模型不存在'}
+
+    monkeypatch.setattr(main, 'probe_connection', probe)
+    result = client.post('/nl2sql/model-configs/test', json={'provider': 'dashscope', 'model': 'demo-model'})
+    assert result.status_code == 200 and result.json()['message'] == '模型不存在'
+
+
+def test_builtin_can_be_edited_and_deleted_without_losing_history(api, three_models):
+    """内置项编辑沿用原 ID，删除后查询回退和历史记录各自保留。"""
+    client, pipeline = api
+    ident = 'deepseek-flash'
+    path = f'/nl2sql/model-configs/{ident}'
+    conversation = client.post('/conversations').json()['id']
+    conversation_path = f'/conversations/{conversation}'
+    assert client.put(f'{conversation_path}/model', json={'model': ident}).status_code == 200
+    body = {'label': '新模型', 'model': 'other-model', 'provider': 'mimo'}
+    edited = client.put(path, json=body)
+    assert edited.status_code == 200 and edited.json()['builtin'] is True
+    assert client.post(f'{conversation_path}/turns', json={'question': '查余额'}).status_code == 200
+    assert pipeline.requests[-1].model == '@mimo:other-model'
+    assert client.get('/health').json()['model'] == 'other-model'
+    assert client.delete(path).status_code == 204
+    assert client.delete(path).status_code == 404
+    assert client.put(path, json=body).status_code == 404
+    assert ident not in {item['id'] for item in client.get('/nl2sql/model-configs').json()['models']}
+    assert client.get('/nl2sql/models').json()['default'] == 'qwen'
+    assert client.get(f'{conversation_path}/model').json()['model'] == ident
+    assert client.get(conversation_path).json()['turn_count'] == 1
+    assert client.post(f'{conversation_path}/turns', json={'question': '继续查'}).status_code == 400
+    assert client.post('/nl2sql/query', json={'question': '查余额'}).status_code == 200
+    assert pipeline.requests[-1].model == '@dashscope:qwen3.8-flash'
+
+
+def test_custom_delete_clears_credentials_and_qwen_delete_clears_aliases(api, three_models):
+    """删除自定义密钥；被删除的百炼入口不再通过旧名称调用。"""
+    client, _ = api
+    body = {'base_url': 'https://api.example.com/v1', 'model': 'demo-model', 'api_key': 'test-connection-key'}
+    created = client.post('/nl2sql/model-configs', json=body).json()
+    route = main._resolved_model(created['id'])
+    assert client.delete(f"/nl2sql/model-configs/{created['id']}").status_code == 204
+    with pytest.raises(ValueError, match='配置已变化'):
+        config.get_llm_kwargs(model=route)
+    assert client.delete('/nl2sql/model-configs/qwen').status_code == 204
+    assert client.get('/nl2sql/model-settings/qwen').status_code == 404
+    assert client.post('/nl2sql/query', json={'question': '查余额', 'model': 'qwen3.8-flash'}).status_code == 400
 
 
 def test_every_query_endpoint_hands_the_query_switch_to_the_pipeline(api):
@@ -235,6 +448,22 @@ def test_every_query_endpoint_hands_the_chosen_model_to_the_pipeline(api, three_
     assert turn["result"]["model"] == "qwen3.8-flash"                             # 会话历史记下了这一轮用的模型
     saved = client.get(f"/conversations/{conversation_id}").json()["turns"][0]
     assert saved["result"]["model"] == "qwen3.8-flash"
+
+
+def test_builtin_dashscope_accepts_deepseek_code_and_routes_all_query_endpoints(api, three_models):
+    client, pipeline = api
+    code = "deepseek-v4-pro-0813"
+    response = client.put('/nl2sql/model-configs/qwen', json={
+        'label': '千问', 'provider': 'dashscope', 'model': code, 'enabled': True,
+    })
+    assert response.status_code == 200
+    assert response.json()['model'] == code
+    assert next(item for item in client.get('/nl2sql/models').json()['models'] if item['name'] == 'qwen')['label'] == '百炼'
+    conversation_id = client.post("/conversations").json()["id"]
+    assert client.post("/nl2sql/query", json={"question": "查余额", "model": "qwen"}).status_code == 200
+    assert client.post("/nl2sql/stream", json={"question": "查余额", "model": "qwen"}).status_code == 200
+    assert client.post(f"/conversations/{conversation_id}/turns", json={"question": "查余额", "model": "qwen"}).status_code == 200
+    assert [request.model for request in pipeline.requests] == [f"@dashscope:{code}"] * 3
 
 
 def test_a_model_that_is_not_offered_is_a_400_and_never_runs(api, three_models):
@@ -297,7 +526,7 @@ def test_tables_are_listed_by_layer_and_a_wrong_layer_is_a_400(api, mock_store):
     assert [item["table_id"] for item in tables] == [table.table_id for table in expected] and tables
     first = tables[0]
     assert set(first) == {"table_id", "table_cn", "layer", "table_type", "grain_columns", "date_column", "description",
-                          "column_count"}
+                          "column_count", "domain_code"}
     assert first["layer"] == "专题层" and first["column_count"] == len(mock_store.columns(first["table_id"]))
     assert first["description"] == expected[0].description
     assert len(client.get("/metadata/tables").json()) == len(mock_store.tables())          # 不给层级：全部表
@@ -385,10 +614,12 @@ def test_openapi_schema_lists_every_endpoint(api):
 
     assert response.status_code == 200
     paths = response.json()["paths"]
-    assert set(paths) == {"/nl2sql/query", "/nl2sql/stream", "/nl2sql/models", "/conversations",
+    assert set(paths) == {"/nl2sql/query", "/nl2sql/stream", "/nl2sql/models", "/nl2sql/model-settings/qwen", "/nl2sql/model-configs", "/nl2sql/model-configs/test", "/nl2sql/model-configs/{model_id}",
+                          "/nl2sql/model-configs/{model_id}/default", "/conversations", "/conversations/{conversation_id}/model",
                           "/conversations/{conversation_id}", "/conversations/{conversation_id}/turns",
                           "/metadata/tables", "/metadata/columns", "/metadata/search", "/metadata/lineage",
-                          "/metadata/examples", "/health"}
+                          "/metadata/examples", "/health", "/auth/me", "/auth/login", "/auth/logout",
+                          "/admin/users", "/admin/users/{user_id}", "/admin/domains"}
     assert set(paths["/conversations/{conversation_id}"]) == {"get", "patch", "delete"}
     assert "text/event-stream" in paths["/nl2sql/stream"]["post"]["responses"]["200"]["content"]
 
@@ -397,6 +628,7 @@ def test_openapi_schema_lists_every_endpoint(api):
 
 def test_health_reports_counts_executor_and_model(api, mock_store, monkeypatch):
     client, _ = api
+    monkeypatch.setattr(config, "available_models", lambda: [])
     monkeypatch.setattr(config, "get_llm_kwargs", lambda temperature=None: {"model": "test-model"})
 
     body = client.get("/health").json()

@@ -1,7 +1,7 @@
 /**
  * 查数会话的状态：当前会话、正在跑的这一轮、会话列表
  * 放在路由外层：切到元数据页再切回来，正在跑的查询和进度都还在。
- * 追问、反问的上下文由服务端从会话里算，这里只发本轮的问题和页头选的模型；服务端返回的 context 决定哪一轮的反问选项能点。
+ * 追问、反问的上下文由服务端从会话里算；模型按会话保存，发送时带上本轮选择。
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
@@ -30,6 +30,12 @@ interface ChatState {
   setExecute: (value: boolean) => void
   conversations: ConversationSummary[]
   listError: string
+  model: string | undefined
+  modelSaving: boolean
+  modelError: string
+  domain: string | undefined
+  setDomain: (value: string | undefined) => void
+  setModel: (model: string) => Promise<void>
   open: (id: string | null) => void
   ask: (question: string) => Promise<void>
   dismissPending: () => void
@@ -43,7 +49,12 @@ const ChatContext = createContext<ChatState | null>(null)
 
 export function ChatProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
-  const { model } = useModel()
+  const { models, defaultModel, refresh: refreshModels } = useModel()
+  const [chosenModel, setChosenModel] = useState<string | null>(null)
+  const [modelSaving, setModelSaving] = useState(false)
+  const [modelError, setModelError] = useState('')
+  const [domain, setDomain] = useState<string>()
+  const model = chosenModel ?? defaultModel
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
   const [loading, setLoading] = useState(false)
@@ -70,9 +81,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const load = useCallback((id: string) => {
     setLoading(true)
     setLoadError('')
-    api.conversation(id)
-      .then((value) => {
-        if (activeId.current === id) setDetail(value)
+    Promise.all([api.conversation(id), api.conversationModel(id)])
+      .then(([value, selected]) => {
+        if (activeId.current === id) { setDetail(value); setChosenModel(selected.model) }
       })
       .catch((error: unknown) => {
         if (activeId.current === id) setLoadError(errorText(error))
@@ -87,20 +98,38 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     activeId.current = id
     setConversationId(id)
     setDetail(null)
+    setChosenModel(null)
+    setDomain(undefined)
+    setModelError('')
     setLoadError('')
     setPending((current) => (current && current.conversationId === id ? current : null))
     if (id) load(id)
     else setLoading(false)
   }, [load])
 
+  const setModel = useCallback(async (name: string) => {
+    const id = activeId.current
+    setModelError('')
+    if (!id) { setChosenModel(name); return }
+    setModelSaving(true)
+    try {
+      await api.setConversationModel(id, name)
+      if (activeId.current === id) setChosenModel(name)
+    } catch (error: unknown) {
+      if (activeId.current === id) setModelError(errorText(error))
+    } finally { setModelSaving(false) }
+  }, [])
+
   const ask = useCallback(async (question: string) => {
     const text = question.trim()
-    if (!text || runningRef.current) return
+    if (!text || runningRef.current || modelSaving || !model || !models?.some((item) => item.name === model)) return
     runningRef.current = true
     setRunning(true)
     let id = activeId.current
     setPending({ conversationId: id, question: text, steps: [], startedAt: Date.now(), error: '' })
     try {
+      const selectedModel = chosenModel ?? await refreshModels()
+      if (!selectedModel) throw new Error('没有可用的默认模型，请重新选择模型。')
       if (!id) {
         const created = await api.createConversation()
         id = created.id
@@ -112,7 +141,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         refreshList()
       }
       const target = id
-      await streamTurn(target, text, model, execute, {
+      await api.setConversationModel(target, selectedModel)
+      if (activeId.current === target) setChosenModel(selectedModel)
+      await streamTurn(target, text, selectedModel, execute, {
         onStep: (step) => {
           if (activeId.current !== target) return
           setPending((current) => (current ? { ...current, steps: [...current.steps, step] } : current))
@@ -129,7 +160,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           })
           setPending(null)
         },
-      })
+      }, domain)
     } catch (error) {
       const message = errorText(error)
       if (activeId.current === id) {
@@ -140,7 +171,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setRunning(false)
       refreshList()
     }
-  }, [navigate, refreshList, model, execute])
+  }, [navigate, refreshList, refreshModels, chosenModel, model, models, modelSaving, execute, domain])
 
   const dismissPending = useCallback(() => setPending(null), [])
 
@@ -166,9 +197,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const value = useMemo<ChatState>(() => ({
     conversationId, detail, loading, loadError, pending,
     busy: running, execute, setExecute,
-    conversations, listError, open, ask, dismissPending, reloadDetail, refreshList, rename, remove,
+    conversations, listError, model, modelSaving, modelError, domain, setDomain, setModel, open, ask, dismissPending, reloadDetail, refreshList, rename, remove,
   }), [conversationId, detail, loading, loadError, pending, running, execute, conversations, listError, open, ask,
-       dismissPending, reloadDetail, refreshList, rename, remove])
+       model, modelSaving, modelError, domain, setModel, dismissPending, reloadDetail, refreshList, rename, remove])
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
 }

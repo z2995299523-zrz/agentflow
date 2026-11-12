@@ -403,6 +403,33 @@ def test_available_models_lists_the_default_first_and_only_those_with_a_key(deep
     assert config.default_model() == "qwen3.8-flash"
 
 
+def test_dashscope_models_use_the_dashscope_connection(deepseek_default):
+    config = deepseek_default
+    for name in ("qwen3.8-27b", "qwen3.8-max-0902", "qwen-plus"):
+        kwargs = config.get_llm_kwargs(0.0, name)
+        assert kwargs["model"] == name
+        assert kwargs["api_key"] == "sk-dashscope"
+        assert kwargs["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def test_custom_qwen_is_resolved_without_changing_configuration(deepseek_default):
+    config = deepseek_default
+    kwargs = config.get_llm_kwargs(0.0, "qwen-future-model")
+    assert kwargs["model"] == "qwen-future-model"
+    assert kwargs["api_key"] == "sk-dashscope"
+    assert kwargs["extra_body"] == {"enable_thinking": False}
+    with pytest.raises(ValueError, match="不认识的模型"):
+        config.get_llm_kwargs(0.0, "qwen bad")
+
+
+def test_configured_model_uses_selected_provider_even_for_another_vendor_name(deepseek_default):
+    kwargs = deepseek_default.get_llm_kwargs(0.0, '@dashscope:deepseek-v4.1-flash')
+    assert kwargs['model'] == 'deepseek-v4.1-flash'
+    assert kwargs['api_key'] == 'sk-dashscope'
+    assert kwargs['base_url'] == 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    assert kwargs['extra_body'] == {'enable_thinking': False}
+
+
 # ── 结果的对外字典 ────────────────────────────
 
 def test_public_drops_prompts_and_replies():

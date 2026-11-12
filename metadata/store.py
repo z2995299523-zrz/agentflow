@@ -40,7 +40,8 @@ CREATE TABLE meta_table (
     grain_columns TEXT NOT NULL,
     date_column   TEXT,
     description   TEXT NOT NULL DEFAULT '',
-    standard      INTEGER NOT NULL DEFAULT 1
+    standard      INTEGER NOT NULL DEFAULT 1,
+    domain_code   TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE meta_column (
     table_id    TEXT NOT NULL,
@@ -191,9 +192,9 @@ def write_store(db_path: Path, mart: Mart, vectors: VectorBundle | None = None,
         with closing(sqlite3.connect(tmp_path)) as conn:
             conn.executescript(SCHEMA_SQL)
             conn.executemany(
-                "INSERT INTO meta_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO meta_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(t.table_id, t.layer, t.schema_name, t.table_name, t.table_cn, t.table_type,
-                  ",".join(t.grain_columns), t.date_column, t.description, int(t.standard)) for t in mart.tables],
+                  ",".join(t.grain_columns), t.date_column, t.description, int(t.standard), t.domain_code) for t in mart.tables],
             )
             conn.executemany(
                 "INSERT INTO meta_column VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -267,6 +268,7 @@ def _read_store(db_path: Path) -> tuple[Mart, VectorBundle | None, str | None]:
                         date_column=row["date_column"], description=row["description"],
                         # 加「标准表」之前导入的库没有这一列，全部按标准表
                         standard=bool(row["standard"]) if "standard" in row.keys() else True,
+                        domain_code=row["domain_code"] if "domain_code" in row.keys() else "",
                     )
                     for row in conn.execute("SELECT * FROM meta_table ORDER BY rowid")
                 ],
@@ -423,7 +425,8 @@ class MetadataStore:
         self._load(*_read_store(self.db_path))
 
     @classmethod
-    def from_mart(cls, mart: Mart, vectors: VectorBundle | None = None) -> "MetadataStore":
+    def from_mart(cls, mart: Mart, vectors: VectorBundle | None = None, *,
+                  version_id: str | None = None) -> "MetadataStore":
         """直接由内存里的资料构造，不经过数据库文件
 
         导入期间校验样例、各模块的单元测试用它，省掉先写库再读回的步骤。
@@ -437,7 +440,7 @@ class MetadataStore:
         """
         store = cls.__new__(cls)
         store.db_path = None
-        store._load(mart, vectors)
+        store._load(mart, vectors, version_id)
         return store
 
     def _load(self, mart: Mart, vectors: VectorBundle | None, version_id: str | None = None) -> None:

@@ -53,6 +53,7 @@ TABLE_SHEET = SheetSpec(
         ColumnSpec("标准表", "standard",
                    help=f"设计文档里收录、口径确认过的表留空或填「是」；只在实库里有、没整理过的表填「{NOT_STANDARD}」："
                         "召回时单独排名，不占标准表的候选名额"),
+        ColumnSpec("业务域代码", "domain_code", help="填写已登记的业务域代码，留空表示待归类"),
     ),
 )
 

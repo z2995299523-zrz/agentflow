@@ -36,6 +36,16 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
 .app-body { flex: 1; min-height: 0; overflow: hidden; }
 .page-loading { height: 100%; display: flex; align-items: center; justify-content: center; }
 .service-alert { margin-bottom: 12px; }
+.sign-in-page { min-height: 100%; display: grid; place-items: center; padding: 24px; }
+.sign-in-card { width: min(100%, 440px); }
+.sign-in-card .ant-card-body { padding: clamp(20px, 5vw, 36px); }
+.sign-in-card .brand-logo { width: 36px; height: 36px; margin-bottom: 12px; }
+.account-menu { flex: 0 1 auto; min-width: 0; max-width: 145px; }
+.account-menu span { overflow: hidden; text-overflow: ellipsis; }
+.domain-grants { display: grid; gap: 10px; }
+.domain-grants .ant-card .ant-form-item { margin-bottom: 12px; }
+.grant-dates { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 175px), 1fr)); gap: 8px; }
+.grant-error { margin-top: 12px; }
 
 /* ── 查数页 ─────────────────────────────────── */
 .query-page { height: 100%; display: flex; }
@@ -160,6 +170,18 @@ code { font-family: "JetBrains Mono", Consolas, "Courier New", monospace; font-s
 .composer-box { display: flex; align-items: flex-end; gap: 10px; border: 1px solid #cbd5e1; border-radius: 10px; padding: 6px 8px 6px 4px; background: #fff; transition: border-color 0.15s, box-shadow 0.15s; }
 .composer-box:focus-within { border-color: var(--c-primary); box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.1); }
 .composer-box textarea { resize: none; }
+.composer-model { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.model-settings-page { height: 100%; overflow: auto; padding: 28px 32px; max-width: 1280px; margin: 0 auto; }
+.model-settings-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.model-settings-heading h3 { margin-top: 0; }
+.model-settings-page > .ant-alert { margin-bottom: 16px; }
+.model-settings-card { margin-top: 16px; }
+@media (max-width: 600px) {
+  .model-settings-page { padding: 20px 16px; }
+  .app-header { gap: 8px; padding: 0 8px; }
+  .app-menu { min-width: 0; }
+  .status-mart { display: none; }
+}
 .composer-foot { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; }
 .composer-hint { font-size: 12px; color: #9ca3af; }
 .composer-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--c-muted); cursor: pointer; white-space: nowrap; }

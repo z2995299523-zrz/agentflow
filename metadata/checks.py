@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import networkx as nx
 
 from metadata.loader import RawMart, RawRow
-from metadata.models import CARDINALITIES, LAYERS, STANDARD_MARKS, TABLE_TYPES, normalize_layer
+from metadata.models import CARDINALITIES, DOMAIN_CODE, LAYERS, STANDARD_MARKS, TABLE_TYPES, normalize_layer
 from metadata.template import COLUMN_SHEET, LINEAGE_SHEET, RELATION_SHEET, SHEETS, TABLE_SHEET
 
 ERROR = "错误"
@@ -144,6 +144,9 @@ def _check_tables(raw: RawMart, issues: list[Issue]) -> dict[str, RawRow]:
                                 f"表 {table_id} 重复，首次出现在第 {tables[table_id].row_no} 行"))
             continue
         tables[table_id] = row
+        domain = values.get("domain_code", "")
+        if domain and not DOMAIN_CODE.fullmatch(domain):
+            issues.append(Issue(ERROR, "M05", sheet, row.row_no, "业务域代码须为小写字母开头，可含数字、下划线和连字符"))
         if values["layer"] and normalize_layer(values["layer"]) not in LAYERS:
             issues.append(Issue(ERROR, "M05", sheet, row.row_no,
                                 f"层级「{values['layer']}」不在允许范围内（{'、'.join(LAYERS)}）"))

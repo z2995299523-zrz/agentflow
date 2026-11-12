@@ -37,6 +37,7 @@ from langgraph.graph import END, START, StateGraph
 
 from lineage.graph import LineageGraph
 from metadata.store import MetadataStore
+from nl2sql.access_scope import AccessDenied, AccessScope, DENIED
 from nl2sql.evidence import build_evidence, drop_examples, structure_store
 from nl2sql.executor import Executor, NullExecutor
 from nl2sql.explain import diagnose_unresolved, explain_previous, is_table_name, resolve_table, same_name_note
@@ -99,6 +100,7 @@ class PipelineDeps:
     structure_graph: LineageGraph | None = None       # A 组求关联路径用；None 时第一次跑 A 组再建，建好留着
     mart_dir: Path | None = None
     llm_for: Callable[[str], LLMClient] | None = None  # 按模型名取别的模型；None 时只能用 llm
+    access: AccessScope | None = None
 
 
 class PipelineState(TypedDict, total=False):
@@ -219,8 +221,8 @@ def _internal_message(error: BaseException) -> str:
     return f"内部错误：{type(error).__name__}: {error}"
 
 
-def _guarded(step: str, run: Callable[[PipelineState], tuple[dict[str, Any], str]]
-             ) -> Callable[[PipelineState], dict[str, Any]]:
+def _guarded(step: str, run: Callable[[PipelineState], tuple[dict[str, Any], str]],
+             access: AccessScope | None = None) -> Callable[[PipelineState], dict[str, Any]]:
     """把一个步骤的实现包成图里的节点
 
     - 接住 StepError：状态置为 failed，记下停在哪一步、原因，并追加它带的模型调用记录
@@ -232,7 +234,11 @@ def _guarded(step: str, run: Callable[[PipelineState], tuple[dict[str, Any], str
         started = time.perf_counter()
         label = _step_label(step, state)
         try:
+            if access:
+                access.check_current()
             updates, summary = run(state)
+        except AccessDenied:
+            raise
         except StepError as error:
             updates = {"status": STATUS_FAILED, "failed_step": error.step or step, "message": error.message,
                        "calls": list(error.calls)}
@@ -266,6 +272,8 @@ class _Steps:
         parsed, calls = parse_request(self._llm, state["request"], state["today"])
         updates: dict[str, Any] = {"parsed": parsed, "calls": calls}
         request = state["request"]
+        if self._deps.access:
+            self._deps.access.check_names(parsed.named_tables)
         if parsed.explains_previous:
             explanation = explain_previous(self._deps.store, self._deps.retriever, request.prev_basis, parsed.named_tables)
             updates.update(status=STATUS_EXPLAINED, explanation=explanation, message=explanation.summary)
@@ -409,6 +417,8 @@ class _Steps:
         """校验 SQL：期望的表和字段取自方案，方案去掉的表不能再用；
         没有错误为 ok，有错误且没修满就回去修，修满了为 unvalidated"""
         plan = state["plan"]
+        if self._deps.access and state["sql"]:
+            self._deps.access.check_sql(state["sql"])
         expected_tables = [item.table for item in plan.tables]
         expected_columns = [f"{item.table}.{item.column}" for item in plan.fields
                             if item.usage in ("metric", "dimension")]
@@ -438,6 +448,8 @@ class _Steps:
         overrides: dict[str, Any] = {}
         try:
             sql, exec_result, summary = self._finalize(state)
+        except AccessDenied:
+            raise
         except Exception as error:  # noqa: BLE001 输出是最后一步，出错也要有结果
             logger.exception("流水线的 output 步出现没有预料到的错误")
             sql, exec_result = "", None
@@ -457,10 +469,15 @@ class _Steps:
         只有 ok、配置了执行层、请求没有关掉查询（execute）才执行。摘要里只写状态、行数这类元数据，不写数据。
         """
         status = state.get("status")
+        access = self._deps.access
+        if access:
+            access.check_current()
         sql = ""
         exec_result: ExecSummary | None = None
-        if status in (STATUS_OK, STATUS_UNVALIDATED):
+        if status == STATUS_OK or (status == STATUS_UNVALIDATED and not access):
             sql = format_sql(state.get("sql", ""), self._deps.validator if status == STATUS_OK else None)
+            if access:
+                access.check_sql(sql)
         if status == STATUS_OK and state["request"].execute and getattr(self._deps.executor, "name", "none") != "none":
             exec_result = self._execute(sql)
         if status == STATUS_OK:
@@ -587,7 +604,7 @@ def build_workflow(deps: PipelineDeps, llm: LLMClient | None = None) -> Any:
     runs = {"parse": steps.parse, "recall": steps.recall, "evidence": steps.evidence, "plan": steps.plan,
             "generate": steps.generate, "validate": steps.validate}
     for step, run in runs.items():
-        graph.add_node(_node_name(step), _guarded(step, run))
+        graph.add_node(_node_name(step), _guarded(step, run, deps.access))
     graph.add_node(_node_name("output"), steps.output)
 
     def destinations(*names: str) -> dict[str, str]:
@@ -646,7 +663,13 @@ class Pipeline:
                 if self._deps.llm_for is None:
                     raise ValueError(f"这条流水线只配了模型 {default}，换不成 {model}")
                 app = self._apps[model] = build_workflow(self._deps, self._deps.llm_for(model))
-        return app, model
+                if len(self._apps) > 32:
+                    del self._apps[next(iter(self._apps))]
+        if model.startswith("@custom:"):
+            display_model = model.split(":", 3)[3]
+        else:
+            display_model = model.partition(":")[2] if model.startswith("@") else model
+        return app, display_model
 
     def run(self, request: QueryRequest) -> QueryResult:
         """跑一轮查询，不抛异常：任何错误都包成 status=failed 的结果"""
@@ -660,11 +683,19 @@ class Pipeline:
             request: 本轮请求；追问、反问的上下文由调用方放在里面；model 指定本轮用的模型
         """
         started = time.perf_counter()
+        access = self._deps.access
+        if access:
+            try:
+                access.check_current()
+                access.check_names([request.question], exact=False)
+            except AccessDenied:
+                yield QueryResult(status=STATUS_FAILED, question=request.question, message=DENIED, failed_step="parse")
+                return
         try:
             app, model = self._app_for(request.model)
         except Exception as error:  # noqa: BLE001 run、stream 不向外抛异常；模型用不了，① 就做不了
-            yield QueryResult(status=STATUS_FAILED, question=request.question, model=request.model,
-                              message=f"模型用不了：{error}", failed_step="parse",
+            yield QueryResult(status=STATUS_FAILED, question=request.question, model=None if access else request.model,
+                              message="模型暂不可用" if access else f"模型用不了：{error}", failed_step="parse",
                               elapsed_ms=int((time.perf_counter() - started) * 1000),
                               metadata_version=self._deps.store.version_id)
             return
@@ -683,13 +714,25 @@ class Pipeline:
                         continue
                     calls.extend(update.get("calls", ()))
                     for step in update.get("trace", ()):
+                        if access:
+                            access.check_current()
+                            step = step.model_copy(update={"summary": ""})
                         trace.append(step)
                         yield step
                     if "result" in update:
                         result = update["result"]
+            if access:
+                access.check_current()
+                if result is not None:
+                    access.check_names([result.model_dump_json(exclude={"question", "calls"})], exact=False)
+                    result = result.model_copy(update={"trace": trace})
+        except AccessDenied:
+            yield QueryResult(status=STATUS_FAILED, question=request.question, message=DENIED, failed_step="validate",
+                              trace=trace, metadata_version=self._deps.store.version_id, model=model)
+            return
         except Exception as error:  # noqa: BLE001 run、stream 不向外抛异常
             logger.exception("流水线运行出错")
-            result, failure = None, error
+            result, failure = None, "查询处理失败" if access else error
         if result is None:
             result = _failure(request, failure, trace, calls, started, self.deps.store.version_id, model)
         yield result

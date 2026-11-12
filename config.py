@@ -3,6 +3,7 @@ AgentFlow 配置管理
 从 .env 文件读取，兼容 Hermes 已有的 DeepSeek / DashScope Key
 """
 import os
+import re
 from dataclasses import dataclass
 
 # ⚠️ 必须在所有其他 import 之前设置（huggingface_hub 读取此变量）
@@ -55,6 +56,11 @@ MODEL_CHOICES: tuple[ModelChoice, ...] = (
     ModelChoice("gpt-6.1-terra", "GPT-6.1 Terra", "openai"),          # 服务器连不上 OpenAI，只有本机走代理能用
 )
 
+
+def model_choices() -> tuple[ModelChoice, ...]:
+    """返回内置模型。"""
+    return MODEL_CHOICES
+
 # ============================================
 # NL2SQL 专题库配置
 # ============================================
@@ -69,6 +75,11 @@ TEST_DATA_DB = os.getenv("TEST_DATA_DB", "")
 # 查询流水线单次模型调用的超时，秒
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "120"))
 
+# 权限默认开启，离线单用户模式须显式配置。模型许可由受信任的运行配置维护。
+ACCESS_CONTROL_ENABLED = os.getenv("ACCESS_CONTROL_ENABLED", "true").lower() not in {"0", "false", "off"}
+ACCESS_DB = os.getenv("ACCESS_DB", "")
+ACCESS_MODEL_IDS = frozenset(filter(None, (part.strip() for part in os.getenv("ACCESS_MODEL_IDS", "").split(","))))
+
 # ============================================
 # 服务配置
 # ============================================
@@ -82,15 +93,17 @@ def default_model() -> str:
 
 
 def model_choice(name: str) -> ModelChoice:
-    """按模型名取 MODEL_CHOICES 里的一项
+    """按模型名取配置项，千问型号可由服务端配置指定。
 
     Raises:
         ValueError: 不认识的模型
     """
-    for choice in MODEL_CHOICES:
+    for choice in model_choices():
         if choice.name == name:
             return choice
-    raise ValueError(f"不认识的模型：{name}，可选：{'、'.join(choice.name for choice in MODEL_CHOICES)}")
+    if re.fullmatch(r"qwen[a-zA-Z0-9._-]{1,95}", name):
+        return ModelChoice(name, f"千问 {name}", "dashscope")
+    raise ValueError(f"不认识的模型：{name}，可选：{'、'.join(choice.name for choice in model_choices())}")
 
 
 def _api_key(provider: str) -> str:
@@ -115,10 +128,16 @@ def _thinking_off(provider: str, model: str) -> dict | None:
 def available_models() -> list[ModelChoice]:
     """界面上能选的模型：默认模型排第一，其余按 MODEL_CHOICES 的顺序；没配 Key 的不列"""
     default = default_model()
-    labels = {choice.name: choice.label for choice in MODEL_CHOICES}
+    choices = model_choices()
+    labels = {choice.name: choice.label for choice in choices}
     first = ModelChoice(default, labels.get(default, default), LLM_PROVIDER)
-    rest = [choice for choice in MODEL_CHOICES if choice.name != default]
+    rest = [choice for choice in choices if choice.name != default]
     return [choice for choice in (first, *rest) if _api_key(choice.provider)]
+
+
+def valid_model_code(model: str) -> bool:
+    """校验服务商模型代码的格式。"""
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,99}", model))
 
 
 def get_llm_kwargs(temperature: float | None = None, model: str | None = None):
@@ -136,7 +155,17 @@ def get_llm_kwargs(temperature: float | None = None, model: str | None = None):
     Raises:
         ValueError: 服务商不支持、模型不认识，或者没配 Key
     """
-    if model is None or model == default_model():
+    if model and model.startswith("@custom:"):
+        from nl2sql.model_settings import custom_model_connection
+
+        _, model_id, revision, name = model.split(":", 3)
+        return {**custom_model_connection(model_id, revision, name), "model": name,
+                "temperature": 0.7 if temperature is None else temperature}
+    if model and model.startswith("@"):
+        provider, separator, name = model[1:].partition(":")
+        if not separator or provider not in PROVIDERS or not valid_model_code(name):
+            raise ValueError("模型配置无效")
+    elif model is None or model == default_model():
         provider, name = LLM_PROVIDER, default_model()
     else:
         choice = model_choice(model)

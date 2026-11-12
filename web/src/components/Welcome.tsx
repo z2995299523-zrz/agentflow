@@ -21,16 +21,17 @@ const TIPS = [
   '一轮问完可以接着追问，比如「换成上个月末」「只看前十名」',
 ]
 
-export default function Welcome({ onPick }: { onPick: (text: string) => void }) {
+export default function Welcome({ onPick, domain }: { onPick: (text: string) => void; domain?: string }) {
   const [examples, setExamples] = useState<ExampleInfo[]>([])
 
   useEffect(() => {
     let cancelled = false
-    api.examples(6)
+    setExamples([])
+    api.examples(6, domain)
       .then((items) => { if (!cancelled) setExamples(items) })
       .catch(() => { if (!cancelled) setExamples([]) })
     return () => { cancelled = true }
-  }, [])
+  }, [domain])
 
   return (
     <div className="welcome">
@@ -50,7 +51,7 @@ export default function Welcome({ onPick }: { onPick: (text: string) => void }) 
       <div className="welcome-tips">
         {examples.length > 0 ? (
           <>
-            <div className="tips-title">样例库里的问法，点一下放进输入框</div>
+            <div className="tips-title">参考问法，点一下放进输入框</div>
             <div className="suggestions">
               {examples.map((example) => (
                 <button type="button" key={example.example_id} className="suggestion" onClick={() => onPick(example.requirement)}>

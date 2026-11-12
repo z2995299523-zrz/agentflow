@@ -230,7 +230,8 @@ class SQLiteExecutor:
 
     name = "sqlite"
 
-    def __init__(self, db_path: Path, source_dialect: str = DEFAULT_DIALECT) -> None:
+    def __init__(self, db_path: Path, source_dialect: str = DEFAULT_DIALECT, *,
+                 allowed_tables: frozenset[str] | None = None) -> None:
         """
         Args:
             db_path: 测试数据文件
@@ -238,6 +239,14 @@ class SQLiteExecutor:
         """
         self.db_path = Path(db_path)
         self.source_dialect = source_dialect
+        self.allowed_tables = allowed_tables
+
+    def _authorize(self, action: int, table: str | None, column: str | None,
+                   database: str | None, source: str | None) -> int:
+        if self.allowed_tables is not None and action == sqlite3.SQLITE_READ:
+            if database not in {"main", None} or table not in self.allowed_tables:
+                return sqlite3.SQLITE_DENY
+        return _sqlite_authorizer(action)
 
     def execute(self, sql: str, max_rows: int | None = DEFAULT_MAX_ROWS,
                 timeout_s: float | None = DEFAULT_TIMEOUT_S) -> ExecResult:
@@ -267,7 +276,7 @@ class SQLiteExecutor:
                 connection.create_function("date_trunc", 2, _date_trunc, deterministic=True)
                 connection.create_function("regexp", 2, _regexp, deterministic=True)
                 connection.create_function("regexp_replace", 3, _regexp_replace, deterministic=True)
-                connection.set_authorizer(_sqlite_authorizer)
+                connection.set_authorizer(self._authorize)
                 if deadline is not None:
                     connection.set_progress_handler(lambda: time.perf_counter() > deadline, SQLITE_PROGRESS_STEPS)
                 columns, rows, truncated = _run(connection, statements[0], max_rows)

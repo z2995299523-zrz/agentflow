@@ -9,11 +9,18 @@ import type {
   ExampleInfo,
   Health,
   LineageInfo,
+  LoginState,
+  ManagedUser,
   ModelList,
+  ModelConfig,
+  ModelConfigInput,
+  ModelConfigs,
+  ModelConnectionTest,
   SearchResult,
   TableInfo,
   TraceStep,
   TurnEvent,
+  UserAdministration,
 } from './types'
 
 const API_BASE = '/api'
@@ -53,12 +60,15 @@ async function send(path: string, init?: RequestInit): Promise<Response> {
   try {
     response = await fetch(`${API_BASE}${path}`, {
       ...init,
-      headers: { 'Content-Type': 'application/json', ...init?.headers },
+      headers: { 'Content-Type': 'application/json', 'X-AgentFlow-Request': '1', ...init?.headers },
     })
   } catch (error) {
     throw new ApiError(0, `连不上接口服务：${(error as Error).message}`)
   }
-  if (!response.ok) throw await toApiError(response)
+  if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event('agentflow-session-expired'))
+    throw await toApiError(response)
+  }
   return response
 }
 
@@ -126,8 +136,8 @@ export interface TurnHandlers {
  * model 不传用默认模型；execute 为 false 时只生成 SQL，不查结果
  */
 export async function streamTurn(conversationId: string, question: string, model: string | undefined, execute: boolean,
-                                 handlers: TurnHandlers): Promise<void> {
-  const response = await send(`/conversations/${encodeURIComponent(conversationId)}/turns`, {
+                                 handlers: TurnHandlers, domain?: string): Promise<void> {
+  const response = await send(`/conversations/${encodeURIComponent(conversationId)}/turns${query({ domain })}`, {
     method: 'POST',
     body: JSON.stringify({ question, model, execute }),
     headers: { Accept: 'text/event-stream' },
@@ -155,12 +165,40 @@ export async function streamTurn(conversationId: string, question: string, model
 // ── 普通接口 ──────────────────────────────────────
 
 export const api = {
+  me: () => getJson<LoginState>('/auth/me'),
+  login: (username: string, password: string) =>
+    getJson<LoginState>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  logout: () => getJson<void>('/auth/logout', { method: 'POST' }),
+  administration: () => getJson<UserAdministration>('/admin/users'),
+  saveUser: (user: Omit<ManagedUser, 'id'> & { password: string }, id?: string) =>
+    getJson<ManagedUser>(id ? `/admin/users/${encodeURIComponent(id)}` : '/admin/users', {
+      method: id ? 'PUT' : 'POST', body: JSON.stringify(user),
+    }),
+  saveDomain: (code: string, name: string) =>
+    getJson<void>('/admin/domains', { method: 'PUT', body: JSON.stringify({ code, name }) }),
   health: () => getJson<Health>('/health'),
   models: () => getJson<ModelList>('/nl2sql/models'),
+  qwenSettings: () => getJson<{ model: string }>('/nl2sql/model-settings/qwen'),
+  saveQwenSettings: (model: string) => getJson<{ model: string }>('/nl2sql/model-settings/qwen', { method: 'PUT', body: JSON.stringify({ model }) }),
+  modelConfigs: () => getJson<ModelConfigs>('/nl2sql/model-configs'),
+  saveModelConfig: (value: ModelConfigInput, id?: string) =>
+    getJson<ModelConfig>(id ? `/nl2sql/model-configs/${encodeURIComponent(id)}` : '/nl2sql/model-configs', {
+      method: id ? 'PUT' : 'POST', body: JSON.stringify(value),
+    }),
+  testModelConnection: (value: ModelConfigInput, id?: string) =>
+    getJson<ModelConnectionTest>('/nl2sql/model-configs/test', {
+      method: 'POST', body: JSON.stringify({ ...value, id }),
+    }),
+  deleteModelConfig: (id: string) =>
+    getJson<void>(`/nl2sql/model-configs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  setDefaultModel: (id: string) =>
+    getJson<void>(`/nl2sql/model-configs/${encodeURIComponent(id)}/default`, { method: 'PUT' }),
 
   conversations: (limit = 100) => getJson<ConversationSummary[]>(`/conversations${query({ limit })}`),
   createConversation: () => getJson<ConversationSummary>('/conversations', { method: 'POST', body: '{}' }),
   conversation: (id: string) => getJson<ConversationDetail>(`/conversations/${encodeURIComponent(id)}`),
+  conversationModel: (id: string) => getJson<{ model: string | null }>(`/conversations/${encodeURIComponent(id)}/model`),
+  setConversationModel: (id: string, model: string) => getJson<{ model: string }>(`/conversations/${encodeURIComponent(id)}/model`, { method: 'PUT', body: JSON.stringify({ model }) }),
   renameConversation: (id: string, title: string) =>
     getJson<ConversationSummary>(`/conversations/${encodeURIComponent(id)}`, {
       method: 'PATCH',
@@ -174,7 +212,7 @@ export const api = {
   search: (q: string, limit = 50) => getJson<SearchResult>(`/metadata/search${query({ q, limit })}`),
   lineage: (table: string, column: string, depth: number) =>
     getJson<LineageInfo>(`/metadata/lineage${query({ table, column, depth })}`),
-  examples: (limit = 6) => getJson<ExampleInfo[]>(`/metadata/examples${query({ limit })}`),
+  examples: (limit = 6, domain?: string) => getJson<ExampleInfo[]>(`/metadata/examples${query({ limit, domain })}`),
 }
 
 /** 错误转成给人看的一句话 */

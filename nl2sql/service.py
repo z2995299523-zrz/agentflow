@@ -11,15 +11,17 @@
 - describe_lineage：一个字段的上游、下游链路；search_metadata：按关键字找表和字段；元数据接口共用
 """
 import logging
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import config
+from nl2sql import model_settings
 from lineage.graph import Hop, LineageGraph
 from metadata.importer import default_db_path
-from metadata.index import BGE_NAME, BgeEmbedder, Embedder, HashEmbedder
+from metadata.index import BGE_NAME, BGE_ONNX_DIR_ENV, BgeEmbedder, Embedder, HashEmbedder, onnx_bge_embedder
 from metadata.models import LAYERS, ColumnMeta, TableMeta
 from metadata.store import MetadataStore
 from metadata.testdata import default_path as default_test_data_path
@@ -61,6 +63,8 @@ def embedder_for(store: MetadataStore) -> Embedder | None:
     """
     name = store.embedder_name
     if name == BGE_NAME:
+        if model_dir := os.getenv(BGE_ONNX_DIR_ENV, '').strip():
+            return onnx_bge_embedder(model_dir)
         return BgeEmbedder()
     if name is not None and name.startswith(HASH_EMBEDDER_PREFIX):
         try:
@@ -118,6 +122,8 @@ def model_client(model: str) -> LLMClient:
         client = ChatModelClient(timeout=config.LLM_TIMEOUT, model=model)
         with _LOCK:
             client = _clients.setdefault(model, client)
+            if len(_clients) > 32:
+                del _clients[next(iter(_clients))]
     return client
 
 
@@ -125,6 +131,10 @@ def _assemble(store: MetadataStore, graph: LineageGraph, mart_dir: Path, llm: LL
               executor_kind: str | None, model: str | None = None) -> Pipeline:
     """用已经读好的元数据装配流水线。容易失败的先做（没配 Key、执行层名字不对），建召回索引放在最后"""
     if llm is None:
+        if model is None and not config._api_key(config.LLM_PROVIDER):
+            choice = model_settings.default_choice(model_settings.model_catalog(selectable=True))
+            if choice is not None:
+                model = model_settings.model_route(choice)
         llm = ChatModelClient(timeout=config.LLM_TIMEOUT, model=model)
     executor = _make_executor(executor_kind or config.EXECUTOR, mart_dir)
     retriever = Retriever(store, graph, embedder_for(store))
@@ -281,8 +291,9 @@ def get_pipeline() -> Pipeline:
     with _ASSEMBLE_LOCK:
         store, graph = get_metadata()
         with _LOCK:
-            if _pipeline is not None and _metadata is not None and _metadata[0] is store:
-                return _pipeline
+            cached = _pipeline if _metadata is not None and _metadata[0] is store else None
+        if cached is not None:
+            return cached
         pipeline = _assemble(store, graph, Path(config.MART_DIR), None, None)
         with _LOCK:
             if _metadata is not None and _metadata[0] is store:
@@ -411,7 +422,8 @@ def table_summary(store: MetadataStore, table: TableMeta) -> dict[str, Any]:
     """表清单里的一项：表标识、中文名、层级、类型、粒度字段、数据日期字段、说明、字段数"""
     return {"table_id": table.table_id, "table_cn": table.table_cn, "layer": table.layer,
             "table_type": table.table_type, "grain_columns": table.grain_columns, "date_column": table.date_column,
-            "description": table.description, "column_count": len(store.columns(table.table_id))}
+            "description": table.description, "column_count": len(store.columns(table.table_id)),
+            "domain_code": table.domain_code}
 
 
 def column_summaries(store: MetadataStore, graph: LineageGraph, table: str) -> list[dict[str, Any]]:

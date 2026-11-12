@@ -2,7 +2,11 @@
 元数据数据模型
 一套专题库资料（表、字段、血缘、关联关系、加工脚本、样例）在内存里的标准表示
 """
+import re
+
 from pydantic import BaseModel, ConfigDict, Field
+
+DOMAIN_CODE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 # 允许的取值范围，模板说明和导入校验共用
 # 层级从下到上：贴源层（ODS）、标准层（DWD）、汇总层（DWS）、专题层（DM）；查数用表从上往下取，上层能满足就不用下层
@@ -55,6 +59,7 @@ class TableMeta(BaseModel):
     date_column: str | None = None   # 数据日期字段，快照表必填
     description: str = ""
     standard: bool = True            # 标准表；False 是设计文档没收录的表，召回时单独排名、不占标准表的名额
+    domain_code: str = ""            # 业务域代码；空值表示待归类
 
 
 class ColumnMeta(BaseModel):
