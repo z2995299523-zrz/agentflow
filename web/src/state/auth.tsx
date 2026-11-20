@@ -60,7 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <main className="sign-in-page">
       <Card className="sign-in-card">
         <img src="/favicon.svg" alt="" className="brand-logo" />
-        <Typography.Title level={2}>专题库查数副驾驶</Typography.Title>
+        <Typography.Title level={2}>数仓查数助手</Typography.Title>
         <Typography.Paragraph type="secondary">登录后使用已授权的业务数据。</Typography.Paragraph>
         {error && <Alert showIcon type="error" title={error} className="service-alert" />}
         {session ? <Form form={form} layout="vertical" onFinish={(value) => void login(value)}>

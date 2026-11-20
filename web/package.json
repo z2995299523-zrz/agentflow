@@ -2,7 +2,7 @@
   "name": "agentflow-web",
   "private": true,
   "version": "1.0.0",
-  "description": "专题库查数副驾驶的前端：查数页、元数据页",
+  "description": "数仓查数助手的前端：查数页、元数据页",
   "type": "module",
   "scripts": {
     "dev": "vite",

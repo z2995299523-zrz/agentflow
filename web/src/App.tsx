@@ -25,7 +25,7 @@ function Header() {
     <header className="app-header">
       <Link to="/" className="brand">
         <img src="/favicon.svg" alt="" className="brand-logo" />
-        <span className="brand-name">专题库查数副驾驶</span>
+        <span className="brand-name">数仓查数助手</span>
       </Link>
       <Menu
         mode="horizontal"
