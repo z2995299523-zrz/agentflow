@@ -9,8 +9,8 @@
 | 项目 | 值 |
 | --- | --- |
 | 本机项目 | `D:\agentflow` |
-| Git 远程 | `git@github.com:z2995299523-zrz/agentflow.git` |
-| 服务器拉取地址 | `https://github.com/z2995299523-zrz/agentflow.git` |
+| Git SSH 地址 | `git@github.com:z2995299523-zrz/warehouse-nl2sql.git` |
+| 服务器拉取地址 | `https://github.com/z2995299523-zrz/warehouse-nl2sql.git` |
 | 部署分支 | `codex/agentflow-server-deploy`，实际部署仍以完整提交 SHA 为准 |
 | 系统 | Ubuntu 24.04，Python 3.12 |
 | SSH | `<SSH用户>@<服务器IP>`，端口 22 |

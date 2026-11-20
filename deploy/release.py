@@ -25,7 +25,7 @@ SITE_PATH = Path("/etc/agentflow/site.json")
 SITE_KEYS = ("public_url", "server_name", "cert_dir", "uv", "watch_units")
 NGINX_SITE = Path("/etc/nginx/sites-available/agentflow")
 ACCESS_CONF = Path("/etc/nginx/agentflow-access.conf")
-REMOTE = "https://github.com/z2995299523-zrz/agentflow.git"
+REMOTE = "https://github.com/z2995299523-zrz/warehouse-nl2sql.git"
 
 
 def load_site(path: Path = SITE_PATH) -> dict:

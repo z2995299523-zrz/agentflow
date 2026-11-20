@@ -1,4 +1,4 @@
-# 数仓查数助手（AgentFlow）
+# 数仓查数助手 · Warehouse NL2SQL
 
 基于数据字典和字段血缘，把业务人员的自然语言需求转成可审核的 GaussDB / PostgreSQL 查询 SQL。界面同时展示统计口径、用表依据、关联条件和校验结果，方便数据开发复核后使用。
 
@@ -102,6 +102,6 @@ cd web && npm run build
 | `data/mock_mart/`、`eval/` | 银行对公模拟专题库、题库和评估 |
 | `tests/`、`notes/`、`deploy/` | 单元测试、技术笔记和发布说明 |
 
-原文档问答版本见 [`v1-agentflow` 标签](../../tree/v1-agentflow)。
+原文档问答版本见 [`v1-agentflow` 标签](https://github.com/z2995299523-zrz/warehouse-nl2sql/tree/v1-agentflow)。
 
 **张润泽** · 6 年银行对公数据开发经验，关注数仓元数据、指标口径与 AI 查数。[GitHub 主页](https://github.com/z2995299523-zrz)
